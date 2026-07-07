@@ -2209,7 +2209,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: cbd4f711e82cd2d47bb5e624a9d8892e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  key: 60
+  actionName: menu
   enableObject: {fileID: 387260458}
   enableMouse: 1
 --- !u!1 &2050668558

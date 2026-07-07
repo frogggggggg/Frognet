@@ -1,52 +1,258 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
-using PurrNet;
 using PurrNet.Prediction;
 
-public class PlayerMovement : PredictedIdentity<PlayerMovement.Input, PlayerMovement.State>
+[RequireComponent(typeof(Rigidbody), typeof(PredictedRigidbody))]
+public sealed class PlayerMovement
+    : PredictedIdentity<PlayerMovement.Input, PlayerMovement.State>
 {
-    [SerializeField] private PredictedRigidbody rb;
-    [SerializeField] private Transform visual;
-    [SerializeField] private float speed = 5f;
-    [SerializeField] private float speedSmoothing = 0f;
-    [SerializeField] private float rotationSmoothing = 0f;
+    [Header("References")]
+    [SerializeField] private Rigidbody rb;
 
+    [Tooltip("A child beneath the PredictedTransform Graphics object.")]
+    [SerializeField] private Transform rotationPivot;
 
-    protected override void Simulate(Input input, ref State state, float delta)
+    [Header("Movement")]
+    [SerializeField, Min(0f)] private float maxSpeed = 5f;
+
+    [Tooltip("Units per second squared. Set to 0 for instant acceleration.")]
+    [SerializeField, Min(0f)] private float acceleration = 30f;
+
+    [Tooltip("Units per second squared. Set to 0 for instant stopping.")]
+    [SerializeField, Min(0f)] private float deceleration = 40f;
+
+    [Tooltip("Degrees per second. Set to 0 for instant rotation.")]
+    [SerializeField, Min(0f)] private float rotationSpeed = 720f;
+
+    private Rigidbody Body
     {
-        if(input.direction != Vector3.zero){
-            visual.forward = Vector3.Slerp(visual.forward, input.direction, rotationSmoothing * Time.deltaTime);
+        get
+        {
+            if (rb == null)
+                rb = GetComponent<Rigidbody>();
+
+            return rb;
         }
+    }
 
-        Vector3 targetSpeed = input.direction * speed + new Vector3(0f, rb.linearVelocity.y, 0f);
+    private void Awake()
+    {
+        Rigidbody body = Body;
 
-        Vector3 targetVelocity = speedSmoothing > 0
-            ? Vector3.Lerp(rb.linearVelocity, targetSpeed, speedSmoothing * Time.fixedDeltaTime)
-            : targetSpeed;
-        rb.AddForce(targetVelocity - rb.linearVelocity, ForceMode.VelocityChange);
+        // The physics/prediction root should never rotate.
+        body.constraints |=
+            RigidbodyConstraints.FreezeRotationX |
+            RigidbodyConstraints.FreezeRotationY |
+            RigidbodyConstraints.FreezeRotationZ;
+    }
+
+    private void Reset()
+    {
+        rb = GetComponent<Rigidbody>();
+
+        if (rb != null)
+        {
+            rb.constraints |=
+                RigidbodyConstraints.FreezeRotationX |
+                RigidbodyConstraints.FreezeRotationY |
+                RigidbodyConstraints.FreezeRotationZ;
+        }
+    }
+
+    protected override State GetInitialState()
+    {
+        float initialYaw = rotationPivot != null
+            ? rotationPivot.localEulerAngles.y
+            : 0f;
+
+        return new State
+        {
+            yaw = initialYaw
+        };
+    }
+
+    protected override void GetUnityState(ref State state)
+    {
+        /*
+         * Do not read rotationPivot here.
+         *
+         * rotationPivot represents the interpolated visual state, not the
+         * simulation state. Reading it here would feed visual interpolation
+         * back into prediction.
+         */
+    }
+
+    protected override void SetUnityState(State state)
+    {
+        /*
+         * The pivot is presentation-only and is applied in UpdateView.
+         * There is no Unity simulation component to restore for yaw.
+         */
     }
 
     protected override void GetFinalInput(ref Input input)
     {
-        Vector3 tempDirection = Vector3.zero;
-        if (Keyboard.current != null)
+        input.movement = InputSystem.actions["movement"].ReadValue<Vector2>();
+        input.jump = InputSystem.actions["jump"].triggered;
+
+        input.cameraYaw = PlayerCamera.Instance != null
+            ? PlayerCamera.Instance.yRotation
+            : 0f;
+    }
+
+    protected override void SanitizeInput(ref Input input)
+    {
+        if (!IsFinite(input.movement))
+            input.movement = Vector2.zero;
+
+        input.movement =
+            Vector2.ClampMagnitude(input.movement, 1f);
+
+        if (!IsFinite(input.cameraYaw))
+            input.cameraYaw = 0f;
+    }
+
+    protected override void Simulate(
+        Input input,
+        ref State state,
+        float delta)
+    {
+        Vector3 localDirection = new Vector3(
+            input.movement.x,
+            0f,
+            input.movement.y);
+
+        Quaternion cameraRotation =
+            Quaternion.Euler(0f, input.cameraYaw, 0f);
+
+        Vector3 worldDirection =
+            cameraRotation * localDirection;
+
+        UpdateVelocity(Body, worldDirection, delta);
+        UpdateFacing(worldDirection, ref state, delta);
+    }
+
+    private void UpdateVelocity(
+        Rigidbody body,
+        Vector3 direction,
+        float delta)
+    {
+        Vector3 currentPlanarVelocity = new Vector3(
+            body.linearVelocity.x,
+            0f,
+            body.linearVelocity.z);
+
+        Vector3 targetPlanarVelocity =
+            direction * maxSpeed;
+
+        float changeRate =
+            direction.sqrMagnitude > 0.0001f
+                ? acceleration
+                : deceleration;
+
+        Vector3 nextPlanarVelocity;
+
+        if (changeRate <= 0f)
         {
-            tempDirection.x = (Keyboard.current.dKey.isPressed ? 1 : 0) - (Keyboard.current.aKey.isPressed ? 1 : 0);
-            tempDirection.z = (Keyboard.current.wKey.isPressed ? 1 : 0) - (Keyboard.current.sKey.isPressed ? 1 : 0);
+            nextPlanarVelocity = targetPlanarVelocity;
         }
-        tempDirection = Quaternion.Euler(0f, PlayerCamera.Instance.yRotation, 0f) * tempDirection;
-        if (tempDirection.sqrMagnitude > 1f) tempDirection = tempDirection.normalized;
-        input.direction = tempDirection;
+        else
+        {
+            nextPlanarVelocity = Vector3.MoveTowards(
+                currentPlanarVelocity,
+                targetPlanarVelocity,
+                changeRate * delta);
+        }
+
+        Vector3 velocityChange =
+            nextPlanarVelocity - currentPlanarVelocity;
+
+        body.AddForce(
+            velocityChange,
+            ForceMode.VelocityChange);
+    }
+
+    private void UpdateFacing(
+        Vector3 direction,
+        ref State state,
+        float delta)
+    {
+        if (direction.sqrMagnitude <= 0.0001f)
+            return;
+
+        float targetYaw =
+            Mathf.Atan2(direction.x, direction.z) *
+            Mathf.Rad2Deg;
+
+        float yawDifference =
+            Mathf.DeltaAngle(state.yaw, targetYaw);
+
+        if (rotationSpeed <= 0f)
+        {
+            // Add the shortest difference instead of assigning targetYaw.
+            // This prevents 359 -> 0 interpolation from rotating backward.
+            state.yaw += yawDifference;
+        }
+        else
+        {
+            float maximumChange =
+                rotationSpeed * delta;
+
+            state.yaw += Mathf.Clamp(
+                yawDifference,
+                -maximumChange,
+                maximumChange);
+        }
+    }
+
+    protected override void UpdateView(
+        State viewState,
+        State? verified)
+    {
+        if (rotationPivot == null)
+            return;
+
+        // Only the visual pivot rotates.
+        // The physics root and PredictionGraphics remain unrotated.
+        rotationPivot.localRotation =
+            Quaternion.Euler(0f, viewState.yaw, 0f);
+    }
+
+    private static bool IsFinite(Vector2 value)
+    {
+        return
+            IsFinite(value.x) &&
+            IsFinite(value.y);
+    }
+
+    private static bool IsFinite(float value)
+    {
+        return
+            !float.IsNaN(value) &&
+            !float.IsInfinity(value);
     }
 
     public struct State : IPredictedData<State>
     {
-        public void Dispose() {}
+        /*
+         * This is intentionally allowed to exceed 360 degrees.
+         * Keeping it continuous prevents interpolation problems around
+         * the 0/360 boundary.
+         */
+        public float yaw;
+
+        public void Dispose()
+        {
+        }
     }
 
     public struct Input : IPredictedData
     {
-        public Vector3 direction;
-        public void Dispose() {}
+        public Vector2 movement;
+        public float cameraYaw;
+        public bool jump;
+        public void Dispose()
+        {
+        }
     }
 }
