@@ -5,7 +5,8 @@ using TMPro;
 
 public class Bind : MonoBehaviour, IPointerClickHandler
 {
-    public InputAction Value;
+    public InputAction value;
+    public int bindingIndex;
     public TMP_Text tmpText;
     public string pendingBindingPath;
     public string pendingBindingDisplay;
@@ -25,7 +26,7 @@ public class Bind : MonoBehaviour, IPointerClickHandler
 
     public void StartRebinding()
     {
-        if (Value == null)
+        if (value == null)
         {
             Debug.LogWarning("Bind: InputAction is not assigned.");
             return;
@@ -40,12 +41,12 @@ public class Bind : MonoBehaviour, IPointerClickHandler
 
         SetBindingText("-");
 
-        if (Value.bindings.Count == 0)
+        if (value.bindings.Count == 0)
         {
-            Value.AddBinding();
+            value.AddBinding();
         }
 
-        rebindOperation = Value.PerformInteractiveRebinding()
+        rebindOperation = value.PerformInteractiveRebinding(ResolveBindingIndex())
             .WithControlsExcluding("<Pointer>/position")
             .WithControlsExcluding("<Pointer>/delta")
             .OnMatchWaitForAnother(0.1f)
@@ -89,15 +90,46 @@ public class Bind : MonoBehaviour, IPointerClickHandler
 
     public void CommitPendingBinding()
     {
-        if (Value == null || string.IsNullOrEmpty(pendingBindingPath))
+        if (value == null || string.IsNullOrEmpty(pendingBindingPath))
             return;
 
-        if (Value.bindings.Count == 0)
+        if (value.bindings.Count == 0)
         {
-            Value.AddBinding();
+            value.AddBinding();
         }
 
-        Value.ApplyBindingOverride(0, pendingBindingPath);
+        value.ApplyBindingOverride(ResolveBindingIndex(), pendingBindingPath);
+    }
+
+    public void ApplySeedBinding(string bindingPath)
+    {
+        if (value == null || string.IsNullOrEmpty(bindingPath))
+            return;
+
+        if (rebindOperation != null)
+        {
+            rebindOperation.Cancel();
+            rebindOperation.Dispose();
+            rebindOperation = null;
+        }
+
+        if (value.bindings.Count == 0)
+        {
+            value.AddBinding();
+        }
+
+        pendingBindingPath = bindingPath;
+        pendingBindingDisplay = bindingPath;
+        value.ApplyBindingOverride(ResolveBindingIndex(), bindingPath);
+        SetBindingText(GetCurrentBindingDisplay());
+    }
+
+    private int ResolveBindingIndex()
+    {
+        if (value == null || bindingIndex < 0 || bindingIndex >= value.bindings.Count)
+            return 0;
+
+        return bindingIndex;
     }
 
     private void SetBindingText(string text)
@@ -108,14 +140,14 @@ public class Bind : MonoBehaviour, IPointerClickHandler
 
     private string GetCurrentBindingDisplay()
     {
-        if (Value == null)
+        if (value == null)
             return string.Empty;
 
-        var action = Value;
+        var action = value;
         if (action.bindings.Count == 0)
             return string.Empty;
 
-        return action.bindings[0].ToDisplayString();
+        return action.bindings[ResolveBindingIndex()].ToDisplayString();
     }
 
     private void OnDisable()

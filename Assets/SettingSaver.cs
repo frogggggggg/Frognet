@@ -1,18 +1,21 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
+using TMPro;
 using UnityEngine;
-using UnityEngine.InputSystem;
+using UnityEngine.UI;
 
-[Serializable]
 public class SettingSaver : MonoBehaviour
 {
     public string saveFileName = "setting_values.json";
     public SettingDesigner settingDesigner;
+    public SettingDesignerApplier settingApplier;
 
     [Serializable]
     public class BindSaveData
     {
+        public string key;
         public string gameObjectName;
         public string actionName;
         public string bindingPath;
@@ -20,52 +23,97 @@ public class SettingSaver : MonoBehaviour
     }
 
     [Serializable]
+    public class ValueSaveData
+    {
+        public string key;
+        public float number;
+        public bool flag;
+    }
+
+    [Serializable]
     public class SettingFileData
     {
         public List<BindSaveData> bindData = new List<BindSaveData>();
+        public List<ValueSaveData> sliderData = new List<ValueSaveData>();
+        public List<ValueSaveData> dropdownData = new List<ValueSaveData>();
+        public List<ValueSaveData> toggleData = new List<ValueSaveData>();
     }
 
     public void ApplyPendingBindings()
     {
-        foreach (var bind in FindObjectsOfType<Bind>())
+        foreach (var entry in CollectKeyed<Bind>())
         {
-            if (!string.IsNullOrEmpty(bind.pendingBindingPath))
+            if (!string.IsNullOrEmpty(entry.Value.pendingBindingPath))
             {
-                bind.CommitPendingBinding();
+                entry.Value.CommitPendingBinding();
             }
         }
     }
 
-    public void SaveBindingsToFile(string relativePath = null)
+    public void SaveSettingsToFile(string relativePath = null)
     {
-        var path = string.IsNullOrEmpty(relativePath)
-            ? Path.Combine(Application.persistentDataPath, saveFileName)
-            : relativePath;
-
+        var path = ResolvePath(relativePath);
         var fileData = new SettingFileData();
-        foreach (var bind in FindObjectsOfType<Bind>())
+
+        foreach (var entry in CollectKeyed<Slider>())
         {
-            if (bind.Value == null)
+            fileData.sliderData.Add(new ValueSaveData
+            {
+                key = entry.Key,
+                number = entry.Value.value
+            });
+        }
+
+        foreach (var entry in CollectKeyed<Dropdown>())
+        {
+            fileData.dropdownData.Add(new ValueSaveData
+            {
+                key = entry.Key,
+                number = entry.Value.value
+            });
+        }
+
+        foreach (var entry in CollectKeyed<TMP_Dropdown>())
+        {
+            fileData.dropdownData.Add(new ValueSaveData
+            {
+                key = entry.Key,
+                number = entry.Value.value
+            });
+        }
+
+        foreach (var entry in CollectKeyed<Toggle>())
+        {
+            fileData.toggleData.Add(new ValueSaveData
+            {
+                key = entry.Key,
+                flag = entry.Value.isOn
+            });
+        }
+
+        foreach (var entry in CollectKeyed<Bind>())
+        {
+            var bind = entry.Value;
+            if (bind.value == null)
                 continue;
 
             fileData.bindData.Add(new BindSaveData
             {
+                key = entry.Key,
                 gameObjectName = bind.gameObject.name,
-                actionName = bind.Value.name,
+                actionName = bind.value.name,
                 bindingPath = bind.pendingBindingPath,
                 bindingDisplay = bind.pendingBindingDisplay
             });
         }
 
         File.WriteAllText(path, JsonUtility.ToJson(fileData, true));
-        Debug.Log($"Saved binding settings to {path}");
+        Debug.Log($"Saved settings to {path}");
     }
 
-    public void LoadBindingsFromFile(string relativePath = null)
+    public void LoadSettingsFromFile(string relativePath = null)
     {
-        var path = string.IsNullOrEmpty(relativePath)
-            ? Path.Combine(Application.persistentDataPath, saveFileName)
-            : relativePath;
+        var path = ResolvePath(relativePath);
 
         if (!File.Exists(path))
         {
@@ -73,30 +121,153 @@ public class SettingSaver : MonoBehaviour
             return;
         }
 
-        var fileText = File.ReadAllText(path);
-        var fileData = JsonUtility.FromJson<SettingFileData>(fileText);
-        if (fileData == null || fileData.bindData == null)
+        var fileData = JsonUtility.FromJson<SettingFileData>(File.ReadAllText(path));
+        if (fileData == null)
+            return;
+
+        var sliderValues = ToLookup(fileData.sliderData);
+        foreach (var entry in CollectKeyed<Slider>())
+        {
+            if (sliderValues.TryGetValue(entry.Key, out var saved))
+                entry.Value.value = saved.number;
+        }
+
+        var dropdownValues = ToLookup(fileData.dropdownData);
+        foreach (var entry in CollectKeyed<Dropdown>())
+        {
+            if (dropdownValues.TryGetValue(entry.Key, out var saved))
+                entry.Value.value = Mathf.RoundToInt(saved.number);
+        }
+
+        foreach (var entry in CollectKeyed<TMP_Dropdown>())
+        {
+            if (dropdownValues.TryGetValue(entry.Key, out var saved))
+                entry.Value.value = Mathf.RoundToInt(saved.number);
+        }
+
+        var toggleValues = ToLookup(fileData.toggleData);
+        foreach (var entry in CollectKeyed<Toggle>())
+        {
+            if (toggleValues.TryGetValue(entry.Key, out var saved))
+                entry.Value.isOn = saved.flag;
+        }
+
+        if (fileData.bindData == null)
             return;
 
         foreach (var bindEntry in fileData.bindData)
         {
-            var bind = FindBindByActionName(bindEntry.actionName);
+            var bind = FindBind(bindEntry);
             if (bind == null)
                 continue;
+
+            if (!string.IsNullOrEmpty(bindEntry.bindingPath))
+                bind.ApplySeedBinding(bindEntry.bindingPath);
 
             bind.pendingBindingPath = bindEntry.bindingPath;
             bind.pendingBindingDisplay = bindEntry.bindingDisplay;
         }
     }
 
-    private Bind FindBindByActionName(string actionName)
+    public void SaveBindingsToFile(string relativePath = null)
     {
-        foreach (var bind in FindObjectsOfType<Bind>())
+        SaveSettingsToFile(relativePath);
+    }
+
+    public void LoadBindingsFromFile(string relativePath = null)
+    {
+        LoadSettingsFromFile(relativePath);
+    }
+
+    private string ResolvePath(string relativePath)
+    {
+        return string.IsNullOrEmpty(relativePath)
+            ? Path.Combine(Application.persistentDataPath, saveFileName)
+            : relativePath;
+    }
+
+    private static Dictionary<string, ValueSaveData> ToLookup(List<ValueSaveData> entries)
+    {
+        var lookup = new Dictionary<string, ValueSaveData>();
+        if (entries == null)
+            return lookup;
+
+        foreach (var entry in entries)
         {
-            if (bind.Value != null && bind.Value.name == actionName)
-                return bind;
+            if (!string.IsNullOrEmpty(entry.key))
+                lookup[entry.key] = entry;
+        }
+
+        return lookup;
+    }
+
+    private Bind FindBind(BindSaveData bindEntry)
+    {
+        var binds = CollectKeyed<Bind>();
+
+        if (!string.IsNullOrEmpty(bindEntry.key))
+        {
+            foreach (var entry in binds)
+            {
+                if (entry.Key == bindEntry.key)
+                    return entry.Value;
+            }
+        }
+
+        foreach (var entry in binds)
+        {
+            if (entry.Value.value != null && entry.Value.value.name == bindEntry.actionName)
+                return entry.Value;
         }
 
         return null;
+    }
+
+    private Transform GetRoot()
+    {
+        return settingApplier != null ? settingApplier.setting_content : null;
+    }
+
+    private List<KeyValuePair<string, T>> CollectKeyed<T>() where T : Component
+    {
+        var root = GetRoot();
+        var components = root != null
+            ? root.GetComponentsInChildren<T>(true)
+            : FindObjectsByType<T>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+
+        var results = new List<KeyValuePair<string, T>>(components.Length);
+        var used = new Dictionary<string, int>();
+
+        foreach (var component in components)
+        {
+            var key = BuildKey(component.transform, root);
+            if (used.TryGetValue(key, out int count))
+            {
+                used[key] = count + 1;
+                key = $"{key}#{count + 1}";
+            }
+            else
+            {
+                used[key] = 0;
+            }
+
+            results.Add(new KeyValuePair<string, T>(key, component));
+        }
+
+        return results;
+    }
+
+    private static string BuildKey(Transform target, Transform root)
+    {
+        var builder = new StringBuilder(target.name);
+        var parent = target.parent;
+
+        while (parent != null && parent != root)
+        {
+            builder.Insert(0, parent.name + "/");
+            parent = parent.parent;
+        }
+
+        return builder.ToString();
     }
 }

@@ -2,3 +2,19 @@ Purrnet is an amazing and simple multiplayer tool for Unity!
 
 The docs for it are here: 
 https://purrnet.dev/docs/client-side-prediction/predicted-identities
+
+
+WE HAVE:
+Main menu
+Lobby system
+Networked player movement and camera rotation
+Integrated input system
+
+
+TODO:
+settings
+voice chat
+text chat
+private and public lobby
+Player names
+Interaction button and networking of it
