@@ -1,14 +1,21 @@
 using System.Collections.Generic;
 using UnityEditor;
+using UnityEditorInternal;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
 [CustomEditor(typeof(SettingDesigner))]
 public class SettingDesignerEditor : Editor
 {
+    private const float RowButtonWidth = 62f;
+    private const float RowTypeWidth = 62f;
+    private const float RowPadding = 4f;
+
     private SerializedProperty tabsProp;
-    private GUIStyle headerStyle;
-    private GUIStyle sectionStyle;
+    private int selectedTab;
+    private ReorderableList settingsList;
+    private int listTabIndex = -1;
+    private System.Action pendingAction;
 
     private void OnEnable()
     {
@@ -18,125 +25,186 @@ public class SettingDesignerEditor : Editor
     public override void OnInspectorGUI()
     {
         serializedObject.Update();
-        EnsureStyles();
-
-        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-        EditorGUILayout.LabelField("Setting Designer", headerStyle);
-        EditorGUILayout.LabelField("Asset-based configuration for tabs and their settings. Use a SettingDesignerApplier in the scene to build the UI.", EditorStyles.wordWrappedMiniLabel);
-        EditorGUILayout.EndVertical();
-
-        EditorGUILayout.Space(6);
-
-        DrawTabsSection();
-
-        serializedObject.ApplyModifiedProperties();
-    }
-
-    private void DrawTabsSection()
-    {
-        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-        EditorGUILayout.BeginHorizontal();
-        EditorGUILayout.LabelField("Tabs", sectionStyle);
-        GUILayout.FlexibleSpace();
-        if (GUILayout.Button("Add Tab", EditorStyles.miniButton, GUILayout.Width(80)))
-        {
-            AddTab();
-        }
-        EditorGUILayout.EndHorizontal();
 
         if (tabsProp == null)
         {
             EditorGUILayout.HelpBox("Unable to find tabs property.", MessageType.Error);
-            EditorGUILayout.EndVertical();
             return;
         }
 
-        for (int i = 0; i < tabsProp.arraySize; i++)
+        DrawTabBar();
+
+        if (tabsProp.arraySize > 0)
         {
-            DrawTabCard(tabsProp.GetArrayElementAtIndex(i), i);
+            selectedTab = Mathf.Clamp(selectedTab, 0, tabsProp.arraySize - 1);
+            DrawTab(tabsProp.GetArrayElementAtIndex(selectedTab), selectedTab);
+        }
+        else
+        {
+            EditorGUILayout.HelpBox("No tabs yet. Press + to add one.", MessageType.Info);
         }
 
-        EditorGUILayout.EndVertical();
+        serializedObject.ApplyModifiedProperties();
+
+        if (pendingAction != null)
+        {
+            System.Action action = pendingAction;
+            pendingAction = null;
+            action();
+        }
     }
 
-    private void DrawTabCard(SerializedProperty tabProp, int tabIndex)
+    private void DrawTabBar()
     {
-        SerializedProperty tabNameProp = tabProp.FindPropertyRelative("name");
+        EditorGUILayout.BeginHorizontal();
+
+        if (tabsProp.arraySize > 0)
+        {
+            string[] names = new string[tabsProp.arraySize];
+            for (int i = 0; i < tabsProp.arraySize; i++)
+            {
+                string tabName = tabsProp.GetArrayElementAtIndex(i).FindPropertyRelative("name").stringValue;
+                names[i] = string.IsNullOrWhiteSpace(tabName) ? $"Tab {i + 1}" : tabName;
+            }
+
+            selectedTab = GUILayout.Toolbar(Mathf.Clamp(selectedTab, 0, names.Length - 1), names);
+        }
+        else
+        {
+            GUILayout.FlexibleSpace();
+        }
+
+        if (GUILayout.Button("+", EditorStyles.miniButton, GUILayout.Width(24)))
+        {
+            AddTab();
+            selectedTab = tabsProp.arraySize - 1;
+        }
+
+        EditorGUILayout.EndHorizontal();
+        EditorGUILayout.Space(6);
+    }
+
+    private void DrawTab(SerializedProperty tabProp, int tabIndex)
+    {
         SerializedProperty settingsProp = tabProp.FindPropertyRelative("settings");
 
-        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+        EditorGUILayout.PropertyField(tabProp.FindPropertyRelative("name"), new GUIContent("Tab Name"));
+
         EditorGUILayout.BeginHorizontal();
-        tabProp.isExpanded = EditorGUILayout.Foldout(tabProp.isExpanded, string.IsNullOrEmpty(tabNameProp.stringValue) ? $"Tab {tabIndex + 1}" : tabNameProp.stringValue, true);
         GUILayout.FlexibleSpace();
-        if (GUILayout.Button("Remove", EditorStyles.miniButton, GUILayout.Width(70)))
+
+        using (new EditorGUI.DisabledScope(tabIndex <= 0))
         {
-            tabsProp.DeleteArrayElementAtIndex(tabIndex);
-            EditorGUILayout.EndHorizontal();
-            EditorGUILayout.EndVertical();
+            if (GUILayout.Button("Move Left", EditorStyles.miniButton, GUILayout.Width(70)))
+                Defer(() => MoveTab(tabIndex, tabIndex - 1));
+        }
+
+        using (new EditorGUI.DisabledScope(tabIndex >= tabsProp.arraySize - 1))
+        {
+            if (GUILayout.Button("Move Right", EditorStyles.miniButton, GUILayout.Width(76)))
+                Defer(() => MoveTab(tabIndex, tabIndex + 1));
+        }
+
+        if (GUILayout.Button("Duplicate", EditorStyles.miniButton, GUILayout.Width(RowButtonWidth)))
+            Defer(() => DuplicateTab(tabIndex));
+
+        if (GUILayout.Button("Delete", EditorStyles.miniButton, GUILayout.Width(RowButtonWidth)))
+            Defer(() => DeleteTab(tabIndex));
+
+        EditorGUILayout.EndHorizontal();
+        EditorGUILayout.Space(8);
+
+        GetSettingsList(settingsProp, tabIndex).DoLayoutList();
+
+        EditorGUILayout.Space(4);
+        DrawSelectedSetting(settingsProp);
+    }
+
+    private ReorderableList GetSettingsList(SerializedProperty settingsProp, int tabIndex)
+    {
+        if (settingsList != null && listTabIndex == tabIndex)
+            return settingsList;
+
+        listTabIndex = tabIndex;
+        settingsList = new ReorderableList(serializedObject, settingsProp, true, true, true, false)
+        {
+            elementHeight = EditorGUIUtility.singleLineHeight + 6f
+        };
+
+        settingsList.drawHeaderCallback = rect => EditorGUI.LabelField(rect, "Settings");
+        settingsList.drawElementCallback = DrawSettingRow;
+        settingsList.onAddCallback = list =>
+        {
+            AddSetting(list.serializedProperty);
+            list.index = list.serializedProperty.arraySize - 1;
+        };
+
+        return settingsList;
+    }
+
+    private void DrawSettingRow(Rect rect, int index, bool isActive, bool isFocused)
+    {
+        SerializedProperty settingsProp = settingsList.serializedProperty;
+        if (index < 0 || index >= settingsProp.arraySize)
+            return;
+
+        SerializedProperty settingProp = settingsProp.GetArrayElementAtIndex(index);
+        SerializedProperty nameProp = settingProp.FindPropertyRelative("name");
+        SerializedProperty typeProp = settingProp.FindPropertyRelative("type");
+
+        rect.y += 3f;
+        rect.height = EditorGUIUtility.singleLineHeight;
+
+        float labelWidth = rect.width - RowTypeWidth - (RowButtonWidth * 2f) - (RowPadding * 3f);
+        Rect nameRect = new Rect(rect.x, rect.y, Mathf.Max(40f, labelWidth), rect.height);
+        Rect typeRect = new Rect(nameRect.xMax + RowPadding, rect.y, RowTypeWidth, rect.height);
+        Rect duplicateRect = new Rect(typeRect.xMax + RowPadding, rect.y, RowButtonWidth, rect.height);
+        Rect deleteRect = new Rect(duplicateRect.xMax + RowPadding, rect.y, RowButtonWidth, rect.height);
+
+        string title = string.IsNullOrWhiteSpace(nameProp.stringValue) ? $"Setting {index + 1}" : nameProp.stringValue;
+        EditorGUI.LabelField(nameRect, title);
+        EditorGUI.LabelField(typeRect, typeProp.enumDisplayNames[typeProp.enumValueIndex], EditorStyles.miniLabel);
+
+        int capturedIndex = index;
+
+        if (GUI.Button(duplicateRect, "Duplicate", EditorStyles.miniButton))
+            Defer(() => DuplicateSetting(listTabIndex, capturedIndex));
+
+        if (GUI.Button(deleteRect, "Delete", EditorStyles.miniButton))
+            Defer(() => DeleteSetting(listTabIndex, capturedIndex));
+    }
+
+    private void DrawSelectedSetting(SerializedProperty settingsProp)
+    {
+        if (settingsProp.arraySize == 0)
+        {
+            EditorGUILayout.LabelField("No settings in this tab yet.", EditorStyles.centeredGreyMiniLabel);
             return;
         }
-        EditorGUILayout.EndHorizontal();
 
-        if (tabProp.isExpanded)
+        int index = settingsList.index;
+        if (index < 0 || index >= settingsProp.arraySize)
         {
-            EditorGUI.indentLevel++;
-            EditorGUILayout.PropertyField(tabNameProp, new GUIContent("Tab Name"));
-            EditorGUILayout.Space(4);
-
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField("Settings", sectionStyle);
-            GUILayout.FlexibleSpace();
-            if (GUILayout.Button("Add Setting", EditorStyles.miniButton, GUILayout.Width(90)))
-            {
-                AddSetting(settingsProp);
-            }
-            EditorGUILayout.EndHorizontal();
-
-            for (int j = 0; j < settingsProp.arraySize; j++)
-            {
-                DrawSettingCard(settingsProp.GetArrayElementAtIndex(j), settingsProp, j);
-            }
-
-            EditorGUILayout.EndVertical();
-            EditorGUI.indentLevel--;
+            EditorGUILayout.LabelField("Select a setting to edit it.", EditorStyles.centeredGreyMiniLabel);
+            return;
         }
 
+        SerializedProperty settingProp = settingsProp.GetArrayElementAtIndex(index);
+
+        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+        EditorGUILayout.PropertyField(settingProp.FindPropertyRelative("name"), new GUIContent("Name"));
+        EditorGUILayout.PropertyField(settingProp.FindPropertyRelative("type"), new GUIContent("Type"));
+        DrawTypeSpecificFields(settingProp);
+
+        EditorGUILayout.Space(6);
+        EditorGUILayout.PropertyField(settingProp.FindPropertyRelative("output"), new GUIContent("Output"));
+        DrawOutputFields(settingProp);
         EditorGUILayout.EndVertical();
     }
 
-    private void DrawSettingCard(SerializedProperty settingProp, SerializedProperty settingsProp, int settingIndex)
+    private void Defer(System.Action action)
     {
-        SerializedProperty settingNameProp = settingProp.FindPropertyRelative("name");
-        SerializedProperty typeProp = settingProp.FindPropertyRelative("type");
-        SerializedProperty outputProp = settingProp.FindPropertyRelative("output");
-
-        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-        EditorGUILayout.BeginHorizontal();
-        settingProp.isExpanded = EditorGUILayout.Foldout(settingProp.isExpanded, string.IsNullOrEmpty(settingNameProp.stringValue) ? $"Setting {settingIndex + 1}" : settingNameProp.stringValue, true);
-        GUILayout.FlexibleSpace();
-        if (GUILayout.Button("Remove", EditorStyles.miniButton, GUILayout.Width(70)))
-        {
-            settingsProp.DeleteArrayElementAtIndex(settingIndex);
-            EditorGUILayout.EndHorizontal();
-            EditorGUILayout.EndVertical();
-            return;
-        }
-        EditorGUILayout.EndHorizontal();
-
-        if (settingProp.isExpanded)
-        {
-            EditorGUI.indentLevel++;
-            EditorGUILayout.PropertyField(settingNameProp, new GUIContent("Setting Name"));
-            EditorGUILayout.PropertyField(typeProp);
-            EditorGUILayout.PropertyField(outputProp);
-            EditorGUILayout.Space(4);
-            DrawTypeSpecificFields(settingProp);
-            DrawOutputFields(settingProp);
-            EditorGUI.indentLevel--;
-        }
-
-        EditorGUILayout.EndVertical();
+        pendingAction = action;
     }
 
     private static void DrawTypeSpecificFields(SerializedProperty settingProp)
@@ -158,26 +226,23 @@ public class SettingDesignerEditor : Editor
                 EditorGUILayout.PropertyField(settingProp.FindPropertyRelative("toggleStart"), new GUIContent("Start Value"));
                 break;
             case SettingDesigner.SettingType.Rebind:
-                DrawRebindBindingPicker(settingProp);
+                DrawActionPicker(settingProp, "inputActionAsset", "inputActionMapName", "inputActionName", "rebindStartBindingIndex");
                 break;
         }
     }
 
-    private static void DrawRebindBindingPicker(SerializedProperty settingProp)
+    private static void DrawActionPicker(SerializedProperty settingProp, string assetField, string mapField, string actionField, string bindingField)
     {
-        SerializedProperty inputActionAssetProp = settingProp.FindPropertyRelative("inputActionAsset");
-        SerializedProperty inputActionMapNameProp = settingProp.FindPropertyRelative("inputActionMapName");
-        SerializedProperty inputActionNameProp = settingProp.FindPropertyRelative("inputActionName");
-        SerializedProperty bindingIndexProp = settingProp.FindPropertyRelative("rebindStartBindingIndex");
+        SerializedProperty assetProp = settingProp.FindPropertyRelative(assetField);
+        SerializedProperty mapNameProp = settingProp.FindPropertyRelative(mapField);
+        SerializedProperty actionNameProp = settingProp.FindPropertyRelative(actionField);
+        SerializedProperty bindingIndexProp = settingProp.FindPropertyRelative(bindingField);
 
-        EditorGUILayout.PropertyField(inputActionAssetProp, new GUIContent("Input Action Asset"));
+        EditorGUILayout.PropertyField(assetProp, new GUIContent("Action Asset"));
 
-        InputActionAsset actionAsset = inputActionAssetProp.objectReferenceValue as InputActionAsset;
+        InputActionAsset actionAsset = assetProp.objectReferenceValue as InputActionAsset;
         if (actionAsset == null)
-        {
-            EditorGUILayout.HelpBox("Assign an Input Action Asset to choose a map, action, and binding.", MessageType.Info);
             return;
-        }
 
         if (actionAsset.actionMaps.Count == 0)
         {
@@ -190,12 +255,12 @@ public class SettingDesignerEditor : Editor
         for (int i = 0; i < actionAsset.actionMaps.Count; i++)
         {
             mapNames[i] = actionAsset.actionMaps[i].name;
-            if (mapNames[i] == inputActionMapNameProp.stringValue)
+            if (mapNames[i] == mapNameProp.stringValue)
                 mapIndex = i;
         }
 
         mapIndex = EditorGUILayout.Popup(new GUIContent("Action Map"), mapIndex, mapNames);
-        inputActionMapNameProp.stringValue = mapNames[mapIndex];
+        mapNameProp.stringValue = mapNames[mapIndex];
 
         var actionMap = actionAsset.actionMaps[mapIndex];
         if (actionMap.actions.Count == 0)
@@ -209,24 +274,14 @@ public class SettingDesignerEditor : Editor
         for (int i = 0; i < actionMap.actions.Count; i++)
         {
             actionNames[i] = actionMap.actions[i].name;
-            if (actionNames[i] == inputActionNameProp.stringValue)
+            if (actionNames[i] == actionNameProp.stringValue)
                 actionIndex = i;
         }
 
         actionIndex = EditorGUILayout.Popup(new GUIContent("Action"), actionIndex, actionNames);
-        inputActionNameProp.stringValue = actionNames[actionIndex];
+        actionNameProp.stringValue = actionNames[actionIndex];
 
-        InputAction action = actionMap.actions[actionIndex];
-
-        if (action == null)
-        {
-            EditorGUILayout.HelpBox("Assign an action to choose a default binding.", MessageType.Info);
-            return;
-        }
-
-        DrawBindingIndexPopup(action, bindingIndexProp, "Default Binding");
-
-        EditorGUILayout.HelpBox("Composite parts such as WASD are listed individually, so each direction can be seeded and rebound on its own.", MessageType.Info);
+        DrawBindingIndexPopup(actionMap.actions[actionIndex], bindingIndexProp, "Binding");
     }
 
     private static void DrawBindingIndexPopup(InputAction action, SerializedProperty bindingIndexProp, string label)
@@ -291,89 +346,93 @@ public class SettingDesignerEditor : Editor
     {
         var outputType = (SettingDesigner.OutputType)settingProp.FindPropertyRelative("output").enumValueIndex;
 
-        EditorGUILayout.Space(2);
-        EditorGUILayout.LabelField("Output Target", EditorStyles.miniBoldLabel);
-
         switch (outputType)
         {
             case SettingDesigner.OutputType.Audio:
                 EditorGUILayout.PropertyField(settingProp.FindPropertyRelative("audioGroup"), new GUIContent("Audio Group"));
                 break;
             case SettingDesigner.OutputType.InputAction:
-                DrawOutputInputActionPicker(settingProp);
+                DrawActionPicker(settingProp, "outputInputActionAsset", "outputInputActionMapName", "outputInputActionName", "outputInputActionBindingIndex");
                 break;
-            case SettingDesigner.OutputType.CameraSetting:
-                EditorGUILayout.PropertyField(settingProp.FindPropertyRelative("cameraSetting"), new GUIContent("Camera Setting"));
-                break;
-            case SettingDesigner.OutputType.UI:
-                EditorGUILayout.PropertyField(settingProp.FindPropertyRelative("uiSetting"), new GUIContent("UI Setting"));
-                break;
-            case SettingDesigner.OutputType.Gameplay:
-                EditorGUILayout.PropertyField(settingProp.FindPropertyRelative("gameplaySetting"), new GUIContent("Gameplay Setting"));
+            case SettingDesigner.OutputType.Key:
+                EditorGUILayout.PropertyField(settingProp.FindPropertyRelative("key"), new GUIContent("Key"));
                 break;
         }
     }
 
-    private static void DrawOutputInputActionPicker(SerializedProperty settingProp)
+    private SerializedProperty SettingsOf(int tabIndex)
     {
-        SerializedProperty inputActionAssetProp = settingProp.FindPropertyRelative("outputInputActionAsset");
-        SerializedProperty inputActionMapNameProp = settingProp.FindPropertyRelative("outputInputActionMapName");
-        SerializedProperty inputActionNameProp = settingProp.FindPropertyRelative("outputInputActionName");
-        SerializedProperty bindingIndexProp = settingProp.FindPropertyRelative("outputInputActionBindingIndex");
+        return tabsProp.GetArrayElementAtIndex(tabIndex).FindPropertyRelative("settings");
+    }
 
-        EditorGUILayout.PropertyField(inputActionAssetProp, new GUIContent("Input Action Asset"));
+    private void DuplicateTab(int tabIndex)
+    {
+        serializedObject.Update();
+        tabsProp.InsertArrayElementAtIndex(tabIndex);
+        AppendCopySuffix(tabsProp.GetArrayElementAtIndex(tabIndex + 1));
+        serializedObject.ApplyModifiedProperties();
+        selectedTab = tabIndex + 1;
+        InvalidateSettingsList();
+        Repaint();
+    }
 
-        InputActionAsset actionAsset = inputActionAssetProp.objectReferenceValue as InputActionAsset;
-        if (actionAsset == null)
-        {
-            EditorGUILayout.HelpBox("Assign an Input Action Asset to pick an output action.", MessageType.Info);
-            return;
-        }
+    private void MoveTab(int from, int to)
+    {
+        serializedObject.Update();
+        tabsProp.MoveArrayElement(from, to);
+        serializedObject.ApplyModifiedProperties();
+        selectedTab = to;
+        InvalidateSettingsList();
+        Repaint();
+    }
 
-        if (actionAsset.actionMaps.Count == 0)
-        {
-            EditorGUILayout.HelpBox("This Input Action Asset has no action maps.", MessageType.Warning);
-            return;
-        }
+    private void DeleteTab(int tabIndex)
+    {
+        serializedObject.Update();
+        tabsProp.DeleteArrayElementAtIndex(tabIndex);
+        serializedObject.ApplyModifiedProperties();
+        selectedTab = Mathf.Clamp(selectedTab, 0, Mathf.Max(0, tabsProp.arraySize - 1));
+        InvalidateSettingsList();
+        Repaint();
+    }
 
-        string[] mapNames = new string[actionAsset.actionMaps.Count];
-        int mapIndex = 0;
-        for (int i = 0; i < actionAsset.actionMaps.Count; i++)
-        {
-            mapNames[i] = actionAsset.actionMaps[i].name;
-            if (mapNames[i] == inputActionMapNameProp.stringValue)
-                mapIndex = i;
-        }
+    private void DuplicateSetting(int tabIndex, int index)
+    {
+        serializedObject.Update();
+        SerializedProperty settingsProp = SettingsOf(tabIndex);
+        settingsProp.InsertArrayElementAtIndex(index);
+        AppendCopySuffix(settingsProp.GetArrayElementAtIndex(index + 1));
+        serializedObject.ApplyModifiedProperties();
 
-        mapIndex = EditorGUILayout.Popup(new GUIContent("Action Map"), mapIndex, mapNames);
-        inputActionMapNameProp.stringValue = mapNames[mapIndex];
+        if (settingsList != null)
+            settingsList.index = index + 1;
 
-        var actionMap = actionAsset.actionMaps[mapIndex];
-        if (actionMap.actions.Count == 0)
-        {
-            EditorGUILayout.HelpBox("The selected action map has no actions.", MessageType.Warning);
-            return;
-        }
+        Repaint();
+    }
 
-        string[] actionNames = new string[actionMap.actions.Count];
-        int actionIndex = 0;
-        for (int i = 0; i < actionMap.actions.Count; i++)
-        {
-            actionNames[i] = actionMap.actions[i].name;
-            if (actionNames[i] == inputActionNameProp.stringValue)
-                actionIndex = i;
-        }
+    private void DeleteSetting(int tabIndex, int index)
+    {
+        serializedObject.Update();
+        SerializedProperty settingsProp = SettingsOf(tabIndex);
+        settingsProp.DeleteArrayElementAtIndex(index);
+        serializedObject.ApplyModifiedProperties();
 
-        actionIndex = EditorGUILayout.Popup(new GUIContent("Action"), actionIndex, actionNames);
-        inputActionNameProp.stringValue = actionNames[actionIndex];
+        if (settingsList != null)
+            settingsList.index = Mathf.Clamp(settingsList.index, -1, settingsProp.arraySize - 1);
 
-        InputAction outputAction = actionMap.actions[actionIndex];
-        if (outputAction == null)
-            return;
+        Repaint();
+    }
 
-        DrawBindingIndexPopup(outputAction, bindingIndexProp, "Binding");
+    private void InvalidateSettingsList()
+    {
+        settingsList = null;
+        listTabIndex = -1;
+    }
 
-        EditorGUILayout.HelpBox("This output writes to the selected binding on that action, matching the binding-level granularity of the rebind input.", MessageType.Info);
+    private static void AppendCopySuffix(SerializedProperty element)
+    {
+        SerializedProperty nameProp = element.FindPropertyRelative("name");
+        nameProp.stringValue = $"{nameProp.stringValue} Copy";
     }
 
     private void AddTab()
@@ -407,28 +466,7 @@ public class SettingDesignerEditor : Editor
         newSetting.FindPropertyRelative("inputActionAsset").objectReferenceValue = null;
         newSetting.FindPropertyRelative("inputActionMapName").stringValue = string.Empty;
         newSetting.FindPropertyRelative("inputActionName").stringValue = string.Empty;
-        newSetting.FindPropertyRelative("cameraSetting").stringValue = string.Empty;
-        newSetting.FindPropertyRelative("uiSetting").stringValue = string.Empty;
-        newSetting.FindPropertyRelative("gameplaySetting").stringValue = string.Empty;
+        newSetting.FindPropertyRelative("key").stringValue = string.Empty;
         newSetting.isExpanded = true;
-    }
-
-    private void EnsureStyles()
-    {
-        if (headerStyle == null)
-        {
-            headerStyle = new GUIStyle(EditorStyles.boldLabel)
-            {
-                fontSize = 13
-            };
-        }
-
-        if (sectionStyle == null)
-        {
-            sectionStyle = new GUIStyle(EditorStyles.boldLabel)
-            {
-                fontSize = 11
-            };
-        }
     }
 }

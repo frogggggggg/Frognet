@@ -1,0 +1,83 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a7001ce496869924094183b767284c3f, type: 3}
+  m_Name: ItemKeys
+  m_EditorClassIdentifier: 
+  keys:
+  - rid: 7830584549345067117
+  - rid: 7830584549345067118
+  - rid: 7830584549345067119
+  - rid: 7830584549345067146
+  references:
+    version: 2
+    RefIds:
+    - rid: 7830584549345067117
+      type: {class: ItemKey, ns: , asm: Assembly-CSharp}
+      data:
+        name: durability
+        values: []
+        children: []
+    - rid: 7830584549345067118
+      type: {class: ItemKey, ns: , asm: Assembly-CSharp}
+      data:
+        name: equipable
+        values:
+        - head
+        - chest
+        children: []
+    - rid: 7830584549345067119
+      type: {class: ItemKey, ns: , asm: Assembly-CSharp}
+      data:
+        name: consumable
+        values: []
+        children:
+        - rid: 7830584549345067132
+        - rid: 7830584549345067133
+    - rid: 7830584549345067132
+      type: {class: ItemKey, ns: , asm: Assembly-CSharp}
+      data:
+        name: food
+        values: []
+        children:
+        - rid: 7830584549345067135
+    - rid: 7830584549345067133
+      type: {class: ItemKey, ns: , asm: Assembly-CSharp}
+      data:
+        name: speed
+        values: []
+        children:
+        - rid: 7830584549345067136
+        - rid: 7830584549345067140
+    - rid: 7830584549345067135
+      type: {class: ItemKey, ns: , asm: Assembly-CSharp}
+      data:
+        name: amount
+        values: []
+        children: []
+    - rid: 7830584549345067136
+      type: {class: ItemKey, ns: , asm: Assembly-CSharp}
+      data:
+        name: amount
+        values: []
+        children: []
+    - rid: 7830584549345067140
+      type: {class: ItemKey, ns: , asm: Assembly-CSharp}
+      data:
+        name: time
+        values: []
+        children: []
+    - rid: 7830584549345067146
+      type: {class: ItemKey, ns: , asm: Assembly-CSharp}
+      data:
+        name: damage
+        values: []
+        children: []

@@ -13,9 +13,14 @@ public class keybind : MonoBehaviour
         {
             if (enableObject != null)
             {
-                enableObject.SetActive(!enableObject.activeSelf);
-                if (enableMouse) PlayerCamera.cursorLocked = !enableObject.activeSelf;
+                DoAction();
             }
         }
+    }
+
+    public void DoAction()
+    {
+        enableObject.SetActive(!enableObject.activeSelf);
+        if (enableMouse) PlayerCamera.cursorLocked = !enableObject.activeSelf;
     }
 }

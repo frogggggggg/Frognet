@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.SceneManagement;
 using PurrNet.Prediction;
 
 [RequireComponent(typeof(Rigidbody), typeof(PredictedRigidbody))]
@@ -14,6 +15,8 @@ public sealed class PlayerMovement
 
     [Header("Movement")]
     [SerializeField, Min(0f)] private float maxSpeed = 5f;
+    [SerializeField, Min(0f)] private float sprintMultiplier = 2f;
+    [SerializeField, Min(0f)] private float jumpForce = 10f;
 
     [Tooltip("Units per second squared. Set to 0 for instant acceleration.")]
     [SerializeField, Min(0f)] private float acceleration = 30f;
@@ -23,6 +26,33 @@ public sealed class PlayerMovement
 
     [Tooltip("Degrees per second. Set to 0 for instant rotation.")]
     [SerializeField, Min(0f)] private float rotationSpeed = 720f;
+
+    [Header("Ground")]
+    [SerializeField] private LayerMask groundMask = ~0;
+
+    [Tooltip("Radius of the probe swept below the collider. Keep it just under the collider radius.")]
+    [SerializeField, Min(0.01f)] private float groundProbeRadius = 0.25f;
+
+    [Tooltip("How far below the collider still counts as standing on something.")]
+    [SerializeField, Min(0f)] private float groundProbeDistance = 0.15f;
+
+    [Tooltip("Surfaces steeper than this are walls, not ground.")]
+    [SerializeField, Range(0f, 89f)] private float maxSlopeAngle = 50f;
+
+    private static readonly RaycastHit[] groundHits = new RaycastHit[8];
+
+    [SerializeField, HideInInspector] private Collider bodyCollider;
+
+    private Collider BodyCollider
+    {
+        get
+        {
+            if (bodyCollider == null)
+                bodyCollider = GetComponent<Collider>();
+
+            return bodyCollider;
+        }
+    }
 
     private Rigidbody Body
     {
@@ -49,6 +79,7 @@ public sealed class PlayerMovement
     private void Reset()
     {
         rb = GetComponent<Rigidbody>();
+        bodyCollider = GetComponent<Collider>();
 
         if (rb != null)
         {
@@ -93,7 +124,8 @@ public sealed class PlayerMovement
     protected override void GetFinalInput(ref Input input)
     {
         input.movement = InputSystem.actions["movement"].ReadValue<Vector2>();
-        input.jump = InputSystem.actions["jump"].triggered;
+        input.jump = InputSystem.actions["jump"].IsPressed();
+        input.sprint = InputSystem.actions["sprint"].IsPressed();
 
         input.cameraYaw = PlayerCamera.Instance != null
             ? PlayerCamera.Instance.yRotation
@@ -128,8 +160,84 @@ public sealed class PlayerMovement
         Vector3 worldDirection =
             cameraRotation * localDirection;
 
-        UpdateVelocity(Body, worldDirection, delta);
+        float sprint = input.sprint ? sprintMultiplier : 1f;
+
+        UpdateVelocity(Body, worldDirection*sprint, delta);
         UpdateFacing(worldDirection, ref state, delta);
+        Jump(Body, input.jump);
+    }
+
+    private void Jump(Rigidbody body, bool jump)
+    {
+        if(!jump || !IsGrounded()) return;
+        body.AddForce(
+            jumpForce*Vector3.up,
+            ForceMode.VelocityChange);
+    }
+
+    /// <summary>
+    /// Sweeps a sphere down through the collider and reports whether it lands on something flat
+    /// enough to stand on.
+    ///
+    /// The query goes through the GameObject's own PhysicsScene rather than the global Physics
+    /// class. Prediction re-simulates in the scene the object lives in, and a global query would
+    /// read whatever the default scene happens to hold during a resimulation.
+    /// </summary>
+    public bool IsGrounded()
+    {
+        Collider self = BodyCollider;
+
+        if (self == null)
+            return false;
+
+        Bounds bounds = self.bounds;
+
+        // Start at the collider's own centre height so the sweep cannot begin already overlapping
+        // the floor, which a sphere cast reports as no hit at all.
+        Vector3 origin = new Vector3(
+            bounds.center.x,
+            bounds.center.y,
+            bounds.center.z);
+
+        float distance =
+            bounds.extents.y - groundProbeRadius + groundProbeDistance;
+
+        if (distance <= 0f)
+            return false;
+
+        PhysicsScene scene = gameObject.scene.GetPhysicsScene();
+
+        int count = scene.SphereCast(
+            origin,
+            groundProbeRadius,
+            Vector3.down,
+            groundHits,
+            distance,
+            groundMask,
+            QueryTriggerInteraction.Ignore);
+
+        float minimumUp = Mathf.Cos(maxSlopeAngle * Mathf.Deg2Rad);
+
+        for (int i = 0; i < count; i++)
+        {
+            RaycastHit hit = groundHits[i];
+
+            if (hit.collider == null)
+                continue;
+
+            // Ignore this player's own colliders.
+            if (hit.collider.attachedRigidbody == Body)
+                continue;
+
+            // A zero distance means the sweep started inside that collider, so its normal is junk.
+            if (hit.distance <= 0f)
+                continue;
+
+            if (hit.normal.y >= minimumUp)
+                return true;
+        }
+
+        return false;
     }
 
     private void UpdateVelocity(
@@ -251,6 +359,7 @@ public sealed class PlayerMovement
         public Vector2 movement;
         public float cameraYaw;
         public bool jump;
+        public bool sprint;
         public void Dispose()
         {
         }
