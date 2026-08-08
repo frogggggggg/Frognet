@@ -289,9 +289,18 @@ MonoBehaviour:
   rb: {fileID: 4217471733698070284}
   rotationPivot: {fileID: 8667077380901205712}
   maxSpeed: 5
+  sprintMultiplier: 2
+  jumpForce: 3
   acceleration: 30
   deceleration: 40
   rotationSpeed: 720
+  groundMask:
+    serializedVersion: 2
+    m_Bits: 4294967295
+  groundProbeRadius: 0.25
+  groundProbeDistance: 0.15
+  maxSlopeAngle: 50
+  BodyCollider: {fileID: 6005212546100515186}
 --- !u!54 &4217471733698070284
 Rigidbody:
   m_ObjectHideFlags: 0

@@ -41,18 +41,7 @@ public sealed class PlayerMovement
 
     private static readonly RaycastHit[] groundHits = new RaycastHit[8];
 
-    [SerializeField, HideInInspector] private Collider bodyCollider;
-
-    private Collider BodyCollider
-    {
-        get
-        {
-            if (bodyCollider == null)
-                bodyCollider = GetComponent<Collider>();
-
-            return bodyCollider;
-        }
-    }
+    [SerializeField] private Collider BodyCollider;
 
     private Rigidbody Body
     {
@@ -79,7 +68,6 @@ public sealed class PlayerMovement
     private void Reset()
     {
         rb = GetComponent<Rigidbody>();
-        bodyCollider = GetComponent<Collider>();
 
         if (rb != null)
         {

@@ -12,6 +12,10 @@ public class Pickup : MonoBehaviour
     public Item item;
     public pickupstyle style;
     public float animateTime;
+
+    [Range(0f, 1f), Tooltip("How fast the item chases the player. Lower is smoother but lags further behind.")]
+    public float followSpeed = 0.2f;
+
     bool interactable = false;
 
     void OnTriggerEnter(Collider other)
@@ -53,12 +57,21 @@ public class Pickup : MonoBehaviour
         Destroy(gameObject);
     }
 
+    /// <summary>
+    /// Flies the item to the player. The player's transform only moves on fixed ticks, so the item
+    /// chases a trailing point instead of the raw position, which would step visibly.
+    /// </summary>
     void AnimatePickup(Transform player, float time)
     {
         Vector3 start = transform.position;
+        Vector3 target = player.position;
 
-        DOTween.To(() => 0f, t => transform.position = Vector3.Lerp(start, player.position, t), 1f, time)
-            .SetEase(Ease.InOutSine)
-            .SetTarget(transform);
+        DOTween.To(() => 0f, progress =>
+            {
+                target = Vector3.Lerp(target, player.position, followSpeed);
+                transform.position = Vector3.Lerp(start, target, progress);
+            }, 1f, time)
+            .SetEase(Ease.InElastic)
+            .SetLink(gameObject);
     }
 }
