@@ -6,6 +6,7 @@ public class keybind : MonoBehaviour
     public string actionName;
     public GameObject enableObject;
     public bool enableMouse = false;
+    public static bool disableMovement = false;
 
     void Update()
     {
@@ -21,6 +22,9 @@ public class keybind : MonoBehaviour
     public void DoAction()
     {
         enableObject.SetActive(!enableObject.activeSelf);
-        if (enableMouse) PlayerCamera.cursorLocked = !enableObject.activeSelf;
+        if (enableMouse) {
+            PlayerCamera.cursorLocked = !enableObject.activeSelf;
+            disableMovement = enableObject.activeSelf;
+        }
     }
 }

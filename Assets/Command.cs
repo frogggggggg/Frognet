@@ -6,7 +6,10 @@ using System;
 
 public class Command : MonoBehaviour
 {
-    public InputField inputField;
+    public TMP_InputField inputField;
+    public GameObject itemPrefab;
+    public static Command Instance;
+
 
     /// <summary>
     /// A command's signature has to be declared, not discovered. Reflecting over an
@@ -22,6 +25,11 @@ public class Command : MonoBehaviour
     Dictionary<string, Definition> actionDictionary;
     Dictionary<string, object> wordDictionary;
 
+    void Awake()
+    {
+        Instance = this;
+    }
+
     void Start()
     {
         actionDictionary = new Dictionary<string, Definition>(StringComparer.OrdinalIgnoreCase)
@@ -32,10 +40,12 @@ public class Command : MonoBehaviour
             { "move", new Definition {
                 parameters = new[] { typeof(Transform), typeof(float) },
                 run = args => ((Transform)args[0]).Translate(Vector3.forward * (float)args[1]) } }
+            {}
         };
         wordDictionary = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
         {
-            { "player", transform }
+            { "player", transform },
+            { "find", args => transform.Find((string)args[0]) }
         };
 
     }
@@ -104,6 +114,14 @@ public class Command : MonoBehaviour
         if (targetType == typeof(bool)) return bool.TryParse(word, out bool flag) ? flag : (object)null;
 
         return null;
+    }
+
+    public GameObject SpawnItem(ItemData data, Vector3 position)
+    {
+        //do it over network later
+        GameObject item = Instantiate(ItemPrefab, position, Quaternion.identity);
+        item.GetComponent<Pickup>().Initialize(data);
+        return item;
     }
 
 }

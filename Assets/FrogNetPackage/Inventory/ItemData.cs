@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using UnityEngine;
 
@@ -199,6 +200,8 @@ public struct Item
 [CreateAssetMenu(menuName = "Frognet/Item", fileName = "Item")]
 public class ItemData : ScriptableObject
 {
+    private static ItemData[] cachedAll;
+
     public string itemName;
     [TextArea] public string description;
 
@@ -207,4 +210,54 @@ public class ItemData : ScriptableObject
 
     [Tooltip("Defaults every copy of this item starts with. Instances override these by key.")]
     public ItemMod[] mods;
+
+    public static IReadOnlyList<ItemData> All
+    {
+        get
+        {
+            if (cachedAll == null)
+                cachedAll = LoadAll();
+
+            return cachedAll;
+        }
+    }
+
+    public static ItemData Find(string itemName)
+    {
+        if (string.IsNullOrEmpty(itemName))
+            return null;
+
+        IReadOnlyList<ItemData> all = All;
+
+        for (int i = 0; i < all.Count; i++)
+        {
+            ItemData item = all[i];
+
+            if (item != null && item.itemName == itemName)
+                return item;
+        }
+
+        return null;
+    }
+
+    private static ItemData[] LoadAll()
+    {
+#if UNITY_EDITOR
+        string[] guids = UnityEditor.AssetDatabase.FindAssets("t:ItemData");
+        var items = new List<ItemData>(guids.Length);
+
+        for (int i = 0; i < guids.Length; i++)
+        {
+            string path = UnityEditor.AssetDatabase.GUIDToAssetPath(guids[i]);
+            ItemData item = UnityEditor.AssetDatabase.LoadAssetAtPath<ItemData>(path);
+
+            if (item != null)
+                items.Add(item);
+        }
+
+        return items.ToArray();
+#else
+        return Resources.LoadAll<ItemData>(string.Empty);
+#endif
+    }
 }

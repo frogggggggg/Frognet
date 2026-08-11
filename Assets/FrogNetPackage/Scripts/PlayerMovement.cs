@@ -111,6 +111,7 @@ public sealed class PlayerMovement
 
     protected override void GetFinalInput(ref Input input)
     {
+        if(keybind.disableMovement) return;
         input.movement = InputSystem.actions["movement"].ReadValue<Vector2>();
         input.jump = InputSystem.actions["jump"].IsPressed();
         input.sprint = InputSystem.actions["sprint"].IsPressed();

@@ -36,6 +36,11 @@ public class Pickup : MonoBehaviour
             }
         }
     }
+
+    public void Initialize(Item data)
+    {
+        
+    }
     void OnTriggerExit(Collider other)
     {
         if(other.CompareTag("Player"))
