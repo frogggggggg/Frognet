@@ -1,0 +1,329 @@
+"""Build a single Wavefront OBJ of the Georgia Tech campus from the downloaded GIS layers.
+
+Reads the *.geojson files produced by fetch_layers.py, projects WGS84 lon/lat onto a
+local metric plane centred on campus, extrudes buildings, lays down ground surfaces and
+places proxy tree geometry, then writes gt_campus.obj + gt_campus.mtl.
+
+Output is Y-up (standard OBJ convention) so Blender's default import orientation is correct.
+"""
+
+import json
+import math
+import os
+
+import mapbox_earcut as earcut
+import numpy as np
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+OBJ_PATH = os.path.join(HERE, "gt_campus.obj")
+MTL_PATH = os.path.join(HERE, "gt_campus.mtl")
+
+# Campus centre (Tech Green, near the middle of the main campus).
+LAT0 = 33.7756
+LON0 = -84.3963
+M_PER_DEG_LAT = 110540.0
+M_PER_DEG_LON = 111320.0 * math.cos(math.radians(LAT0))
+
+FT = 0.3048
+FLOOR_HEIGHT = 3.8       # metres per storey
+MIN_BUILDING_HEIGHT = 4.0
+DEFAULT_OFFCAMPUS_HEIGHT = 9.0
+
+# Ground layers are stacked by a few millimetres each to avoid z-fighting.
+GROUND_LAYERS = [
+    # (file, object name, material, elevation)
+    ("landscape_areas", "LandscapeAreas", "grass", 0.005),
+    ("roads", "Roads", "road", 0.020),
+    ("parking", "Parking", "parking", 0.030),
+    ("recreation_fields", "RecreationFields", "field", 0.040),
+    ("sidewalks", "Sidewalks", "sidewalk", 0.120),  # raised ~curb height
+]
+
+# (file, object name, material, fallback height when FLOORCOUNT is missing)
+BUILDING_LAYERS = [
+    ("buildings_gt", "Buildings_GT", "building_gt", 8.0),
+    ("buildings_noncampus", "Buildings_NonCampus", "building_other", 8.0),
+    ("buildings_offcampus", "Buildings_OffCampus", "building_offcampus", DEFAULT_OFFCAMPUS_HEIGHT),
+]
+
+MATERIALS = {
+    # name: (diffuse rgb, specular exponent)
+    "grass": ((0.24, 0.34, 0.18), 4),
+    "road": ((0.16, 0.16, 0.17), 6),
+    "parking": ((0.22, 0.22, 0.23), 6),
+    "field": ((0.30, 0.44, 0.20), 4),
+    "sidewalk": ((0.62, 0.61, 0.58), 8),
+    "building_gt": ((0.55, 0.33, 0.25), 12),
+    "building_other": ((0.58, 0.57, 0.55), 12),
+    "building_offcampus": ((0.45, 0.45, 0.47), 10),
+    "tree_trunk": ((0.28, 0.20, 0.13), 4),
+    "tree_canopy": ((0.16, 0.34, 0.14), 4),
+    "ground_base": ((0.20, 0.22, 0.18), 2),
+}
+
+
+def project(lon, lat):
+    """WGS84 -> local metres, east/north, origin at campus centre."""
+    return ((lon - LON0) * M_PER_DEG_LON, (lat - LAT0) * M_PER_DEG_LAT)
+
+
+def load(name):
+    path = os.path.join(HERE, f"{name}.geojson")
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh).get("features", [])
+
+
+def polygons_of(geometry):
+    """Normalise Polygon/MultiPolygon into a list of polygons (list of rings)."""
+    if not geometry:
+        return []
+    kind = geometry.get("type")
+    if kind == "Polygon":
+        return [geometry["coordinates"]]
+    if kind == "MultiPolygon":
+        return list(geometry["coordinates"])
+    return []
+
+
+def signed_area(ring):
+    total = 0.0
+    for i in range(len(ring)):
+        x0, y0 = ring[i]
+        x1, y1 = ring[(i + 1) % len(ring)]
+        total += x0 * y1 - x1 * y0
+    return total / 2.0
+
+
+def prepare(polygon):
+    """Project a polygon's rings and force outer CCW / holes CW. Returns (verts, ring_ends)."""
+    rings = []
+    for index, ring in enumerate(polygon):
+        pts = [project(c[0], c[1]) for c in ring]
+        # GeoJSON repeats the first point; earcut does not want the duplicate.
+        if len(pts) > 1 and abs(pts[0][0] - pts[-1][0]) < 1e-9 and abs(pts[0][1] - pts[-1][1]) < 1e-9:
+            pts = pts[:-1]
+        if len(pts) < 3:
+            continue
+        area = signed_area(pts)
+        want_ccw = index == 0
+        if (area > 0) != want_ccw:
+            pts.reverse()
+        rings.append(pts)
+    if not rings:
+        return None, None
+    verts, ends = [], []
+    for ring in rings:
+        verts.extend(ring)
+        ends.append(len(verts))
+    return np.array(verts, dtype=np.float64), np.array(ends, dtype=np.uint32)
+
+
+def triangulate(verts, ends):
+    try:
+        idx = earcut.triangulate_float64(verts, ends)
+    except Exception:  # noqa: BLE001 - degenerate rings are skipped
+        return []
+    return [tuple(idx[i:i + 3]) for i in range(0, len(idx) - 2, 3)]
+
+
+class ObjBuilder:
+    """Accumulates vertices and per-object faces, then writes an OBJ."""
+
+    def __init__(self):
+        self.verts = []
+        self.objects = []  # (name, material, [face tuples of 0-based vertex ids])
+
+    def add_vertex(self, x, y, z_up):
+        # local ENU (east, north, up) -> OBJ Y-up (east, up, south)
+        self.verts.append((x, z_up, -y))
+        return len(self.verts) - 1
+
+    def start(self, name, material):
+        self.objects.append((name, material, []))
+        return self.objects[-1][2]
+
+    def write(self, obj_path, mtl_path):
+        with open(mtl_path, "w", encoding="utf-8") as fh:
+            for name, (rgb, ns) in MATERIALS.items():
+                r, g, b = rgb
+                fh.write(f"newmtl {name}\n")
+                fh.write(f"Kd {r:.3f} {g:.3f} {b:.3f}\n")
+                fh.write(f"Ka {r * 0.2:.3f} {g * 0.2:.3f} {b * 0.2:.3f}\n")
+                fh.write("Ks 0.05 0.05 0.05\n")
+                fh.write(f"Ns {ns}\n")
+                fh.write("illum 2\n\n")
+
+        with open(obj_path, "w", encoding="utf-8") as fh:
+            fh.write("# Georgia Tech campus - generated from GT Facilities public GIS layers\n")
+            fh.write(f"mtllib {os.path.basename(mtl_path)}\n")
+            for x, y, z in self.verts:
+                fh.write(f"v {x:.3f} {y:.3f} {z:.3f}\n")
+            for name, material, faces in self.objects:
+                if not faces:
+                    continue
+                fh.write(f"o {name}\n")
+                fh.write(f"usemtl {material}\n")
+                for face in faces:
+                    fh.write("f " + " ".join(str(i + 1) for i in face) + "\n")
+
+
+def add_ground(builder, features, name, material, elevation):
+    faces = builder.start(name, material)
+    for feature in features:
+        for polygon in polygons_of(feature.get("geometry")):
+            verts, ends = prepare(polygon)
+            if verts is None:
+                continue
+            tris = triangulate(verts, ends)
+            if not tris:
+                continue
+            base = [builder.add_vertex(px, py, elevation) for px, py in verts]
+            for a, b, c in tris:
+                faces.append((base[a], base[b], base[c]))
+    return sum(1 for _ in faces)
+
+
+def building_height(props, fallback):
+    # BLGHEIGHT is present on only a couple of records and contains bad values
+    # (a 3-storey house listed as 4375), so storey count is the reliable source.
+    floors = props.get("FLOORCOUNT")
+    if isinstance(floors, (int, float)) and 0 < floors <= 60:
+        return max(float(floors) * FLOOR_HEIGHT, MIN_BUILDING_HEIGHT)
+    return fallback
+
+
+def add_buildings(builder, features, name, material, fallback_height):
+    faces = builder.start(name, material)
+    count = 0
+    for feature in features:
+        height = building_height(feature.get("properties") or {}, fallback_height)
+        for polygon in polygons_of(feature.get("geometry")):
+            verts, ends = prepare(polygon)
+            if verts is None:
+                continue
+            tris = triangulate(verts, ends)
+            if not tris:
+                continue
+            low = [builder.add_vertex(px, py, 0.0) for px, py in verts]
+            high = [builder.add_vertex(px, py, height) for px, py in verts]
+            # Roof cap.
+            for a, b, c in tris:
+                faces.append((high[a], high[b], high[c]))
+            # Walls, ring by ring.
+            start = 0
+            for end in ends:
+                ring = list(range(start, int(end)))
+                for i, vi in enumerate(ring):
+                    vj = ring[(i + 1) % len(ring)]
+                    faces.append((low[vi], low[vj], high[vj], high[vi]))
+                start = int(end)
+            count += 1
+    return count
+
+
+def add_trees(builder, features):
+    trunk_faces = builder.start("Trees_Trunks", "tree_trunk")
+    canopy_faces = builder.start("Trees_Canopy", "tree_canopy")
+    trunk_sides, canopy_sides = 5, 7
+    trunk_ring = [(math.cos(2 * math.pi * i / trunk_sides), math.sin(2 * math.pi * i / trunk_sides))
+                  for i in range(trunk_sides)]
+    canopy_ring = [(math.cos(2 * math.pi * i / canopy_sides), math.sin(2 * math.pi * i / canopy_sides))
+                   for i in range(canopy_sides)]
+    count = 0
+    for feature in features:
+        geom = feature.get("geometry")
+        if not geom or geom.get("type") != "Point":
+            continue
+        props = feature.get("properties") or {}
+        lon, lat = geom["coordinates"][0], geom["coordinates"][1]
+        x, y = project(lon, lat)
+
+        total_h = props.get("TOTHT")
+        height = float(total_h) * FT if isinstance(total_h, (int, float)) and total_h > 1 else 7.0
+        height = min(max(height, 1.5), 45.0)
+
+        radius_ft = props.get("CanopyRadiusFT")
+        if isinstance(radius_ft, (int, float)) and radius_ft > 0:
+            canopy_r = float(radius_ft) * FT
+        else:
+            spread = [props.get("CROWNWIDTHNS"), props.get("CROWNWIDTHEW")]
+            spread = [float(s) for s in spread if isinstance(s, (int, float)) and s > 0]
+            canopy_r = (sum(spread) / len(spread) / 2.0) * FT if spread else height / 3.5
+        canopy_r = min(max(canopy_r, 0.4), 18.0)
+
+        dbh = props.get("DBH1")
+        trunk_r = (float(dbh) * 0.0254) / 2.0 if isinstance(dbh, (int, float)) and dbh > 0 else 0.12
+        trunk_r = min(max(trunk_r, 0.05), 1.6)
+
+        crown_base = height * 0.35
+        crown_mid = height * 0.60
+
+        # Trunk prism.
+        low = [builder.add_vertex(x + cx * trunk_r, y + cy * trunk_r, 0.0) for cx, cy in trunk_ring]
+        top = [builder.add_vertex(x + cx * trunk_r, y + cy * trunk_r, crown_base) for cx, cy in trunk_ring]
+        for i in range(trunk_sides):
+            j = (i + 1) % trunk_sides
+            trunk_faces.append((low[i], low[j], top[j], top[i]))
+
+        # Canopy: ring at crown_mid, apex above, apex below.
+        ring = [builder.add_vertex(x + cx * canopy_r, y + cy * canopy_r, crown_mid) for cx, cy in canopy_ring]
+        apex = builder.add_vertex(x, y, height)
+        base = builder.add_vertex(x, y, crown_base)
+        for i in range(canopy_sides):
+            j = (i + 1) % canopy_sides
+            canopy_faces.append((ring[i], ring[j], apex))
+            canopy_faces.append((ring[j], ring[i], base))
+        count += 1
+    return count
+
+
+def add_base_plane(builder, features):
+    """Campus site boundary as a base ground slab under everything."""
+    faces = builder.start("GroundBase", "ground_base")
+    for feature in features:
+        for polygon in polygons_of(feature.get("geometry")):
+            verts, ends = prepare(polygon)
+            if verts is None:
+                continue
+            tris = triangulate(verts, ends)
+            if not tris:
+                continue
+            base = [builder.add_vertex(px, py, -0.05) for px, py in verts]
+            for a, b, c in tris:
+                faces.append((base[a], base[b], base[c]))
+
+
+def main():
+    builder = ObjBuilder()
+
+    add_base_plane(builder, load("site_boundary"))
+    print("GroundBase           built")
+
+    for file_name, obj_name, material, elevation in GROUND_LAYERS:
+        features = load(file_name)
+        add_ground(builder, features, obj_name, material, elevation)
+        print(f"{obj_name:20s} {len(features):6d} features")
+
+    for file_name, obj_name, material, fallback in BUILDING_LAYERS:
+        features = load(file_name)
+        built = add_buildings(builder, features, obj_name, material, fallback)
+        print(f"{obj_name:20s} {built:6d} buildings extruded")
+
+    trees = load("trees")
+    planted = add_trees(builder, trees)
+    print(f"{'Trees':20s} {planted:6d} placed")
+
+    builder.write(OBJ_PATH, MTL_PATH)
+
+    total_faces = sum(len(f) for _, _, f in builder.objects)
+    print()
+    print(f"vertices : {len(builder.verts):,}")
+    print(f"faces    : {total_faces:,}")
+    print(f"objects  : {sum(1 for _, _, f in builder.objects if f)}")
+    print(f"written  : {OBJ_PATH}  ({os.path.getsize(OBJ_PATH) / 1e6:.1f} MB)")
+
+
+if __name__ == "__main__":
+    main()

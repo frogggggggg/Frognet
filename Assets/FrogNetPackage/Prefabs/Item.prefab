@@ -97,7 +97,8 @@ GameObject:
   - component: {fileID: 8924171297638274662}
   - component: {fileID: 1945408247732210843}
   - component: {fileID: 5651859890849696621}
-  - component: {fileID: 8910258653476080411}
+  - component: {fileID: 1600349686407261056}
+  - component: {fileID: 2449756464201417547}
   m_Layer: 0
   m_Name: Item
   m_TagString: Untagged
@@ -133,13 +134,29 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: e3db6bdf3e592634b89fdec85240f65a, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  _isSetup: 0
+  _prefabId: -2147483648
+  _componentIndex: -2147483648
+  _shouldBePooled: 0
+  _parent: {fileID: 0}
+  _invertedPathToNearestParent: 
+  _directChildren: []
+  _networkRules: {fileID: 0}
+  _visitiblityRules: {fileID: 0}
   item:
-    data: {fileID: 11400000, guid: c53e176bcf2ca604581f2ac9de268e44, type: 2}
-    quantity: 1
-    mods: []
+    _value:
+      data: {fileID: 0}
+      quantity: 0
+      mods: []
+    _ownerAuth: 0
+    _sendIntervalInSeconds: 0
   style: 0
   animateTime: 0.5
   followSpeed: 0.2
+  tossTime: 0.6
+  groundMask:
+    serializedVersion: 2
+    m_Bits: 4294967295
 --- !u!135 &5651859890849696621
 SphereCollider:
   m_ObjectHideFlags: 0
@@ -161,7 +178,7 @@ SphereCollider:
   serializedVersion: 3
   m_Radius: 0.5
   m_Center: {x: 0, y: 0, z: 0}
---- !u!114 &8910258653476080411
+--- !u!114 &1600349686407261056
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -170,11 +187,46 @@ MonoBehaviour:
   m_GameObject: {fileID: 8707007493803240678}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 98dbb08343eac044895b9b52872bcb49, type: 3}
+  m_Script: {fileID: 11500000, guid: 817fe5016bd0a2a49a95b6eb338bb132, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  _graphics: {fileID: 0}
-  _floatAccuracy: 1
-  _interpolationSettings: {fileID: 11400000, guid: 4a8aa8e44e23cfd4a8d4387ef3f36173, type: 2}
-  _unparentGraphics: 0
+  _isSetup: 0
+  _prefabId: -2147483648
+  _componentIndex: -2147483648
+  _shouldBePooled: 0
+  _parent: {fileID: 0}
+  _invertedPathToNearestParent: 
+  _directChildren: []
+  _networkRules: {fileID: 0}
+  _visitiblityRules: {fileID: 0}
+  _syncPosition: 1
+  _syncRotation: 1
+  _syncScale: 1
+  _syncParent: 1
+  _interpolateSettings: 7
+  _minBufferSize: 1
+  _maxBufferSize: 2
   _characterControllerPatch: 0
+  _ownerAuth: 1
+  _interpolationTiming: 0
+--- !u!114 &2449756464201417547
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 8707007493803240678}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5681fe548eb84304ea28a286062791f5, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  _isSetup: 0
+  _prefabId: -2147483648
+  _componentIndex: -2147483648
+  _shouldBePooled: 0
+  _parent: {fileID: 0}
+  _invertedPathToNearestParent: 
+  _directChildren: []
+  _networkRules: {fileID: 0}
+  _visitiblityRules: {fileID: 0}

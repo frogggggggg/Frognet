@@ -131,6 +131,7 @@ public sealed class PlayerMovement
 
         if (!IsFinite(input.cameraYaw))
             input.cameraYaw = 0f;
+
     }
 
     protected override void Simulate(
@@ -154,6 +155,7 @@ public sealed class PlayerMovement
         UpdateVelocity(Body, worldDirection*sprint, delta);
         UpdateFacing(worldDirection, ref state, delta);
         Jump(Body, input.jump);
+
     }
 
     private void Jump(Rigidbody body, bool jump)
@@ -313,6 +315,8 @@ public sealed class PlayerMovement
         // The physics root and PredictionGraphics remain unrotated.
         rotationPivot.localRotation =
             Quaternion.Euler(0f, viewState.yaw, 0f);
+
+        Shader.SetGlobalVector("_PlayerPos", GetComponent<PredictedTransform>().graphics.position);
     }
 
     private static bool IsFinite(Vector2 value)

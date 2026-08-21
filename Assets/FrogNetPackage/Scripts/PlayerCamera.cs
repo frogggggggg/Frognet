@@ -6,6 +6,7 @@ public class PlayerCamera : MonoBehaviour
 {
     public static PlayerCamera Instance { get; private set; }
     public Transform Player;
+    public Transform TempFollowTarget;
     public Vector3 offset;
     public Vector2 sensitivity = new Vector2(100f, 100f);
     public Vector2 UpDownClamp = new Vector2(-30, 60);
@@ -23,17 +24,13 @@ public class PlayerCamera : MonoBehaviour
     }
 
     private void InitializePlayer()
-{
-    foreach (PlayerManager player in PlayerManager.AllPlayers)
     {
-        if (!player.isOwner) continue;
+        if (!PlayerManager.TryGetLocal(out var player))
+            return;
 
-        // Follow the smoothed VIEW transform (Graphics child), not the sim root.
         var predicted = player.GetComponent<PredictedTransform>();
         Player = predicted && predicted.graphics ? predicted.graphics : player.transform;
-        break;
     }
-}
 
     void LateUpdate()
     {
@@ -45,6 +42,8 @@ public class PlayerCamera : MonoBehaviour
             InitializePlayer();
             return;
         }
+
+        Transform target = TempFollowTarget ? TempFollowTarget : Player;
 
         // Get mouse input from the new Input System
         Vector2 mouseDelta = Vector2.zero;
@@ -74,8 +73,8 @@ public class PlayerCamera : MonoBehaviour
 
         // Update position
         transform.position = movementSmoothing > 0
-            ? Vector3.Lerp(transform.position, Player.position, movementSmoothing * Time.deltaTime)
-            : Player.position;
+            ? Vector3.Lerp(transform.position, target.position, movementSmoothing * Time.deltaTime)
+            : target.position;
         transform.GetChild(0).localPosition = offset;
     }
 

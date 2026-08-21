@@ -1,0 +1,168 @@
+newmtl terrain
+Kd 0.210 0.250 0.160
+Ka 0.042 0.050 0.032
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl grass
+Kd 0.240 0.340 0.180
+Ka 0.048 0.068 0.036
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl road
+Kd 0.160 0.160 0.170
+Ka 0.032 0.032 0.034
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl parking
+Kd 0.220 0.220 0.230
+Ka 0.044 0.044 0.046
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl field
+Kd 0.300 0.440 0.200
+Ka 0.060 0.088 0.040
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl sidewalk
+Kd 0.620 0.610 0.580
+Ka 0.124 0.122 0.116
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl facade
+Kd 0.550 0.400 0.320
+Ka 0.110 0.080 0.064
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl facade_simple
+Kd 0.500 0.480 0.460
+Ka 0.100 0.096 0.092
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl roof_photo
+Kd 0.300 0.290 0.280
+Ka 0.060 0.058 0.056
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl foundation
+Kd 0.420 0.410 0.390
+Ka 0.084 0.082 0.078
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl monument
+Kd 0.640 0.630 0.600
+Ka 0.128 0.126 0.120
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl stairs
+Kd 0.580 0.570 0.540
+Ka 0.116 0.114 0.108
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl furniture_wood
+Kd 0.350 0.240 0.150
+Ka 0.070 0.048 0.030
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl furniture_metal
+Kd 0.300 0.310 0.330
+Ka 0.060 0.062 0.066
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl tree_trunk
+Kd 0.280 0.200 0.130
+Ka 0.056 0.040 0.026
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl tree_canopy
+Kd 0.160 0.340 0.140
+Ka 0.032 0.068 0.028
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl shrub
+Kd 0.190 0.300 0.150
+Ka 0.038 0.060 0.030
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl marking
+Kd 0.800 0.790 0.750
+Ka 0.160 0.158 0.150
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl marking_yellow
+Kd 0.660 0.500 0.110
+Ka 0.132 0.100 0.022
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl callbox_blue
+Kd 0.050 0.130 0.450
+Ka 0.010 0.026 0.090
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl art_bronze
+Kd 0.170 0.130 0.090
+Ka 0.034 0.026 0.018
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl art_stone
+Kd 0.600 0.580 0.540
+Ka 0.120 0.116 0.108
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl art_painted
+Kd 0.520 0.150 0.110
+Ka 0.104 0.030 0.022
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+
+newmtl water
+Kd 0.040 0.110 0.140
+Ka 0.008 0.022 0.028
+Ks 0.05 0.05 0.05
+Ns 8
+illum 2
+

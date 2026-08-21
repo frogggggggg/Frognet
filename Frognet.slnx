@@ -5,8 +5,8 @@
   <Project Path="LiteNetLib.csproj" />
   <Project Path="PurrNet.Edgegap.Runtime.csproj" />
   <Project Path="Unity.PurrNet.Codegen.csproj" />
-  <Project Path="PurrNetLobbySetup.csproj" />
   <Project Path="Assembly-CSharp-Editor.csproj" />
+  <Project Path="PurrNetLobbySetup.csproj" />
   <Project Path="Assembly-CSharp-firstpass.csproj" />
   <Project Path="Assembly-CSharp.csproj" />
   <Project Path="ToolbarExtender.Editor.csproj" />
