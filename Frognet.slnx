@@ -4,11 +4,11 @@
   <Project Path="SimpleWebTransport.csproj" />
   <Project Path="LiteNetLib.csproj" />
   <Project Path="PurrNet.Edgegap.Runtime.csproj" />
+  <Project Path="Assembly-CSharp.csproj" />
   <Project Path="Unity.PurrNet.Codegen.csproj" />
   <Project Path="Assembly-CSharp-Editor.csproj" />
   <Project Path="PurrNetLobbySetup.csproj" />
   <Project Path="Assembly-CSharp-firstpass.csproj" />
-  <Project Path="Assembly-CSharp.csproj" />
   <Project Path="ToolbarExtender.Editor.csproj" />
   <Project Path="PurrNet.Steam.Editor.csproj" />
   <Project Path="ParrelSync.csproj" />

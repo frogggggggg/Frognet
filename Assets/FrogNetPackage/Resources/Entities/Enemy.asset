@@ -1,0 +1,39 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: d9b9e33484311494f9380d7fb2747fec, type: 3}
+  m_Name: Enemy
+  m_EditorClassIdentifier: 
+  entityName: Enemy
+  description: 'Evil
+
+'
+  states: []
+  stats:
+  - rid: 1062755517511499856
+  - rid: 1062755517511499860
+  references:
+    version: 2
+    RefIds:
+    - rid: 1062755517511499856
+      type: {class: Health, ns: , asm: Assembly-CSharp}
+      data:
+        value: 0
+        min: 0
+        max: 0
+        grow: 0
+    - rid: 1062755517511499860
+      type: {class: Stamina, ns: , asm: Assembly-CSharp}
+      data:
+        value: 0
+        min: 0
+        max: 0
+        grow: 0

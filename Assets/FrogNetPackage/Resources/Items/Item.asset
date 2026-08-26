@@ -15,6 +15,4 @@ MonoBehaviour:
   itemName: Pebble
   description: Just a pebble
   maxStack: 5
-  mods:
-  - key: damage
-    value: 3
+  mods: []
