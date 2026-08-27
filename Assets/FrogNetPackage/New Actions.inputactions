@@ -86,6 +86,15 @@
                     "processors": "",
                     "interactions": "",
                     "initialStateCheck": false
+                },
+                {
+                    "name": "map",
+                    "type": "Button",
+                    "id": "1d52f9bb-4449-437d-a733-c38ced19b9b7",
+                    "expectedControlType": "",
+                    "processors": "",
+                    "interactions": "",
+                    "initialStateCheck": false
                 }
             ],
             "bindings": [
@@ -295,6 +304,17 @@
                     "processors": "",
                     "groups": "",
                     "action": "submit",
+                    "isComposite": false,
+                    "isPartOfComposite": false
+                },
+                {
+                    "name": "",
+                    "id": "742ace4b-2caf-482a-a2b3-7fc83e9c4246",
+                    "path": "<Keyboard>/m",
+                    "interactions": "",
+                    "processors": "",
+                    "groups": "",
+                    "action": "map",
                     "isComposite": false,
                     "isPartOfComposite": false
                 }

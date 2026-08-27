@@ -7,6 +7,7 @@ public class PlayerCamera : MonoBehaviour
     public static PlayerCamera Instance { get; private set; }
     public Transform Player;
     public Transform TempFollowTarget;
+    public Transform rotationChild;
     public Vector3 offset;
     public Vector2 sensitivity = new Vector2(100f, 100f);
     public Vector2 UpDownClamp = new Vector2(-30, 60);
@@ -63,19 +64,19 @@ public class PlayerCamera : MonoBehaviour
 
         // Apply rotations with angle wrap handling
         float smoothPitch = rotationSmoothing > 0
-            ? Mathf.LerpAngle(transform.localEulerAngles.x, xRotation, rotationSmoothing * Time.deltaTime)
+            ? Mathf.LerpAngle(rotationChild.localEulerAngles.x, xRotation, rotationSmoothing * Time.deltaTime)
             : xRotation;
         float smoothYaw = rotationSmoothing > 0
-            ? Mathf.LerpAngle(transform.localEulerAngles.y, yRotation, rotationSmoothing * Time.deltaTime)
+            ? Mathf.LerpAngle(rotationChild.localEulerAngles.y, yRotation, rotationSmoothing * Time.deltaTime)
             : yRotation;
 
-        transform.localRotation = Quaternion.Euler(smoothPitch, smoothYaw, 0f);
+        rotationChild.localRotation = Quaternion.Euler(smoothPitch, smoothYaw, 0f);
 
         // Update position
         transform.position = movementSmoothing > 0
             ? Vector3.Lerp(transform.position, target.position, movementSmoothing * Time.deltaTime)
             : target.position;
-        transform.GetChild(0).localPosition = offset;
+        rotationChild.GetChild(0).localPosition = offset;
     }
 
     private void SetCursorLocked(bool locked)

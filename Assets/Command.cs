@@ -39,7 +39,7 @@ public class Command : NetworkBehaviour
 
     void Update()
     {
-        if(InputSystem.actions["submit"].IsPressed())
+        if(InputSystem.actions["submit"].WasPressedThisFrame())
         {
             if(inputField != null)
             {
