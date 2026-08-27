@@ -1,30 +1,40 @@
 using UnityEngine;
+using System;
+using System.Collections.Generic;
 using UnityEngine.Events;
 using UnityEngine.InputSystem;
 public class keybind : MonoBehaviour
 {
-    public string actionName;
-    public GameObject enableObject;
-    public bool enableMouse = false;
+    [Serializable]
+    public class KeyEvent
+    {
+        public string actionName;
+        public UnityEvent On;
+        public UnityEvent Off;
+        public bool enableMouse = false;
+        public bool toggle = false;
+    }
     public static bool disableMovement = false;
+
+    public List<KeyEvent> events = new List<KeyEvent>();
 
     void Update()
     {
-        if (InputSystem.actions[actionName].triggered)
+        foreach(KeyEvent keyEvent in events)
         {
-            if (enableObject != null)
+            if (InputSystem.actions[keyEvent.actionName].triggered)
             {
-                DoAction();
+                keyEvent.toggle = !keyEvent.toggle;
+                if (keyEvent.enableMouse) {
+                    PlayerCamera.cursorLocked = !keyEvent.toggle;
+                    disableMovement = keyEvent.toggle;
+                }
+                if(keyEvent.toggle) {
+                    keyEvent.On.Invoke();
+                } else {
+                    keyEvent.Off.Invoke();
+                }
             }
-        }
-    }
-
-    public void DoAction()
-    {
-        enableObject.SetActive(!enableObject.activeSelf);
-        if (enableMouse) {
-            PlayerCamera.cursorLocked = !enableObject.activeSelf;
-            disableMovement = enableObject.activeSelf;
         }
     }
 }

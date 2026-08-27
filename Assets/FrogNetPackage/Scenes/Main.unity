@@ -363,7 +363,6 @@ GameObject:
   - component: {fileID: 223603354}
   - component: {fileID: 223603353}
   - component: {fileID: 223603352}
-  - component: {fileID: 223603355}
   m_Layer: 0
   m_Name: Mask
   m_TagString: Untagged
@@ -442,31 +441,6 @@ CanvasRenderer:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 223603350}
   m_CullTransparentMesh: 1
---- !u!114 &223603355
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 223603350}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: a784357c0fab04943912103208ba9d78, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  player: {fileID: 0}
-  mapSize: {x: 100, y: 100}
-  exploreRadius: 5
-  mapMaterial: {fileID: 2100000, guid: 91c42038df0b9ae45ab00502b6184352, type: 2}
-  MapContainer: {fileID: 223603351}
-  MapChild: {fileID: 700538720}
-  Mini: {fileID: 370307373}
-  Large: {fileID: 1085541249}
-  mapCamera: {fileID: 1405536443}
-  CameraSizeChange: {x: 15, y: 50}
-  PPUSizeChange: {x: 5.5, y: 50}
-  time: 0.5
-  ease: 19
 --- !u!1 &326009363
 GameObject:
   m_ObjectHideFlags: 0
@@ -2241,7 +2215,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!224 &590725603
 RectTransform:
   m_ObjectHideFlags: 0
@@ -2583,6 +2557,7 @@ GameObject:
   serializedVersion: 6
   m_Component:
   - component: {fileID: 645780087}
+  - component: {fileID: 645780088}
   m_Layer: 0
   m_Name: Map
   m_TagString: Untagged
@@ -2612,6 +2587,31 @@ RectTransform:
   m_AnchoredPosition: {x: 0, y: 0}
   m_SizeDelta: {x: 0, y: 0}
   m_Pivot: {x: 0.5, y: 0.5}
+--- !u!114 &645780088
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 645780086}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a784357c0fab04943912103208ba9d78, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  player: {fileID: 0}
+  mapSize: {x: 100, y: 100}
+  exploreRadius: 5
+  mapMaterial: {fileID: 2100000, guid: 91c42038df0b9ae45ab00502b6184352, type: 2}
+  MapContainer: {fileID: 223603351}
+  MapChild: {fileID: 700538720}
+  Mini: {fileID: 370307373}
+  Large: {fileID: 1085541249}
+  mapCamera: {fileID: 1405536443}
+  CameraSizeChange: {x: 15, y: 50}
+  PPUSizeChange: {x: 5.5, y: 50}
+  time: 0.5
+  ease: 19
 --- !u!1 &647064170
 GameObject:
   m_ObjectHideFlags: 0
@@ -3746,9 +3746,9 @@ RectTransform:
   m_Father: {fileID: 504704317}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 0}
-  m_AnchorMax: {x: 0, y: 0}
+  m_AnchorMax: {x: 1, y: 1}
   m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 0, y: 0}
+  m_SizeDelta: {x: -12, y: 0}
   m_Pivot: {x: 0, y: 1}
 --- !u!114 &1259560780
 MonoBehaviour:
@@ -5490,7 +5490,6 @@ GameObject:
   - component: {fileID: 2035826546}
   - component: {fileID: 2035826545}
   - component: {fileID: 2035826548}
-  - component: {fileID: 2035826549}
   m_Layer: 0
   m_Name: Canvas
   m_TagString: Untagged
@@ -5595,24 +5594,106 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: cbd4f711e82cd2d47bb5e624a9d8892e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  actionName: menu
-  enableObject: {fileID: 387260458}
-  enableMouse: 1
---- !u!114 &2035826549
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 2035826543}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: cbd4f711e82cd2d47bb5e624a9d8892e, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  actionName: command
-  enableObject: {fileID: 590725602}
-  enableMouse: 1
+  events:
+  - actionName: menu
+    On:
+      m_PersistentCalls:
+        m_Calls:
+        - m_Target: {fileID: 387260458}
+          m_TargetAssemblyTypeName: UnityEngine.GameObject, UnityEngine
+          m_MethodName: SetActive
+          m_Mode: 6
+          m_Arguments:
+            m_ObjectArgument: {fileID: 0}
+            m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
+            m_IntArgument: 0
+            m_FloatArgument: 0
+            m_StringArgument: 
+            m_BoolArgument: 1
+          m_CallState: 2
+    Off:
+      m_PersistentCalls:
+        m_Calls:
+        - m_Target: {fileID: 387260458}
+          m_TargetAssemblyTypeName: UnityEngine.GameObject, UnityEngine
+          m_MethodName: SetActive
+          m_Mode: 6
+          m_Arguments:
+            m_ObjectArgument: {fileID: 0}
+            m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
+            m_IntArgument: 0
+            m_FloatArgument: 0
+            m_StringArgument: 
+            m_BoolArgument: 0
+          m_CallState: 2
+    enableMouse: 1
+    toggle: 0
+  - actionName: command
+    On:
+      m_PersistentCalls:
+        m_Calls:
+        - m_Target: {fileID: 590725602}
+          m_TargetAssemblyTypeName: UnityEngine.GameObject, UnityEngine
+          m_MethodName: SetActive
+          m_Mode: 6
+          m_Arguments:
+            m_ObjectArgument: {fileID: 0}
+            m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
+            m_IntArgument: 0
+            m_FloatArgument: 0
+            m_StringArgument: 
+            m_BoolArgument: 1
+          m_CallState: 2
+    Off:
+      m_PersistentCalls:
+        m_Calls:
+        - m_Target: {fileID: 590725602}
+          m_TargetAssemblyTypeName: UnityEngine.GameObject, UnityEngine
+          m_MethodName: SetActive
+          m_Mode: 6
+          m_Arguments:
+            m_ObjectArgument: {fileID: 0}
+            m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
+            m_IntArgument: 0
+            m_FloatArgument: 0
+            m_StringArgument: 
+            m_BoolArgument: 0
+          m_CallState: 2
+    enableMouse: 1
+    toggle: 0
+  - actionName: map
+    On:
+      m_PersistentCalls:
+        m_Calls:
+        - m_Target: {fileID: 645780088}
+          m_TargetAssemblyTypeName: Map, Assembly-CSharp
+          m_MethodName: Swap
+          m_Mode: 1
+          m_Arguments:
+            m_ObjectArgument: {fileID: 0}
+            m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
+            m_IntArgument: 0
+            m_FloatArgument: 0
+            m_StringArgument: 
+            m_BoolArgument: 1
+          m_CallState: 2
+    Off:
+      m_PersistentCalls:
+        m_Calls:
+        - m_Target: {fileID: 645780088}
+          m_TargetAssemblyTypeName: Map, Assembly-CSharp
+          m_MethodName: Swap
+          m_Mode: 1
+          m_Arguments:
+            m_ObjectArgument: {fileID: 0}
+            m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
+            m_IntArgument: 0
+            m_FloatArgument: 0
+            m_StringArgument: 
+            m_BoolArgument: 0
+          m_CallState: 2
+    enableMouse: 1
+    toggle: 0
 --- !u!1 &2039237367
 GameObject:
   m_ObjectHideFlags: 0
@@ -5816,8 +5897,8 @@ RectTransform:
   m_Children: []
   m_Father: {fileID: 963004592}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
-  m_AnchorMin: {x: 0, y: 0}
-  m_AnchorMax: {x: 0, y: 0}
+  m_AnchorMin: {x: 0, y: 0.43333334}
+  m_AnchorMax: {x: 1, y: 1}
   m_AnchoredPosition: {x: 0, y: 0}
   m_SizeDelta: {x: 0, y: 0}
   m_Pivot: {x: 0.5, y: 0.5}

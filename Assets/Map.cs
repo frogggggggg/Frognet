@@ -41,10 +41,6 @@ public class Map : MonoBehaviour
 
     void Update()
     {
-        if(InputSystem.actions["map"].WasPressedThisFrame())
-        {
-            Swap();
-        }
         Shader.SetGlobalVector("_mapCameraPosition", mapCamera.transform.position);
         Shader.SetGlobalFloat("_mapCameraSize", mapCamera.orthographicSize);
         Shader.SetGlobalVector("_mapSize", (Vector4)(new Vector2(mapSize.x, mapSize.y)));
