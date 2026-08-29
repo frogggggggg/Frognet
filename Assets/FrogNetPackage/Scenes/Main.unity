@@ -861,41 +861,6 @@ CanvasRenderer:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 345545577}
   m_CullTransparentMesh: 1
---- !u!1 &370307372
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 370307373}
-  m_Layer: 0
-  m_Name: Mini
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!224 &370307373
-RectTransform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 370307372}
-  m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 2, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 645780087}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
-  m_AnchorMin: {x: 1, y: 1}
-  m_AnchorMax: {x: 1, y: 1}
-  m_AnchoredPosition: {x: -20, y: -20}
-  m_SizeDelta: {x: 300, y: 300}
-  m_Pivot: {x: 1, y: 1}
 --- !u!1 &376981899
 GameObject:
   m_ObjectHideFlags: 0
@@ -2577,8 +2542,6 @@ RectTransform:
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
-  - {fileID: 370307373}
-  - {fileID: 1085541249}
   - {fileID: 223603351}
   m_Father: {fileID: 2035826544}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
@@ -2600,18 +2563,25 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   player: {fileID: 0}
-  mapSize: {x: 100, y: 100}
+  mapSize: {x: 300, y: 300}
   exploreRadius: 5
+  revealSpeed: 4
   mapMaterial: {fileID: 2100000, guid: 91c42038df0b9ae45ab00502b6184352, type: 2}
   MapContainer: {fileID: 223603351}
   MapChild: {fileID: 700538720}
-  Mini: {fileID: 370307373}
-  Large: {fileID: 1085541249}
+  minimapSize: 300
+  minimapPadding: 20
   mapCamera: {fileID: 1405536443}
+  mapRotation: {fileID: 1565893895}
   CameraSizeChange: {x: 15, y: 50}
   PPUSizeChange: {x: 5.5, y: 50}
   time: 0.5
   ease: 19
+  zoomSpeed: 30
+  smoothSpeed: 10
+  cameraSizeLimits: {x: 10, y: 500}
+  clampElasticity: 0.1
+  dragSpeed: 0.7
 --- !u!1 &647064170
 GameObject:
   m_ObjectHideFlags: 0
@@ -2734,16 +2704,16 @@ RectTransform:
   m_GameObject: {fileID: 700538719}
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
   m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 2, y: 1, z: 1}
+  m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 223603351}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
-  m_AnchorMin: {x: 0, y: 0}
-  m_AnchorMax: {x: 1, y: 1}
+  m_AnchorMin: {x: 0.5, y: 0.5}
+  m_AnchorMax: {x: 0.5, y: 0.5}
   m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 0, y: 0}
-  m_Pivot: {x: 0.5, y: 1}
+  m_SizeDelta: {x: 300, y: 300}
+  m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &700538723
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -3384,41 +3354,6 @@ MonoBehaviour:
   m_ChildScaleWidth: 0
   m_ChildScaleHeight: 0
   m_ReverseArrangement: 0
---- !u!1 &1085541248
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 1085541249}
-  m_Layer: 0
-  m_Name: Large
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!224 &1085541249
-RectTransform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1085541248}
-  m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 645780087}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
-  m_AnchorMin: {x: 0, y: 0}
-  m_AnchorMax: {x: 1, y: 1}
-  m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 0, y: 0}
-  m_Pivot: {x: 0.5, y: 0.5}
 --- !u!1 &1195748356
 GameObject:
   m_ObjectHideFlags: 0
@@ -4372,7 +4307,7 @@ Camera:
     x: 0
     y: 0
     width: 1280
-    height: 720
+    height: 1280
   near clip plane: 0.3
   far clip plane: 1000
   field of view: 60
