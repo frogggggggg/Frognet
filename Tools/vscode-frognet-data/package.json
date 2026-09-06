@@ -1,0 +1,104 @@
+{
+    "name":  "frognet-data",
+    "displayName":  "Frognet Data",
+    "description":  "Highlighting and formatting for Frognet schema (.fschema) and data (.fdata) files.",
+    "version":  "0.1.0",
+    "publisher":  "frognet",
+    "private":  true,
+    "license":  "MIT",
+    "engines":  {
+                    "vscode":  "^1.75.0"
+                },
+    "categories":  [
+                       "Programming Languages",
+                       "Formatters"
+                   ],
+    "main":  "./extension.js",
+    "scripts":  {
+                    "test":  "node test-format.js \u0026\u0026 node test-notebook.js \u0026\u0026 node test-grammar.js"
+                },
+    "devDependencies":  {
+                            "vscode-oniguruma":  "^2.0.1",
+                            "vscode-textmate":  "^9.0.0"
+                        },
+    "activationEvents":  [
+                             "onLanguage:frognet-schema",
+                             "onLanguage:frognet-data",
+                             "onCommand:frognet.openAllData",
+                             "onCommand:frognet.openAllSchemas",
+                             "onCommand:frognet.browseAllData",
+                             "onCommand:frognet.browseAllSchemas"
+                         ],
+    "contributes":  {
+                        "commands":  [
+                                         {
+                                             "command":  "frognet.browseAllData",
+                                             "title":  "Browse All Items",
+                                             "category":  "Frognet Data"
+                                         },
+                                         {
+                                             "command":  "frognet.browseAllSchemas",
+                                             "title":  "Browse All Schemas",
+                                             "category":  "Frognet Data"
+                                         },
+                                         {
+                                             "command":  "frognet.openAllData",
+                                             "title":  "Open All Data Files as Text",
+                                             "category":  "Frognet Data"
+                                         },
+                                         {
+                                             "command":  "frognet.openAllSchemas",
+                                             "title":  "Open All Schemas as Text",
+                                             "category":  "Frognet Data"
+                                         }
+                                     ],
+                        "languages":  [
+                                          {
+                                              "id":  "frognet-schema",
+                                              "aliases":  [
+                                                              "Frognet Schema"
+                                                          ],
+                                              "extensions":  [
+                                                                 ".fschema"
+                                                             ],
+                                              "configuration":  "./language-configuration.json"
+                                          },
+                                          {
+                                              "id":  "frognet-data",
+                                              "aliases":  [
+                                                              "Frognet Data"
+                                                          ],
+                                              "extensions":  [
+                                                                 ".fdata"
+                                                             ],
+                                              "configuration":  "./language-configuration.json"
+                                          }
+                                      ],
+                        "grammars":  [
+                                         {
+                                             "language":  "frognet-schema",
+                                             "scopeName":  "source.fschema",
+                                             "path":  "./syntaxes/frognet-schema.tmLanguage.json"
+                                         },
+                                         {
+                                             "language":  "frognet-data",
+                                             "scopeName":  "source.fdata",
+                                             "path":  "./syntaxes/frognet-data.tmLanguage.json"
+                                         }
+                                     ],
+                        "notebooks":  [
+                                          {
+                                              "type":  "frognet-data-notebook",
+                                              "displayName":  "Frognet Data",
+                                              "selector":  [
+                                                               {
+                                                                   "filenamePattern":  "*.fdata-all"
+                                                               },
+                                                               {
+                                                                   "filenamePattern":  "*.fschema-all"
+                                                               }
+                                                           ]
+                                          }
+                                      ]
+                    }
+}

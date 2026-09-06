@@ -20,6 +20,7 @@ MonoBehaviour:
   stats:
   - rid: 1062755517511499856
   - rid: 1062755517511499860
+  - rid: 3259168688347807813
   references:
     version: 2
     RefIds:
@@ -37,3 +38,11 @@ MonoBehaviour:
         min: 0
         max: 0
         grow: 0
+    - rid: 3259168688347807813
+      type: {class: Buff_Damage, ns: , asm: Assembly-CSharp}
+      data:
+        value: 0
+        min: 0
+        max: 0
+        grow: 0
+        time: 0

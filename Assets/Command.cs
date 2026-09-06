@@ -13,7 +13,6 @@ public class Command : NetworkBehaviour
     public TMP_InputField inputField;
     public ScrollRect suggestions;
     public ScrollRect outputScroll;
-    public GameObject itemPrefab;
     public static Command Instance;
 
 
@@ -71,9 +70,12 @@ public class Command : NetworkBehaviour
             { "player", playerTransform },
             { "here", playerTransform ? playerTransform.position : Vector3.zero }
         };
-        foreach (ItemData data in ItemData.All)
+        foreach (Frognet.Data.Definition def in ItemRegistry.All)
         {
-            wordDictionary[data.itemName] = data;
+            // Command words are split on spaces, so a multi word name also gets an underscore alias.
+            Item item = ItemRegistry.Create(def.id);
+            wordDictionary[def.name] = item;
+            wordDictionary[def.name.Replace(' ', '_')] = item;
         }
 
     }
@@ -245,11 +247,7 @@ public class Command : NetworkBehaviour
         if(!Permissions.Instance || !Permissions.Instance.Allows(info.sender, "spawnitem"))
             return;
 
-        if(item.IsEmpty || itemPrefab == null)
-            return;
-
-        GameObject spawnedItem = Instantiate(itemPrefab, position, Quaternion.identity);
-        spawnedItem.GetComponent<Pickup>().Initialize(item);
+        ItemSpawn.Spawn(item, position);
     }
 
     /// <summary>

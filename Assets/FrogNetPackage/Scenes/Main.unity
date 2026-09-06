@@ -5444,9 +5444,9 @@ RectTransform:
   m_LocalScale: {x: 0, y: 0, z: 0}
   m_ConstrainProportionsScale: 0
   m_Children:
-  - {fileID: 387260459}
-  - {fileID: 590725603}
   - {fileID: 645780087}
+  - {fileID: 590725603}
+  - {fileID: 387260459}
   m_Father: {fileID: 2050668559}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 0}
@@ -5563,6 +5563,7 @@ MonoBehaviour:
           m_CallState: 2
     enableMouse: 1
     toggle: 0
+    layer: 3
   - actionName: command
     On:
       m_PersistentCalls:
@@ -5596,6 +5597,7 @@ MonoBehaviour:
           m_CallState: 2
     enableMouse: 1
     toggle: 0
+    layer: 2
   - actionName: map
     On:
       m_PersistentCalls:
@@ -5629,6 +5631,7 @@ MonoBehaviour:
           m_CallState: 2
     enableMouse: 1
     toggle: 0
+    layer: 1
 --- !u!1 &2039237367
 GameObject:
   m_ObjectHideFlags: 0

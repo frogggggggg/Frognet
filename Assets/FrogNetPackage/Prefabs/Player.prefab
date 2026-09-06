@@ -332,11 +332,11 @@ GameObject:
   m_Component:
   - component: {fileID: 17331951035472197}
   - component: {fileID: 5689731124435671903}
+  - component: {fileID: -5937447033455198273}
   - component: {fileID: 4353736674314327582}
   - component: {fileID: 2070567230280092835}
   - component: {fileID: 4217471733698070284}
   - component: {fileID: 4431227099479841471}
-  - component: {fileID: -5937447033455198273}
   m_Layer: 0
   m_Name: Player
   m_TagString: Player
@@ -381,6 +381,19 @@ MonoBehaviour:
   _interpolationSettings: {fileID: 11400000, guid: 4a8aa8e44e23cfd4a8d4387ef3f36173, type: 2}
   _unparentGraphics: 0
   _characterControllerPatch: 0
+--- !u!114 &-5937447033455198273
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 4662212155698223252}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 60847573d73df9e41b1e86725c5b0ebb, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  data: {fileID: 11400000, guid: 1bfee3ff8814e4d489600c081ea74bfc, type: 2}
 --- !u!114 &4353736674314327582
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -466,19 +479,6 @@ MonoBehaviour:
   _floatAccuracy: 1
   _eventMask: 63
   _ignoreTriggerOnTrigger: 0
---- !u!114 &-5937447033455198273
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 4662212155698223252}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 60847573d73df9e41b1e86725c5b0ebb, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  data: {fileID: 0}
 --- !u!1 &6257418599570973346
 GameObject:
   m_ObjectHideFlags: 0

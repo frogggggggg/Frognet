@@ -74,9 +74,8 @@ public class Inventory : NetworkBehaviour
     [ServerRpc(requireOwnership: true)]
     void ServerDrop(int index, int removeQuantity)
     {
-        GameObject itemPrefab = Command.Instance ? Command.Instance.itemPrefab : null;
-
-        if (!itemPrefab)
+        // Checked before removing, so a missing prefab does not swallow the item.
+        if (!ItemSpawn.PrefabFor(GetSlot(index)))
             return;
 
         // Remove is the validation: it bounds-checks and clamps to what the slot actually holds.
@@ -85,18 +84,9 @@ public class Inventory : NetworkBehaviour
         if (item.IsEmpty)
             return;
 
-        GameObject spawnedItem = Instantiate(itemPrefab, transform.position, Quaternion.identity);
-        spawnedItem.GetComponent<Pickup>().Initialize(item);
+        ItemSpawn.Spawn(item, transform.position);
     }
 
-
-    /// <summary>
-    /// Two items merge only if they are the same definition and carry the same modifications.
-    /// </summary>
-    private static bool SameKind(Item a, Item b)
-    {
-        return a.data == b.data && Item.SameMods(a, b);
-    }
 
     /// <summary>
     /// Returns the index of the first empty slot, or -1 if the inventory is full.
@@ -120,7 +110,7 @@ public class Inventory : NetworkBehaviour
     {
         for (int i = 0; i < slots.Length; i++)
         {
-            if (!slots[i].IsEmpty && slots[i].quantity < slots[i].data.maxStack && SameKind(slots[i], item))
+            if (!slots[i].IsEmpty && slots[i].quantity < slots[i].MaxStack && Item.SameKind(slots[i], item))
                 return i;
         }
 
@@ -142,11 +132,11 @@ public class Inventory : NetworkBehaviour
         Item slot = slots[index];
 
         if (slot.IsEmpty)
-            slot = new Item { data = item.data, mods = item.mods, quantity = 0 };
-        else if (!SameKind(slot, item))
+            slot = new Item(item.id, 0, item.overrides);
+        else if (!Item.SameKind(slot, item))
             return item.quantity;
 
-        int moved = Math.Min(item.data.maxStack - slot.quantity, item.quantity);
+        int moved = Math.Min(item.MaxStack - slot.quantity, item.quantity);
 
         if (moved <= 0)
             return item.quantity;
