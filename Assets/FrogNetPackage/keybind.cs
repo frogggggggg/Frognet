@@ -13,6 +13,7 @@ public class keybind : MonoBehaviour
         public UnityEvent Off;
         public bool enableMouse = false;
         public bool toggle = false;
+        public int layer;
     }
     public static bool disableMovement = false;
 
@@ -24,6 +25,17 @@ public class keybind : MonoBehaviour
         {
             if (InputSystem.actions[keyEvent.actionName].triggered)
             {
+                bool breakLoop = false;
+                foreach (KeyEvent otherEvent in events)
+                {
+                    if(otherEvent==keyEvent) continue;
+                    if(otherEvent.toggle &&otherEvent.layer > keyEvent.layer)
+                    {
+                        breakLoop = true;
+                    }
+                }
+                if(breakLoop) break;
+
                 keyEvent.toggle = !keyEvent.toggle;
                 if (keyEvent.enableMouse) {
                     PlayerCamera.cursorLocked = !keyEvent.toggle;

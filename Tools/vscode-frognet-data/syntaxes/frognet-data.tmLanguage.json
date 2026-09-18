@@ -1,0 +1,110 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Frognet Data",
+  "scopeName": "source.fdata",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#freetext" },
+    { "include": "#section" },
+    { "include": "#call" },
+    { "include": "#numeric" },
+    { "include": "#boolean" },
+    { "include": "#branch" },
+    { "include": "#text" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "//.*$",
+      "name": "comment.line.double-slash.fdata"
+    },
+    "number": {
+      "match": "-?\\d+(?:\\.\\d+)?",
+      "name": "constant.numeric.fdata"
+    },
+
+    "freetext": {
+      "comment": "Fields that always hold prose, so digits inside them are not numbers.",
+      "match": "^\\s*(name|description|prefab)\\s*(:)\\s*(.+?)\\s*(?=//|$)",
+      "captures": {
+        "1": { "name": "keyword.control.field.fdata" },
+        "2": { "name": "punctuation.separator.key-value.fdata" },
+        "3": { "name": "string.unquoted.fdata" }
+      }
+    },
+
+    "section": {
+      "comment": "A key with nothing after the colon opens an indented block.",
+      "match": "^\\s*([A-Za-z_][A-Za-z0-9_.]*)\\s*(:)\\s*(?=//|$)",
+      "captures": {
+        "1": { "name": "entity.name.tag.section.fdata" },
+        "2": { "name": "punctuation.separator.key-value.fdata" }
+      }
+    },
+
+    "call": {
+      "comment": "A chosen branch with arguments, such as consumable: speed(1, 2)",
+      "match": "^\\s*([A-Za-z_][A-Za-z0-9_.]*)\\s*(:)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(\\()([^)]*)(\\))",
+      "captures": {
+        "1": { "name": "entity.name.tag.key.fdata" },
+        "2": { "name": "punctuation.separator.key-value.fdata" },
+        "3": { "name": "entity.name.function.branch.fdata" },
+        "4": { "name": "punctuation.section.parens.fdata" },
+        "5": {
+          "patterns": [
+            { "include": "#number" },
+            { "include": "#boolean-word" },
+            { "include": "#argtext" }
+          ]
+        },
+        "6": { "name": "punctuation.section.parens.fdata" }
+      }
+    },
+
+    "numeric": {
+      "match": "^\\s*([A-Za-z_][A-Za-z0-9_.]*)\\s*(:)\\s*(-?\\d+(?:\\.\\d+)?(?:\\s*,\\s*-?\\d+(?:\\.\\d+)?)*)\\s*(?=//|$)",
+      "captures": {
+        "1": { "name": "entity.name.tag.key.fdata" },
+        "2": { "name": "punctuation.separator.key-value.fdata" },
+        "3": { "patterns": [{ "include": "#number" }] }
+      }
+    },
+
+    "boolean": {
+      "match": "^\\s*([A-Za-z_][A-Za-z0-9_.]*)\\s*(:)\\s*(true|false)\\s*(?=//|$)",
+      "captures": {
+        "1": { "name": "entity.name.tag.key.fdata" },
+        "2": { "name": "punctuation.separator.key-value.fdata" },
+        "3": { "name": "constant.language.boolean.fdata" }
+      }
+    },
+
+    "branch": {
+      "comment": "A single bare word is a chosen branch, such as equipable: head",
+      "match": "^\\s*([A-Za-z_][A-Za-z0-9_.]*)\\s*(:)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(?=//|$)",
+      "captures": {
+        "1": { "name": "entity.name.tag.key.fdata" },
+        "2": { "name": "punctuation.separator.key-value.fdata" },
+        "3": { "name": "variable.other.enummember.fdata" }
+      }
+    },
+
+    "text": {
+      "match": "^\\s*([A-Za-z_][A-Za-z0-9_.]*)\\s*(:)\\s*(.+?)\\s*(?=//|$)",
+      "captures": {
+        "1": { "name": "entity.name.tag.key.fdata" },
+        "2": { "name": "punctuation.separator.key-value.fdata" },
+        "3": { "name": "string.unquoted.fdata" }
+      }
+    },
+
+    "boolean-word": {
+      "match": "\\b(true|false)\\b",
+      "name": "constant.language.boolean.fdata"
+    },
+    "argtext": {
+      "comment": "Must not start on whitespace, or it would swallow the argument after a comma before the number rule gets a chance.",
+      "match": "[^\\s,()][^,()]*",
+      "name": "string.unquoted.fdata"
+    }
+  }
+}

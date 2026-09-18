@@ -1,0 +1,16 @@
+// A scratch item that touches every part of the schema at once. Handy for checking that a
+// change to the format still parses. Delete it whenever you like.
+
+name: test item
+description: exercises every part of the schema
+maxStack: 99
+data:
+    durability: 100
+    maxDurability: 100
+    label: The Everything Stick, Mk. 2
+    consumable: speed(2.5, 30)
+    equipable: torso
+// Overrides a fresh copy starts with: worn down, and renamed.
+modified_data:
+    durability: 37.5
+    label: Chipped Everything Stick
