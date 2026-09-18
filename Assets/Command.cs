@@ -43,12 +43,10 @@ public class Command : NetworkBehaviour
         {
             if(inputField != null)
             {
-                if(inputField.isFocused)
-                {
-                    SubmitCommand(inputField.text);
-                    inputField.text = string.Empty;
-                    inputField.ActivateInputField();
-                }
+
+                SubmitCommand(inputField.text);
+                inputField.text = string.Empty;
+                inputField.ActivateInputField();
             }
         }
     }
