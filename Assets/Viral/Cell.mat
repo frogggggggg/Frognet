@@ -169,6 +169,11 @@ Material:
     - _RimOutput: 0.3
     - _RimPower: 2.6
     - _RimSteps: 1
+    - _RippleAmplitude: 1
+    - _RippleDecay: 5
+    - _RippleSpeed: 2.5
+    - _RippleWavelength: 2.63
+    - _RippleWidth: 3
     - _Scale: 0.69
     - _Shades: 5
     - _Shading: 1
@@ -195,8 +200,8 @@ Material:
     m_Colors:
     - _BaseColor: {r: 1, g: 1, b: 1, a: 1}
     - _Clamp: {r: 0.7, g: 1, b: 0, a: 0}
-    - _Color: {r: 1, g: 0.3679244, b: 0.3679244, a: 1}
-    - _DeepColor: {r: 1, g: 0.31822497, b: 0, a: 1}
+    - _Color: {r: 1, g: 0.3238992, b: 0.3238992, a: 1}
+    - _DeepColor: {r: 0.6855345, g: 0.51625997, b: 0.3039633, a: 1}
     - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}
     - _Offset: {r: 0, g: 0, b: 0, a: 0}
     - _RimColor: {r: 0, g: 0, b: 0, a: 1}

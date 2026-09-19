@@ -44,6 +44,13 @@ Shader "Custom/BloodCellTriplanar"
         _RimSteps ("Rim Steps", Range(1,4)) = 2
         _SpecThreshold ("Specular Cutoff", Range(0,1)) = 0.55
 
+        [Header(Impact Ripple)]
+        _RippleAmplitude ("Ripple Amplitude", Range(0,1)) = 0.12
+        _RippleWavelength ("Ripple Wavelength", Float) = 0.7
+        _RippleSpeed ("Ripple Speed", Float) = 2.5
+        _RippleWidth ("Ripple Width", Float) = 0.9
+        _RippleDecay ("Ripple Decay", Float) = 1.5
+
         [Header(Animation)]
         _PulseAmount ("Fluctuation Amount", Range(0,1)) = 0.0
         _PulseSpeed ("Fluctuation Speed", Range(0,6)) = 1.2
@@ -104,7 +111,20 @@ Shader "Custom/BloodCellTriplanar"
             float  _ColorSteps;
             float  _RimSteps;
             float  _SpecThreshold;
+            float  _RippleAmplitude;
+            float  _RippleWavelength;
+            float  _RippleSpeed;
+            float  _RippleWidth;
+            float  _RippleDecay;
         CBUFFER_END
+
+        // Deliberately outside UnityPerMaterial. Arrays cannot be declared in
+        // a ShaderLab Properties block, and anything in that buffer which the
+        // Properties block does not declare drops the shader out of SRP
+        // batching. These are written per renderer from a MaterialPropertyBlock.
+        #define RIPPLE_COUNT 4
+        float4 _RipplePoints[RIPPLE_COUNT];   // xyz world point, w start time
+        float4 _RippleValues[RIPPLE_COUNT];   // x strength
 
         TEXTURE2D(_MainTex);
         SAMPLER(sampler_MainTex);
@@ -198,6 +218,65 @@ Shader "Custom/BloodCellTriplanar"
         #endif
         }
 
+        // Impact points arrive in world space so the C# side does not need to
+        // know which mapping mode the material is in.
+        float3 WorldToMapPoint(float3 worldPos)
+        {
+        #ifdef _SPACE_WORLD
+            return worldPos;
+        #else
+            float3 objectPos = mul(unity_WorldToObject, float4(worldPos, 1.0)).xyz;
+            return objectPos * ObjectScale();
+        #endif
+        }
+
+        // Expanding ring from each impact, in world height units, with its
+        // exact gradient so the lighting shows the ripple and not just the
+        // silhouette.
+        //
+        // The wave is a packet rather than an endless sine: amplitude peaks at
+        // the wavefront and falls away either side of it, so what travels
+        // outward is a ring rather than the whole surface oscillating at once.
+        float Ripple(float3 mapPos, out float3 gradient)
+        {
+            float total = 0.0;
+            gradient = float3(0.0, 0.0, 0.0);
+
+            float k = TWO_PI / max(_RippleWavelength, 1e-3);
+            float widthSq = max(_RippleWidth * _RippleWidth, 1e-4);
+
+            [unroll]
+            for (int i = 0; i < RIPPLE_COUNT; i++)
+            {
+                float strength = _RippleValues[i].x;
+                float age = _Time.y - _RipplePoints[i].w;
+                if (strength <= 0.0 || age < 0.0) continue;
+
+                float3 offset = mapPos - WorldToMapPoint(_RipplePoints[i].xyz);
+                float dist = max(length(offset), 1e-4);
+
+                // Distance behind the wavefront; zero at the ring itself.
+                float x = dist - age * _RippleSpeed;
+
+                float envelope = exp(-(x * x) / widthSq);
+                float amplitude = strength * _RippleAmplitude * exp(-age * _RippleDecay);
+
+                float sine = sin(k * x);
+                float cosine = cos(k * x);
+
+                total += amplitude * sine * envelope;
+
+                // d/dx of sin(kx) * exp(-x^2/w^2), chained onto d(dist)/dp,
+                // which is simply the unit vector pointing away from the impact.
+                float slope = k * cosine * envelope
+                            - sine * envelope * (2.0 * x / widthSq);
+
+                gradient += amplitude * slope * (offset / dist);
+            }
+
+            return total;
+        }
+
         // Noise coordinate. Object mode multiplies by scale so lump size is
         // measured in world units: scaling the mesh yields more lumps rather
         // than bigger ones, matching what world mode already did.
@@ -215,8 +294,13 @@ Shader "Custom/BloodCellTriplanar"
         // scale, where an object-space normal is not perpendicular.
         float3 DisplaceWS(float3 positionWS, float3 normalWS, float3 mapPos)
         {
-            if (_Displace <= 0.0) return positionWS;
-            return positionWS + normalWS * (Height(mapPos) - 0.5) * _Displace;
+            // No early-out on _Displace any more: a ripple has to show even on
+            // a material with no surface relief at all.
+            float3 rippleGradient;
+            float offset = (Height(mapPos) - 0.5) * _Displace
+                         + Ripple(mapPos, rippleGradient);
+
+            return positionWS + normalWS * offset;
         }
 
         // ---------------------------------------------------------------
@@ -464,11 +548,18 @@ Shader "Custom/BloodCellTriplanar"
                 float4 hd = HeightD(p);
                 float  h  = hd.x;
 
-                // Project the gradient onto the tangent plane so the bump
-                // slides the normal sideways instead of inflating it.
-                float3 gradWS = MapDirToWorld(hd.yzw);
+                // Ripple gradient is already in world height per unit, so it
+                // is added at full weight rather than through _BumpStrength --
+                // that way the shading matches the geometry the ripple
+                // actually displaced.
+                float3 rippleGradient;
+                Ripple(p, rippleGradient);
+
+                // Project onto the tangent plane so the bump slides the normal
+                // sideways instead of inflating it.
+                float3 gradWS = MapDirToWorld(hd.yzw * _BumpStrength + rippleGradient);
                 float3 tangentialGrad = gradWS - geoNormal * dot(gradWS, geoNormal);
-                float3 normalWS = normalize(geoNormal - tangentialGrad * _BumpStrength);
+                float3 normalWS = normalize(geoNormal - tangentialGrad);
 
                 float3 viewWS = GetWorldSpaceNormalizeViewDir(input.positionWS);
 

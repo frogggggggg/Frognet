@@ -35,6 +35,13 @@ public class UniversalCamera : MonoBehaviour
         public Vector3 position;
         public Quaternion rotation;
 
+        /// <summary>
+        /// Target field of view in degrees. Seeded from the Camera's own value
+        /// each tick, so a mode with nothing touching it eases back to whatever
+        /// the Camera was authored with.
+        /// </summary>
+        public float fieldOfView;
+
         public Vector3 Forward => rotation * Vector3.forward;
         public Vector3 Right   => rotation * Vector3.right;
         public Vector3 Up      => rotation * Vector3.up;
@@ -63,6 +70,22 @@ public class UniversalCamera : MonoBehaviour
             DeltaTime = deltaTime;
             Snap = snap;
         }
+    }
+
+    /// <summary>
+    /// A named set of behaviours. Exactly one is active at a time, so modes act
+    /// as toggles: swap the whole rig in one call instead of enabling and
+    /// disabling behaviours one by one.
+    /// </summary>
+    [Serializable]
+    public class CameraMode
+    {
+        public string name = "Mode";
+
+        [Tooltip("Applied top to bottom. Rotation usually belongs above the " +
+                 "position behaviours that depend on facing.")]
+        [SerializeReference]
+        public List<CameraBehaviour> behaviours = new List<CameraBehaviour>();
     }
 
     [Serializable]
@@ -123,15 +146,99 @@ public class UniversalCamera : MonoBehaviour
              "so the camera never trails a frame behind.")]
     public Phase phase = Phase.LateUpdate;
 
-    [Tooltip("Behaviours run top to bottom. Rotation behaviours usually belong " +
-             "above the position behaviours that depend on facing.")]
-    [SerializeReference]
-    public List<CameraBehaviour> behaviours = new List<CameraBehaviour>();
+    [Tooltip("Camera whose field of view behaviours may drive. Left empty it " +
+             "looks on this object, then in children -- so a rig sitting on a " +
+             "holder still finds the Camera parented under it.")]
+    public Camera targetCamera;
+
+    [Tooltip("Seconds to ease toward the field of view behaviours ask for. " +
+             "0 snaps.")]
+    public float fieldOfViewSmoothing = 0.25f;
+
+    [Tooltip("Exactly one mode is active at a time. Switch with SetMode from " +
+             "script, or pick one here to preview it.")]
+    public List<CameraMode> modes = new List<CameraMode>();
+
+    [Tooltip("Index of the mode in use. Changing this at runtime switches rigs.")]
+    public int activeMode;
+
+    // Migration from the single-list version. Hidden, and emptied once its
+    // contents have been moved into a mode.
+    [SerializeReference, HideInInspector]
+    List<CameraBehaviour> behaviours = new List<CameraBehaviour>();
+
+    public CameraMode ActiveMode =>
+        modes != null && activeMode >= 0 && activeMode < modes.Count ? modes[activeMode] : null;
+
+    /// <summary>Switch by index. Returns false if there is no such mode.</summary>
+    public bool SetMode(int index, bool snap = false)
+    {
+        if (modes == null || index < 0 || index >= modes.Count) return false;
+        if (index == activeMode) return true;
+
+        activeMode = index;
+
+        // Re-seed the incoming behaviours from the pose the camera is in right
+        // now, so a switch continues from where the outgoing mode left off
+        // rather than snapping back to whatever this mode last remembered.
+        CameraMode mode = modes[index];
+        for (int i = 0; i < mode.behaviours.Count; i++)
+            mode.behaviours[i]?.Initialise(this);
+
+        if (snap) Teleport();
+        return true;
+    }
+
+    /// <summary>Switch by name, ignoring case. Returns false if not found.</summary>
+    public bool SetMode(string name, bool snap = false)
+    {
+        if (modes == null || string.IsNullOrEmpty(name)) return false;
+
+        for (int i = 0; i < modes.Count; i++)
+        {
+            if (modes[i] != null &&
+                string.Equals(modes[i].name, name, System.StringComparison.OrdinalIgnoreCase))
+            {
+                return SetMode(i, snap);
+            }
+        }
+        return false;
+    }
+
+    void MigrateLegacyBehaviours()
+    {
+        if (behaviours == null || behaviours.Count == 0) return;
+
+        modes ??= new List<CameraMode>();
+        modes.Insert(0, new CameraMode
+        {
+            name = "Default",
+            behaviours = new List<CameraBehaviour>(behaviours)
+        });
+
+        behaviours.Clear();
+    }
+
+    void OnValidate() => MigrateLegacyBehaviours();
 
     bool _snapNextTick = true;      // snap on the first tick so we never lerp in from the origin
     float _nextTargetSearch;
     UniversalCamera _parentRig;
     int _lastTickFrame = -1;
+    float _baseFieldOfView = 60f;
+
+    /// <summary>
+    /// The Camera this rig drives, or null. Searches children as well as this
+    /// object, because the usual rig puts the Camera under a holder rather
+    /// than on it -- which is exactly why field of view silently did nothing
+    /// when it only ever looked at its own GameObject.
+    /// </summary>
+    public Camera ResolveCamera()
+    {
+        if (targetCamera) return targetCamera;
+        if (TryGetComponent(out Camera own)) return own;
+        return GetComponentInChildren<Camera>();
+    }
 
     /// <summary>Set the target at runtime, e.g. once the local player spawns.</summary>
     public void SetTarget(Transform value, bool snap = true)
@@ -145,11 +252,21 @@ public class UniversalCamera : MonoBehaviour
 
     void Awake()
     {
+        MigrateLegacyBehaviours();
+
         if (transform.parent)
             _parentRig = transform.parent.GetComponentInParent<UniversalCamera>();
 
-        for (int i = 0; i < behaviours.Count; i++)
-            behaviours[i]?.Initialise(this);
+        // Whatever the Camera was authored with is the resting value, so there
+        // is no duplicate field to keep in sync with it.
+        targetCamera = ResolveCamera();
+        if (targetCamera) _baseFieldOfView = targetCamera.fieldOfView;
+
+        CameraMode mode = ActiveMode;
+        if (mode == null) return;
+
+        for (int i = 0; i < mode.behaviours.Count; i++)
+            mode.behaviours[i]?.Initialise(this);
     }
 
     void OnEnable() => Teleport();
@@ -183,19 +300,25 @@ public class UniversalCamera : MonoBehaviour
             _parentRig.Tick(deltaTime);
         }
 
+        CameraMode mode = ActiveMode;
+        if (mode == null) return;
+
         ResolveTargetIfMissing();
 
         var frame = new CameraFrame
         {
             position = transform.position,
-            rotation = transform.rotation
+            rotation = transform.rotation,
+            fieldOfView = _baseFieldOfView
         };
 
         bool snap = _snapNextTick;
 
-        for (int i = 0; i < behaviours.Count; i++)
+        List<CameraBehaviour> list = mode.behaviours;
+
+        for (int i = 0; i < list.Count; i++)
         {
-            var behaviour = behaviours[i];
+            var behaviour = list[i];
             if (behaviour == null || !behaviour.enabled) continue;
 
             Transform resolved = behaviour.targetOverride ? behaviour.targetOverride : target;
@@ -209,6 +332,17 @@ public class UniversalCamera : MonoBehaviour
         }
 
         transform.SetPositionAndRotation(frame.position, frame.rotation);
+
+        if (targetCamera)
+        {
+            // Eased here rather than inside the behaviour, so switching to a
+            // mode that has no field of view behaviour still returns smoothly
+            // instead of snapping back to the resting value.
+            targetCamera.fieldOfView = Mathf.Lerp(targetCamera.fieldOfView,
+                                                  frame.fieldOfView,
+                                                  Damp(fieldOfViewSmoothing, deltaTime, snap));
+        }
+
         _snapNextTick = false;
     }
 
@@ -501,7 +635,7 @@ public class UniversalCamera : MonoBehaviour
     [Serializable]
     public class MouseLook : CameraBehaviour
     {
-        public enum Basis { Parent, World }
+        public enum Basis { Parent, World, Target, TargetUp }
 
         public Vector2 sensitivity = new Vector2(0.12f, 0.12f);
 
@@ -514,8 +648,12 @@ public class UniversalCamera : MonoBehaviour
         [Advanced] public bool invertY = false;
 
         [Advanced]
-        [Tooltip("Parent composes on top of the parent's rotation, which is what " +
-                 "lets a pitch-only camera sit under a yaw-only holder.")]
+        [Tooltip("What the look is composed on top of. Parent lets a " +
+                 "pitch-only camera sit under a yaw-only holder. Target " +
+                 "inherits the target's full rotation, so its heading " +
+                 "drags the view around as it turns. TargetUp takes only " +
+                 "the up axis, so the camera stays oriented to a surface " +
+                 "without the target's spin pulling the view.")]
         public Basis basis = Basis.Parent;
 
         [Advanced]
@@ -534,18 +672,51 @@ public class UniversalCamera : MonoBehaviour
         [NonSerialized] float _yaw;
         [NonSerialized] float _pitch;
         [NonSerialized] bool _initialised;
+        [NonSerialized] Quaternion _upBasis = Quaternion.identity;
+        [NonSerialized] bool _upBasisSeeded;
+
+        public override bool RequiresTarget => basis == Basis.Target || basis == Basis.TargetUp;
 
         public override void Initialise(UniversalCamera owner)
         {
             // Start from the transform's current angles so enabling this does
             // not yank the view to zero. Which angles depends on the basis the
             // behaviour composes against.
+            //
+            // Target basis seeds from local angles too: the exact seed matters
+            // less than not jumping, and the target may not exist yet at Awake.
             Vector3 e = basis == Basis.World
                 ? owner.transform.eulerAngles
                 : owner.transform.localEulerAngles;
             _pitch = Mathf.DeltaAngle(0f, e.x);
             _yaw = Mathf.DeltaAngle(0f, e.y);
             _initialised = true;
+            _upBasisSeeded = false;
+        }
+
+        /// <summary>
+        /// Minimal rotation carrying world up onto the target's up, holding no
+        /// twist about that axis -- so the target can spin freely without
+        /// dragging the view with it.
+        ///
+        /// Tracked incrementally from the previous frame rather than rebuilt
+        /// from world up each time. FromToRotation is ambiguous when the two
+        /// vectors are opposed, and a virus crawling to the underside of a cell
+        /// passes exactly through that case; stepping from the last basis keeps
+        /// every rotation small and the ambiguity never arises.
+        /// </summary>
+        Quaternion UpBasis(Vector3 targetUp)
+        {
+            if (!_upBasisSeeded)
+            {
+                _upBasis = Quaternion.FromToRotation(Vector3.up, targetUp);
+                _upBasisSeeded = true;
+                return _upBasis;
+            }
+
+            _upBasis = Quaternion.FromToRotation(_upBasis * Vector3.up, targetUp) * _upBasis;
+            _upBasis = Quaternion.Normalize(_upBasis);
+            return _upBasis;
         }
 
         public override void Apply(ref CameraFrame frame, in CameraContext ctx)
@@ -563,8 +734,13 @@ public class UniversalCamera : MonoBehaviour
             if (pitch) _pitch = Mathf.Clamp(_pitch, pitchClamp.x, pitchClamp.y);
 
             Quaternion basisRotation = Quaternion.identity;
+
             if (basis == Basis.Parent && ctx.Self.parent)
                 basisRotation = ctx.Self.parent.rotation;
+            else if (basis == Basis.Target && ctx.Target)
+                basisRotation = ctx.Target.rotation;
+            else if (basis == Basis.TargetUp && ctx.Target)
+                basisRotation = UpBasis(ctx.Target.up);
 
             Quaternion desired = basisRotation *
                                  Quaternion.Euler(pitch ? _pitch : 0f, yaw ? _yaw : 0f, 0f);
@@ -637,6 +813,57 @@ public class UniversalCamera : MonoBehaviour
 
             frame.rotation = Quaternion.Slerp(frame.rotation, _rotation,
                                               Damp(smoothTime, ctx.DeltaTime, ctx.Snap));
+        }
+    }
+
+    /// <summary>
+    /// Widens the field of view with the target's speed, which is the usual way
+    /// speed is sold: the edges of the frame rush past faster than the centre.
+    ///
+    /// Speed comes from the target's position delta rather than a Rigidbody, so
+    /// it works against anything that moves, including something driven
+    /// kinematically or by an animation.
+    /// </summary>
+    [Serializable]
+    public class SpeedFieldOfView : CameraBehaviour
+    {
+        [Tooltip("Degrees added at full speed, on top of the Camera's own value.")]
+        public float extraFieldOfView = 22f;
+
+        [Tooltip("Target speed, in units per second, that earns the full amount.")]
+        public float speedForFullEffect = 14f;
+
+        [Advanced]
+        [Tooltip("Speed below which nothing happens, so ordinary drifting does " +
+                 "not breathe the view in and out.")]
+        public float deadZone = 2f;
+
+        [NonSerialized] Vector3 _lastPosition;
+        [NonSerialized] bool _seeded;
+
+        public override bool RequiresTarget => true;
+
+        public override void Initialise(UniversalCamera owner) => _seeded = false;
+
+        public override void Apply(ref CameraFrame frame, in CameraContext ctx)
+        {
+            // The first tick after activation has no previous position to
+            // measure against, and guessing one would spike the speed.
+            if (!_seeded)
+            {
+                _lastPosition = ctx.Target.position;
+                _seeded = true;
+                return;
+            }
+
+            float dt = Mathf.Max(ctx.DeltaTime, 1e-5f);
+            float speed = (ctx.Target.position - _lastPosition).magnitude / dt;
+            _lastPosition = ctx.Target.position;
+
+            // No smoothing here on purpose. The rig eases the field of view
+            // itself, so smoothing the speed as well would just add lag.
+            float t = Mathf.InverseLerp(deadZone, speedForFullEffect, speed);
+            frame.fieldOfView += extraFieldOfView * t;
         }
     }
 

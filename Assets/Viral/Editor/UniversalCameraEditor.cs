@@ -10,9 +10,8 @@ using UnityEngine;
 ///
 /// Unity serialises [SerializeReference] lists correctly but does not reliably
 /// offer a way to choose the concrete type, so entries appear as uneditable
-/// null elements. This draws the list itself: an Add menu built from every
-/// non-abstract CameraBehaviour, plus reorder and remove controls, since order
-/// is what defines how the behaviours compose.
+/// null elements. This draws the lists itself, grouped by mode, with an Add
+/// menu built from every non-abstract CameraBehaviour.
 /// </summary>
 [CustomEditor(typeof(UniversalCamera))]
 public class UniversalCameraEditor : Editor
@@ -20,69 +19,171 @@ public class UniversalCameraEditor : Editor
     static List<Type> _behaviourTypes;
     static readonly Dictionary<string, bool> AdvancedOpen = new Dictionary<string, bool>();
 
-    SerializedProperty _behaviours;
-
-    void OnEnable()
-    {
-        _behaviours = serializedObject.FindProperty("behaviours");
-    }
-
     public override void OnInspectorGUI()
     {
         serializedObject.Update();
 
-        DrawPropertiesExcluding(serializedObject, "m_Script", "behaviours");
+        DrawPropertiesExcluding(serializedObject, "m_Script", "modes", "activeMode");
+
+        var rig = (UniversalCamera)target;
+        SerializedProperty modes = serializedObject.FindProperty("modes");
 
         EditorGUILayout.Space();
-        EditorGUILayout.LabelField("Behaviours", EditorStyles.boldLabel);
-        EditorGUILayout.LabelField(
-            "Applied top to bottom. Rotation usually belongs above the position " +
-            "behaviours that depend on facing.", EditorStyles.wordWrappedMiniLabel);
+        DrawModeSelector(rig);
 
+        int removeMode = -1;
+
+        for (int m = 0; m < modes.arraySize; m++)
+        {
+            if (DrawMode(rig, modes, m)) removeMode = m;
+        }
+
+        EditorGUILayout.Space();
+
+        if (GUILayout.Button("Add Mode", GUILayout.Height(22)))
+        {
+            modes.InsertArrayElementAtIndex(modes.arraySize);
+
+            SerializedProperty added = modes.GetArrayElementAtIndex(modes.arraySize - 1);
+            added.FindPropertyRelative("name").stringValue = "Mode " + modes.arraySize;
+            added.FindPropertyRelative("behaviours").ClearArray();
+            added.isExpanded = true;
+        }
+
+        DrawWarnings(rig);
+
+        // Deferred for the same reason the behaviour list defers: resizing an
+        // array mid-draw desynchronises the Layout and Repaint passes.
+        if (removeMode >= 0)
+        {
+            modes.DeleteArrayElementAtIndex(removeMode);
+
+            SerializedProperty active = serializedObject.FindProperty("activeMode");
+            if (active.intValue >= modes.arraySize)
+                active.intValue = Mathf.Max(0, modes.arraySize - 1);
+        }
+
+        serializedObject.ApplyModifiedProperties();
+    }
+
+    /// <summary>Row of mode names; clicking one makes it active.</summary>
+    void DrawModeSelector(UniversalCamera rig)
+    {
+        if (rig.modes == null || rig.modes.Count == 0)
+        {
+            EditorGUILayout.HelpBox(
+                "No modes yet. Add one below, then switch between them at " +
+                "runtime with SetMode.", MessageType.Info);
+            return;
+        }
+
+        var names = new string[rig.modes.Count];
+        for (int i = 0; i < names.Length; i++)
+        {
+            string n = rig.modes[i] != null ? rig.modes[i].name : null;
+            names[i] = string.IsNullOrEmpty(n) ? "Mode " + (i + 1) : n;
+        }
+
+        EditorGUILayout.LabelField("Active Mode", EditorStyles.boldLabel);
+
+        SerializedProperty active = serializedObject.FindProperty("activeMode");
+        int current = Mathf.Clamp(active.intValue, 0, names.Length - 1);
+        int picked = GUILayout.Toolbar(current, names);
+
+        if (picked != current)
+        {
+            // Route through SetMode while playing so the incoming behaviours
+            // get re-seeded from the current pose, as a script switch would.
+            if (Application.isPlaying) rig.SetMode(picked);
+            else active.intValue = picked;
+        }
+
+        EditorGUILayout.LabelField(
+            "Switch from script with SetMode(name) or SetMode(index).",
+            EditorStyles.wordWrappedMiniLabel);
+    }
+
+    /// <summary>Returns true if this mode was marked for removal.</summary>
+    bool DrawMode(UniversalCamera rig, SerializedProperty modes, int index)
+    {
+        SerializedProperty mode = modes.GetArrayElementAtIndex(index);
+        SerializedProperty name = mode.FindPropertyRelative("name");
+        SerializedProperty behaviours = mode.FindPropertyRelative("behaviours");
+
+        bool isActive = index == rig.activeMode;
+        bool remove = false;
+
+        EditorGUILayout.Space();
+        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+        EditorGUILayout.BeginHorizontal();
+
+        string label = string.IsNullOrEmpty(name.stringValue)
+            ? "Mode " + (index + 1)
+            : name.stringValue;
+
+        mode.isExpanded = EditorGUILayout.Foldout(
+            mode.isExpanded, isActive ? label + "  (active)" : label, true);
+
+        if (GUILayout.Button("\u2715", EditorStyles.miniButton, GUILayout.Width(22)))
+            remove = true;
+
+        EditorGUILayout.EndHorizontal();
+
+        if (mode.isExpanded)
+        {
+            EditorGUI.indentLevel++;
+            EditorGUILayout.PropertyField(name);
+            EditorGUI.indentLevel--;
+
+            EditorGUILayout.LabelField(
+                "Applied top to bottom. Rotation usually belongs above the " +
+                "position behaviours that depend on facing.",
+                EditorStyles.wordWrappedMiniLabel);
+
+            DrawBehaviourList(behaviours);
+        }
+
+        EditorGUILayout.EndVertical();
+        return remove;
+    }
+
+    void DrawBehaviourList(SerializedProperty behaviours)
+    {
         int removeAt = -1;
         int moveFrom = -1;
         int moveTo = -1;
 
-        if (_behaviours == null || _behaviours.arraySize == 0)
+        if (behaviours.arraySize == 0)
         {
             EditorGUILayout.HelpBox("No behaviours yet. Use Add Behaviour below.",
                                     MessageType.Info);
         }
         else
         {
-            for (int i = 0; i < _behaviours.arraySize; i++)
-                DrawElement(i, ref removeAt, ref moveFrom, ref moveTo);
+            for (int i = 0; i < behaviours.arraySize; i++)
+                DrawElement(behaviours, i, ref removeAt, ref moveFrom, ref moveTo);
         }
 
-        EditorGUILayout.Space();
-        DrawAddMenu();
+        DrawAddMenu(behaviours);
 
-        DrawWarnings();
-
-        // Deferred on purpose: resizing the list while drawing changes the
-        // control count between the Layout and Repaint passes, and IMGUI
-        // throws when those two disagree.
+        // Same deferral as the mode list above.
         if (moveFrom >= 0)
-            _behaviours.MoveArrayElement(moveFrom, moveTo);
+            behaviours.MoveArrayElement(moveFrom, moveTo);
         else if (removeAt >= 0)
-            RemoveAt(removeAt);
-
-        serializedObject.ApplyModifiedProperties();
+            RemoveAt(behaviours, removeAt);
     }
 
-    void DrawElement(int index, ref int removeAt, ref int moveFrom, ref int moveTo)
+    void DrawElement(SerializedProperty behaviours, int index,
+                     ref int removeAt, ref int moveFrom, ref int moveTo)
     {
-        SerializedProperty element = _behaviours.GetArrayElementAtIndex(index);
+        SerializedProperty element = behaviours.GetArrayElementAtIndex(index);
 
         EditorGUILayout.BeginVertical(EditorStyles.helpBox);
         EditorGUILayout.BeginHorizontal();
 
         SerializedProperty enabled = element.FindPropertyRelative("enabled");
         if (enabled != null)
-        {
-            enabled.boolValue = EditorGUILayout.Toggle(
-                enabled.boolValue, GUILayout.Width(16));
-        }
+            enabled.boolValue = EditorGUILayout.Toggle(enabled.boolValue, GUILayout.Width(16));
 
         element.isExpanded = EditorGUILayout.Foldout(
             element.isExpanded, DisplayName(element), true);
@@ -96,7 +197,7 @@ public class UniversalCameraEditor : Editor
             }
         }
 
-        using (new EditorGUI.DisabledScope(index == _behaviours.arraySize - 1))
+        using (new EditorGUI.DisabledScope(index == behaviours.arraySize - 1))
         {
             if (GUILayout.Button("\u25BC", EditorStyles.miniButtonMid, GUILayout.Width(22)))
             {
@@ -110,8 +211,8 @@ public class UniversalCameraEditor : Editor
 
         EditorGUILayout.EndHorizontal();
 
-        // Always drawn, regardless of a pending mutation, so the control
-        // count stays identical across both IMGUI passes.
+        // Always drawn, regardless of a pending mutation, so the control count
+        // stays identical across both IMGUI passes.
         if (element.isExpanded)
         {
             EditorGUI.indentLevel++;
@@ -128,7 +229,10 @@ public class UniversalCameraEditor : Editor
     /// </summary>
     static void DrawChildren(SerializedProperty property)
     {
-        Type type = property.managedReferenceValue?.GetType();
+        Type type = property.managedReferenceValue != null
+            ? property.managedReferenceValue.GetType()
+            : null;
+
         var advanced = new List<SerializedProperty>();
 
         SerializedProperty end = property.GetEndProperty();
@@ -153,7 +257,7 @@ public class UniversalCameraEditor : Editor
 
         string key = property.propertyPath;
         AdvancedOpen.TryGetValue(key, out bool open);
-        open = EditorGUILayout.Foldout(open, $"Advanced ({advanced.Count})", true);
+        open = EditorGUILayout.Foldout(open, "Advanced (" + advanced.Count + ")", true);
         AdvancedOpen[key] = open;
 
         if (!open) return;
@@ -189,31 +293,97 @@ public class UniversalCameraEditor : Editor
         return null;
     }
 
-    void RemoveAt(int index)
+    static void RemoveAt(SerializedProperty behaviours, int index)
     {
-        int size = _behaviours.arraySize;
-        _behaviours.DeleteArrayElementAtIndex(index);
+        int size = behaviours.arraySize;
+        behaviours.DeleteArrayElementAtIndex(index);
 
         // On some Unity versions the first delete only nulls the managed
         // reference rather than shortening the array.
-        if (_behaviours.arraySize == size)
-            _behaviours.DeleteArrayElementAtIndex(index);
+        if (behaviours.arraySize == size)
+            behaviours.DeleteArrayElementAtIndex(index);
+    }
+
+    void DrawAddMenu(SerializedProperty behaviours)
+    {
+        if (!GUILayout.Button("Add Behaviour", GUILayout.Height(20)))
+            return;
+
+        SerializedProperty captured = behaviours.Copy();
+        var menu = new GenericMenu();
+
+        foreach (Type type in BehaviourTypes())
+        {
+            Type capturedType = type;
+            menu.AddItem(new GUIContent(ObjectNames.NicifyVariableName(capturedType.Name)),
+                         false, () => Append(captured, capturedType));
+        }
+
+        if (menu.GetItemCount() == 0)
+            menu.AddDisabledItem(new GUIContent("No CameraBehaviour types found"));
+
+        menu.ShowAsContext();
+    }
+
+    void Append(SerializedProperty behaviours, Type type)
+    {
+        serializedObject.Update();
+
+        int index = behaviours.arraySize;
+        behaviours.InsertArrayElementAtIndex(index);
+
+        SerializedProperty element = behaviours.GetArrayElementAtIndex(index);
+        element.managedReferenceValue = Activator.CreateInstance(type);
+        element.isExpanded = true;
+
+        serializedObject.ApplyModifiedProperties();
+    }
+
+    static IEnumerable<Type> BehaviourTypes()
+    {
+        // TypeCache is prebuilt by the editor, so this costs nothing to query.
+        if (_behaviourTypes == null)
+        {
+            _behaviourTypes = TypeCache
+                .GetTypesDerivedFrom<UniversalCamera.CameraBehaviour>()
+                .Where(t => !t.IsAbstract && !t.IsGenericTypeDefinition)
+                .OrderBy(t => t.Name)
+                .ToList();
+        }
+
+        return _behaviourTypes;
+    }
+
+    static string DisplayName(SerializedProperty element)
+    {
+        string full = element.managedReferenceFullTypename;
+        if (string.IsNullOrEmpty(full)) return "(unassigned)";
+
+        // Format is "<assembly> <Namespace.Outer/Nested>".
+        int space = full.IndexOf(' ');
+        string typeName = space >= 0 ? full.Substring(space + 1) : full;
+
+        int cut = typeName.LastIndexOfAny(new[] { '/', '+', '.' });
+        if (cut >= 0) typeName = typeName.Substring(cut + 1);
+
+        return ObjectNames.NicifyVariableName(typeName);
     }
 
     /// <summary>
-    /// Flag the combinations that visibly fight each other. These are all
-    /// legal, so they are warnings rather than errors.
+    /// Flag combinations in the active mode that visibly fight each other.
+    /// These are all legal, so they are warnings rather than errors.
     /// </summary>
-    void DrawWarnings()
+    void DrawWarnings(UniversalCamera rig)
     {
-        var rig = (UniversalCamera)target;
-        if (rig.behaviours == null) return;
+        UniversalCamera.CameraMode mode = rig.ActiveMode;
+        if (mode == null || mode.behaviours == null) return;
 
         bool freeLook = false, mouseLook = false, lookAt = false;
+        bool wantsFieldOfView = false;
         int rotationWriters = 0;
         UniversalCamera.DistanceFromTarget boom = null;
 
-        foreach (UniversalCamera.CameraBehaviour behaviour in rig.behaviours)
+        foreach (UniversalCamera.CameraBehaviour behaviour in mode.behaviours)
         {
             if (behaviour == null || !behaviour.enabled) continue;
 
@@ -223,8 +393,19 @@ public class UniversalCameraEditor : Editor
                 case UniversalCamera.MouseLook:      mouseLook = true; rotationWriters++; break;
                 case UniversalCamera.LookAtTarget:   lookAt = true;    rotationWriters++; break;
                 case UniversalCamera.ConstantRotate:                   rotationWriters++; break;
+                case UniversalCamera.SpeedFieldOfView:  wantsFieldOfView = true;   break;
                 case UniversalCamera.DistanceFromTarget distance:      boom = distance;   break;
             }
+        }
+
+        // The rig only drives a Camera it can actually find, and a missing one
+        // is otherwise completely silent -- no error, just nothing happening.
+        if (wantsFieldOfView && rig.ResolveCamera() == null)
+        {
+            EditorGUILayout.HelpBox(
+                "Speed Field Of View has nothing to drive: no Camera on this " +
+                "object or under it. Assign Target Camera, or move this rig " +
+                "onto the object that has the Camera.", MessageType.Warning);
         }
 
         bool specific = false;
@@ -253,72 +434,9 @@ public class UniversalCameraEditor : Editor
         if (!specific && rotationWriters > 1)
         {
             EditorGUILayout.HelpBox(
-                $"{rotationWriters} behaviours write rotation. Unless they are " +
+                rotationWriters + " behaviours write rotation. Unless they are " +
                 "restricted to different axes, only the last one's result " +
                 "survives.", MessageType.Info);
         }
-    }
-
-    void DrawAddMenu()
-    {
-        if (!GUILayout.Button("Add Behaviour", GUILayout.Height(22)))
-            return;
-
-        var menu = new GenericMenu();
-
-        foreach (Type type in BehaviourTypes())
-        {
-            Type captured = type;
-            menu.AddItem(new GUIContent(ObjectNames.NicifyVariableName(captured.Name)),
-                         false, () => Append(captured));
-        }
-
-        if (menu.GetItemCount() == 0)
-            menu.AddDisabledItem(new GUIContent("No CameraBehaviour types found"));
-
-        menu.ShowAsContext();
-    }
-
-    void Append(Type type)
-    {
-        serializedObject.Update();
-
-        int index = _behaviours.arraySize;
-        _behaviours.InsertArrayElementAtIndex(index);
-
-        SerializedProperty element = _behaviours.GetArrayElementAtIndex(index);
-        element.managedReferenceValue = Activator.CreateInstance(type);
-        element.isExpanded = true;
-
-        serializedObject.ApplyModifiedProperties();
-    }
-
-    static IEnumerable<Type> BehaviourTypes()
-    {
-        // TypeCache is prebuilt by the editor, so this costs nothing to query.
-        _behaviourTypes ??= TypeCache
-            .GetTypesDerivedFrom<UniversalCamera.CameraBehaviour>()
-            .Where(t => !t.IsAbstract && !t.IsGenericTypeDefinition)
-            .OrderBy(t => t.Name)
-            .ToList();
-
-        return _behaviourTypes;
-    }
-
-    static string DisplayName(SerializedProperty element)
-    {
-        string full = element.managedReferenceFullTypename;
-        if (string.IsNullOrEmpty(full))
-            return "(unassigned)";
-
-        // Format is "<assembly> <Namespace.Outer/Nested>".
-        int space = full.IndexOf(' ');
-        string typeName = space >= 0 ? full.Substring(space + 1) : full;
-
-        int cut = typeName.LastIndexOfAny(new[] { '/', '+', '.' });
-        if (cut >= 0)
-            typeName = typeName.Substring(cut + 1);
-
-        return ObjectNames.NicifyVariableName(typeName);
     }
 }
