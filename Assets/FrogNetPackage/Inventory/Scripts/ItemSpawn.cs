@@ -17,7 +17,8 @@ public static class ItemSpawn
         if (prefab)
             return prefab;
 
-        return Command.Instance ? Command.Instance.itemPrefab : null;
+        //return Command.Instance ? Command.Instance.itemPrefab : null;
+        return null;
     }
 
     private static GameObject Resolve(int id)
