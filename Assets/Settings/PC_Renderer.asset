@@ -1,5 +1,25 @@
 %YAML 1.1
 %TAG !u! tag:unity3d.com,2011:
+--- !u!114 &-1951618410427278500
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 447d912a37b48174aac58d803edcc1c4, type: 3}
+  m_Name: ScreenInvertTransparentDepthFeature
+  m_EditorClassIdentifier: 
+  m_Active: 1
+  settings:
+    layerMask:
+      serializedVersion: 2
+      m_Bits: 4294967295
+    minimumQueue: 2501
+    maximumQueue: 3999
+    passEvent: 450
 --- !u!114 &-638358480604012935
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -72,7 +92,8 @@ MonoBehaviour:
   - {fileID: 5000000000000000002}
   - {fileID: -638358480604012935}
   - {fileID: 5304239556937499807}
-  m_RendererFeatureMap: ad6b866f10d7b46c0100f444829163450200f44482916345795e3d14581824f79fc4d522c6719c49
+  - {fileID: -1951618410427278500}
+  m_RendererFeatureMap: ad6b866f10d7b46c0100f444829163450200f44482916345795e3d14581824f79fc4d522c6719c495c9b5e556575eae4
   m_UseNativeRenderPass: 1
   xrSystemData: {fileID: 0}
   postProcessData: {fileID: 11400000, guid: 41439944d30ece34e96484bdb6645b55, type: 2}

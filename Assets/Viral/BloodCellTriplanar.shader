@@ -428,6 +428,13 @@ Shader "Custom/BloodCellTriplanar"
             Name "ForwardLit"
             Tags { "LightMode"="UniversalForward" }
 
+            // Explicit rather than relying on ShaderLab defaults. This keeps the
+            // tessellated/displaced cell in the camera depth buffer when URP
+            // copies depth after the opaque pass.
+            ZWrite On
+            ZTest LEqual
+            Cull Back
+
             HLSLPROGRAM
             #pragma vertex vert
             #pragma hull hull
@@ -762,6 +769,189 @@ Shader "Custom/BloodCellTriplanar"
             half4 frag(Varyings input) : SV_Target { return 0; }
             ENDHLSL
         }
+        // -------------------------------------------------------------------
+        // URP may generate _CameraDepthTexture as part of a depth+normals
+        // prepass rather than a plain DepthOnly prepass. Built-in URP shaders
+        // provide this pass; without it this material can disappear from the
+        // camera depth texture even though its ForwardLit and DepthOnly passes
+        // are otherwise correct.
+        //
+        // This pass repeats the SAME tessellation + displacement used by the
+        // visible surface, so screen-space effects see the real displaced cell.
+        Pass
+        {
+            Name "DepthNormals"
+            Tags { "LightMode"="DepthNormals" }
+
+            ZWrite On
+            ZTest LEqual
+            Cull Back
+
+            HLSLPROGRAM
+            #pragma vertex vert
+            #pragma hull hull
+            #pragma domain domain
+            #pragma fragment frag
+            #pragma target 4.6
+            #pragma require tessellation
+            #pragma multi_compile_local _SPACE_OBJECT _SPACE_WORLD
+            #pragma multi_compile_fragment _ _GBUFFER_NORMALS_OCT
+
+            struct Attributes
+            {
+                float4 positionOS : POSITION;
+                float3 normalOS   : NORMAL;
+            };
+
+            struct Varyings
+            {
+                float4 positionHCS : SV_POSITION;
+                float3 normalWS    : TEXCOORD0;
+            };
+
+            TessControlPoint vert(Attributes input)
+            {
+                return TessVert(input.positionOS, input.normalOS);
+            }
+
+            [domain("tri")]
+            Varyings domain(TessFactors factors,
+                            const OutputPatch<TessControlPoint, 3> patch,
+                            float3 bary : SV_DomainLocation)
+            {
+                float3 basePositionOS, normalOS;
+                ResolvePatch(patch, bary, basePositionOS, normalOS);
+
+                float3 basePositionWS = TransformObjectToWorld(basePositionOS);
+                float3 geoNormalWS = normalize(TransformObjectToWorldNormal(normalOS));
+                float3 mapPos = MapPosition(basePositionOS, basePositionWS);
+
+                // Same displaced position as ForwardLit / DepthOnly.
+                float3 positionWS = DisplaceWS(basePositionWS, geoNormalWS, mapPos);
+
+                // Also match the procedural surface normal used by ForwardLit.
+                float4 hd = HeightD(mapPos);
+                float3 rippleGradient;
+                Ripple(mapPos, rippleGradient);
+
+                float3 gradWS = MapDirToWorld(
+                    hd.yzw * _BumpStrength + rippleGradient);
+
+                float3 tangentialGrad =
+                    gradWS - geoNormalWS * dot(gradWS, geoNormalWS);
+
+                Varyings output;
+                output.positionHCS = TransformWorldToHClip(positionWS);
+                output.normalWS = normalize(geoNormalWS - tangentialGrad);
+                return output;
+            }
+
+            half4 frag(Varyings input) : SV_Target
+            {
+                float3 normalWS = normalize(input.normalWS);
+
+            #if defined(_GBUFFER_NORMALS_OCT)
+                float2 octNormalWS = PackNormalOctQuadEncode(normalWS);
+                float2 remappedOctNormalWS =
+                    saturate(octNormalWS * 0.5 + 0.5);
+                half3 packedNormalWS =
+                    PackFloat2To888(remappedOctNormalWS);
+                return half4(packedNormalWS, 0.0);
+            #else
+                return half4(normalWS, 0.0);
+            #endif
+            }
+            ENDHLSL
+        }
+
+        // Some URP versions/features request DepthNormalsOnly instead of
+        // DepthNormals. Keeping the alias makes this shader work with either
+        // prepass path. Only the matching LightMode is selected, so the object
+        // is not rendered twice.
+        Pass
+        {
+            Name "DepthNormalsOnly"
+            Tags { "LightMode"="DepthNormalsOnly" }
+
+            ZWrite On
+            ZTest LEqual
+            Cull Back
+
+            HLSLPROGRAM
+            #pragma vertex vert
+            #pragma hull hull
+            #pragma domain domain
+            #pragma fragment frag
+            #pragma target 4.6
+            #pragma require tessellation
+            #pragma multi_compile_local _SPACE_OBJECT _SPACE_WORLD
+            #pragma multi_compile_fragment _ _GBUFFER_NORMALS_OCT
+
+            struct Attributes
+            {
+                float4 positionOS : POSITION;
+                float3 normalOS   : NORMAL;
+            };
+
+            struct Varyings
+            {
+                float4 positionHCS : SV_POSITION;
+                float3 normalWS    : TEXCOORD0;
+            };
+
+            TessControlPoint vert(Attributes input)
+            {
+                return TessVert(input.positionOS, input.normalOS);
+            }
+
+            [domain("tri")]
+            Varyings domain(TessFactors factors,
+                            const OutputPatch<TessControlPoint, 3> patch,
+                            float3 bary : SV_DomainLocation)
+            {
+                float3 basePositionOS, normalOS;
+                ResolvePatch(patch, bary, basePositionOS, normalOS);
+
+                float3 basePositionWS = TransformObjectToWorld(basePositionOS);
+                float3 geoNormalWS = normalize(TransformObjectToWorldNormal(normalOS));
+                float3 mapPos = MapPosition(basePositionOS, basePositionWS);
+
+                float3 positionWS = DisplaceWS(basePositionWS, geoNormalWS, mapPos);
+
+                float4 hd = HeightD(mapPos);
+                float3 rippleGradient;
+                Ripple(mapPos, rippleGradient);
+
+                float3 gradWS = MapDirToWorld(
+                    hd.yzw * _BumpStrength + rippleGradient);
+
+                float3 tangentialGrad =
+                    gradWS - geoNormalWS * dot(gradWS, geoNormalWS);
+
+                Varyings output;
+                output.positionHCS = TransformWorldToHClip(positionWS);
+                output.normalWS = normalize(geoNormalWS - tangentialGrad);
+                return output;
+            }
+
+            half4 frag(Varyings input) : SV_Target
+            {
+                float3 normalWS = normalize(input.normalWS);
+
+            #if defined(_GBUFFER_NORMALS_OCT)
+                float2 octNormalWS = PackNormalOctQuadEncode(normalWS);
+                float2 remappedOctNormalWS =
+                    saturate(octNormalWS * 0.5 + 0.5);
+                half3 packedNormalWS =
+                    PackFloat2To888(remappedOctNormalWS);
+                return half4(packedNormalWS, 0.0);
+            #else
+                return half4(normalWS, 0.0);
+            #endif
+            }
+            ENDHLSL
+        }
+
     }
 
     FallBack "Universal Render Pipeline/Lit"

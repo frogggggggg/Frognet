@@ -23,7 +23,11 @@ public class UniversalCameraEditor : Editor
     {
         serializedObject.Update();
 
-        DrawPropertiesExcluding(serializedObject, "m_Script", "modes", "activeMode");
+        // The old component-level phase fields are migration-only and should never
+        // appear in the custom inspector. Phase now belongs to each CameraMode.
+        DrawPropertiesExcluding(serializedObject,
+                                "m_Script", "modes", "activeMode",
+                                "phase", "_modePhaseMigrated");
 
         var rig = (UniversalCamera)target;
         SerializedProperty modes = serializedObject.FindProperty("modes");
@@ -46,6 +50,41 @@ public class UniversalCameraEditor : Editor
 
             SerializedProperty added = modes.GetArrayElementAtIndex(modes.arraySize - 1);
             added.FindPropertyRelative("name").stringValue = "Mode " + modes.arraySize;
+
+            // InsertArrayElementAtIndex may clone the previous element's values,
+            // so explicitly seed every mode-level setting with predictable defaults.
+            SerializedProperty phase = added.FindPropertyRelative("phase");
+            if (phase != null)
+                phase.enumValueIndex = (int)UniversalCamera.Phase.LateUpdate;
+
+            SerializedProperty lockCursor = added.FindPropertyRelative("lockCursor");
+            if (lockCursor != null) lockCursor.boolValue = true;
+
+            SerializedProperty hideCursor = added.FindPropertyRelative("hideCursor");
+            if (hideCursor != null) hideCursor.boolValue = true;
+
+            SerializedProperty centerCursor = added.FindPropertyRelative("centerCursorOnEnter");
+            if (centerCursor != null) centerCursor.boolValue = true;
+
+            SerializedProperty transitionOnEnter = added.FindPropertyRelative("transitionOnEnter");
+            if (transitionOnEnter != null) transitionOnEnter.boolValue = false;
+
+            SerializedProperty transitionDuration = added.FindPropertyRelative("transitionDuration");
+            if (transitionDuration != null) transitionDuration.floatValue = 0.35f;
+
+            SerializedProperty transitionPosition = added.FindPropertyRelative("transitionPosition");
+            if (transitionPosition != null) transitionPosition.boolValue = true;
+
+            SerializedProperty transitionRotation = added.FindPropertyRelative("transitionRotation");
+            if (transitionRotation != null) transitionRotation.boolValue = true;
+
+            SerializedProperty transitionFov = added.FindPropertyRelative("transitionFieldOfView");
+            if (transitionFov != null) transitionFov.boolValue = true;
+
+            SerializedProperty transitionCurve = added.FindPropertyRelative("transitionCurve");
+            if (transitionCurve != null)
+                transitionCurve.animationCurveValue = AnimationCurve.EaseInOut(0f, 0f, 1f, 1f);
+
             added.FindPropertyRelative("behaviours").ClearArray();
             added.isExpanded = true;
         }
@@ -108,6 +147,16 @@ public class UniversalCameraEditor : Editor
     {
         SerializedProperty mode = modes.GetArrayElementAtIndex(index);
         SerializedProperty name = mode.FindPropertyRelative("name");
+        SerializedProperty phase = mode.FindPropertyRelative("phase");
+        SerializedProperty lockCursor = mode.FindPropertyRelative("lockCursor");
+        SerializedProperty hideCursor = mode.FindPropertyRelative("hideCursor");
+        SerializedProperty centerCursor = mode.FindPropertyRelative("centerCursorOnEnter");
+        SerializedProperty transitionOnEnter = mode.FindPropertyRelative("transitionOnEnter");
+        SerializedProperty transitionDuration = mode.FindPropertyRelative("transitionDuration");
+        SerializedProperty transitionPosition = mode.FindPropertyRelative("transitionPosition");
+        SerializedProperty transitionRotation = mode.FindPropertyRelative("transitionRotation");
+        SerializedProperty transitionFov = mode.FindPropertyRelative("transitionFieldOfView");
+        SerializedProperty transitionCurve = mode.FindPropertyRelative("transitionCurve");
         SerializedProperty behaviours = mode.FindPropertyRelative("behaviours");
 
         bool isActive = index == rig.activeMode;
@@ -133,10 +182,90 @@ public class UniversalCameraEditor : Editor
         {
             EditorGUI.indentLevel++;
             EditorGUILayout.PropertyField(name);
+
+            EditorGUILayout.Space(2f);
+            EditorGUILayout.LabelField("Execution", EditorStyles.boldLabel);
+            if (phase != null)
+                EditorGUILayout.PropertyField(phase, new GUIContent(
+                    "Phase",
+                    "When this mode runs: Update, LateUpdate, or FixedUpdate."));
+
+            EditorGUILayout.Space(2f);
+            EditorGUILayout.LabelField("Cursor", EditorStyles.boldLabel);
+
+            if (lockCursor != null)
+                EditorGUILayout.PropertyField(lockCursor, new GUIContent(
+                    "Lock Cursor",
+                    "Lock the hardware cursor to the centre while this mode is active."));
+
+            if (hideCursor != null)
+                EditorGUILayout.PropertyField(hideCursor, new GUIContent(
+                    "Hide Cursor",
+                    "Hide the hardware cursor while this mode is active."));
+
+            // Locking already centres the cursor. Keep the setting visible so it
+            // remains obvious that centring is a per-mode policy, but disable it
+            // when it would be redundant.
+            if (centerCursor != null)
+            {
+                bool locked = lockCursor != null && lockCursor.boolValue;
+                using (new EditorGUI.DisabledScope(locked))
+                {
+                    EditorGUILayout.PropertyField(centerCursor, new GUIContent(
+                        "Center Cursor On Enter",
+                        locked
+                            ? "A locked cursor is centred automatically."
+                            : "Move the cursor to screen centre when this mode becomes active."));
+                }
+            }
+
+            EditorGUILayout.Space(4f);
+            EditorGUILayout.LabelField("Transition Into This Mode", EditorStyles.boldLabel);
+
+            if (transitionOnEnter != null)
+                EditorGUILayout.PropertyField(transitionOnEnter, new GUIContent(
+                    "Transition On Enter",
+                    "When this mode becomes active, blend selected outputs from the outgoing " +
+                    "camera state. SetMode(..., snap: true) still switches instantly."));
+
+            bool transitionEnabled = transitionOnEnter != null && transitionOnEnter.boolValue;
+            using (new EditorGUI.DisabledScope(!transitionEnabled))
+            {
+                EditorGUI.indentLevel++;
+
+                if (transitionDuration != null)
+                    EditorGUILayout.PropertyField(transitionDuration, new GUIContent(
+                        "Duration",
+                        "Seconds taken to transition into this mode."));
+
+                if (transitionPosition != null)
+                    EditorGUILayout.PropertyField(transitionPosition, new GUIContent(
+                        "Position",
+                        "Blend camera/holder world position into this mode."));
+
+                if (transitionRotation != null)
+                    EditorGUILayout.PropertyField(transitionRotation, new GUIContent(
+                        "Rotation",
+                        "Blend camera/holder world rotation into this mode."));
+
+                if (transitionFov != null)
+                    EditorGUILayout.PropertyField(transitionFov, new GUIContent(
+                        "Field Of View",
+                        "Blend Camera field of view into this mode."));
+
+                if (transitionCurve != null)
+                    EditorGUILayout.PropertyField(transitionCurve, new GUIContent(
+                        "Curve",
+                        "X is normalized transition time; Y is blend amount."));
+
+                EditorGUI.indentLevel--;
+            }
+
             EditorGUI.indentLevel--;
 
+            EditorGUILayout.Space(4f);
             EditorGUILayout.LabelField(
-                "Applied top to bottom. Rotation usually belongs above the " +
+                "Behaviours are applied top to bottom. Rotation usually belongs above the " +
                 "position behaviours that depend on facing.",
                 EditorStyles.wordWrappedMiniLabel);
 
@@ -378,8 +507,28 @@ public class UniversalCameraEditor : Editor
         UniversalCamera.CameraMode mode = rig.ActiveMode;
         if (mode == null || mode.behaviours == null) return;
 
+        if (mode.transitionOnEnter)
+        {
+            if (mode.transitionDuration <= 0f)
+            {
+                EditorGUILayout.HelpBox(
+                    "Transition On Enter is enabled, but Duration is 0. This mode will switch " +
+                    "instantly. Give it a positive duration or disable the transition.",
+                    MessageType.Info);
+            }
+            else if (!mode.transitionPosition && !mode.transitionRotation &&
+                     !mode.transitionFieldOfView)
+            {
+                EditorGUILayout.HelpBox(
+                    "Transition On Enter is enabled, but Position, Rotation and Field Of View " +
+                    "are all disabled, so there is nothing to transition.",
+                    MessageType.Info);
+            }
+        }
+
         bool freeLook = false, mouseLook = false, lookAt = false;
         bool wantsFieldOfView = false;
+        bool lookRequiresCursorLock = false;
         int rotationWriters = 0;
         UniversalCamera.DistanceFromTarget boom = null;
 
@@ -389,13 +538,32 @@ public class UniversalCameraEditor : Editor
 
             switch (behaviour)
             {
-                case UniversalCamera.FreeLook:       freeLook = true;  rotationWriters++; break;
-                case UniversalCamera.MouseLook:      mouseLook = true; rotationWriters++; break;
+                case UniversalCamera.FreeLook free:
+                    freeLook = true;
+                    rotationWriters++;
+                    lookRequiresCursorLock |= free.requireCursorLock;
+                    break;
+                case UniversalCamera.MouseLook mouse:
+                    mouseLook = true;
+                    rotationWriters++;
+                    lookRequiresCursorLock |= mouse.requireCursorLock;
+                    break;
                 case UniversalCamera.LookAtTarget:   lookAt = true;    rotationWriters++; break;
                 case UniversalCamera.ConstantRotate:                   rotationWriters++; break;
                 case UniversalCamera.SpeedFieldOfView:  wantsFieldOfView = true;   break;
                 case UniversalCamera.DistanceFromTarget distance:      boom = distance;   break;
             }
+        }
+
+
+        if (!mode.lockCursor && lookRequiresCursorLock)
+        {
+            EditorGUILayout.HelpBox(
+                "This mode leaves the cursor unlocked, but an enabled Mouse Look or Free Look " +
+                "behaviour still has Require Cursor Lock enabled. That behaviour will ignore " +
+                "mouse input until the cursor becomes locked. Either enable Lock Cursor for " +
+                "this mode or disable Require Cursor Lock on that look behaviour.",
+                MessageType.Warning);
         }
 
         // The rig only drives a Camera it can actually find, and a missing one

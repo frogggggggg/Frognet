@@ -26,13 +26,18 @@ Shader "Custom/ScreenInvertSweep"
         _NormalThreshold ("Curvature Threshold", Range(0.005, 1)) = 0.08
         _NormalStrength ("Curvature Strength", Range(0, 1)) = 1
 
+        [Header(Transparent_Objects)]
+        [Toggle] _UseTransparentDepth ("Include Transparent Geometry", Float) = 1
+        _TransparentEdgeThreshold ("Transparent Depth Threshold", Range(0.0001, 0.1)) = 0.004
+
         [Header(Contours)]
+        [Toggle] _UseContours ("Enable Topographic Contours", Float) = 0
         _ContourSpacing ("Contour Spacing (world units)", Range(0.05, 10)) = 0.75
         _ContourWidth ("Contour Width", Range(0.2, 4)) = 1
         _ContourStrength ("Contour Strength", Range(0, 1)) = 1
 
         [Header(Debug)]
-        _DebugView ("Debug View (0 off 1 depth 2 normals 3 mask 4 solid)", Range(0,4)) = 0
+        _DebugView ("Debug View (0 off 1 depth 2 normals 3 mask 4 solid 5 transparent depth)", Range(0,5)) = 0
         _DebugRange ("Debug Depth Range", Range(1, 500)) = 50
 
         [Header(Sweep)]
@@ -77,6 +82,9 @@ Shader "Custom/ScreenInvertSweep"
                 float  _EdgeThickness;
                 float  _NormalThreshold;
                 float  _NormalStrength;
+                float  _UseTransparentDepth;
+                float  _TransparentEdgeThreshold;
+                float  _UseContours;
                 float  _ContourSpacing;
                 float  _ContourWidth;
                 float  _ContourStrength;
@@ -85,6 +93,12 @@ Shader "Custom/ScreenInvertSweep"
                 float  _DebugView;
                 float  _DebugRange;
             CBUFFER_END
+
+            // Set globally by ScreenInvertTransparentDepthFeature.
+            float _TransparentDepthAvailable;
+
+            TEXTURE2D_X_FLOAT(_TransparentSceneDepthTexture);
+            SAMPLER(sampler_TransparentSceneDepthTexture);
 
             struct Attributes { float4 positionOS : POSITION; };
 
@@ -167,6 +181,79 @@ Shader "Custom/ScreenInvertSweep"
                 return smoothstep(_EdgeThreshold, _EdgeThreshold * 2.0, gradient);
             }
 
+            float TransparentLinear01At(float2 uv)
+            {
+                return SAMPLE_TEXTURE2D_X(
+                    _TransparentSceneDepthTexture,
+                    sampler_TransparentSceneDepthTexture,
+                    uv).r;
+            }
+
+            float TransparentDepthOutline(float2 uv)
+            {
+                if (_UseTransparentDepth < 0.5 ||
+                    _TransparentDepthAvailable < 0.5)
+                    return 0.0;
+
+                float2 texel =
+                    (_EdgeThickness / _ScreenParams.xy);
+
+                float centre =
+                    TransparentLinear01At(uv);
+
+                float a =
+                    TransparentLinear01At(
+                        uv +
+                        float2(-1.0, -1.0) *
+                        texel);
+
+                float b =
+                    TransparentLinear01At(
+                        uv +
+                        float2(1.0, 1.0) *
+                        texel);
+
+                float c =
+                    TransparentLinear01At(
+                        uv +
+                        float2(-1.0, 1.0) *
+                        texel);
+
+                float d =
+                    TransparentLinear01At(
+                        uv +
+                        float2(1.0, -1.0) *
+                        texel);
+
+                // Texture is cleared to 1.0. If all taps are still at far
+                // depth, there is no transparent geometry near this pixel.
+                float nearest =
+                    min(
+                        centre,
+                        min(
+                            min(a, b),
+                            min(c, d)));
+
+                if (nearest >= 0.9999)
+                    return 0.0;
+
+                float gradient =
+                    length(
+                        float2(
+                            b - a,
+                            d - c));
+
+                gradient /=
+                    max(
+                        1.0 - nearest,
+                        0.05);
+
+                return smoothstep(
+                    _TransparentEdgeThreshold,
+                    _TransparentEdgeThreshold * 2.0,
+                    gradient);
+            }
+
             // Depth alone only ever finds silhouettes and hard steps, so a
             // smooth sphere comes out as a blank shape with an outline round
             // it. Comparing reconstructed normals picks up curvature and
@@ -201,7 +288,10 @@ Shader "Custom/ScreenInvertSweep"
             // surface instead of just tracing round it.
             float ContourLines(float2 uv)
             {
-                if (_ContourStrength <= 0.001) return 0.0;
+                // These are deliberate topographic depth slices, not object
+                // outlines. Keep them disabled unless the material explicitly
+                // asks for that scan-map look.
+                if (_UseContours < 0.5 || _ContourStrength <= 0.001) return 0.0;
 
                 float depth = LinearDepthAt(uv);
 
@@ -254,13 +344,29 @@ Shader "Custom/ScreenInvertSweep"
                 // without having to trigger it first.
                 if (_DebugView > 0.5)
                 {
-                    // Solid fill first, and dependent on nothing at all: no
-                    // depth texture, no sweep, no screen coordinates. If this
-                    // does not paint the screen red then the quad is not being
-                    // drawn, and every other setting is beside the point.
-                    if (_DebugView > 3.5) return half4(1.0, 0.0, 0.0, 1.0);
+                    float2 debugUV =
+                        GetNormalizedScreenSpaceUV(
+                            input.positionHCS);
 
-                    float2 debugUV = GetNormalizedScreenSpaceUV(input.positionHCS);
+                    if (_DebugView > 4.5)
+                    {
+                        if (_TransparentDepthAvailable < 0.5)
+                            return half4(1.0, 0.0, 1.0, 1.0);
+
+                        float td =
+                            TransparentLinear01At(
+                                debugUV);
+
+                        return half4(
+                            td,
+                            td,
+                            td,
+                            1.0);
+                    }
+
+                    // Solid fill first, and dependent on nothing at all.
+                    if (_DebugView > 3.5)
+                        return half4(1.0, 0.0, 0.0, 1.0);
 
                     if (_DebugView < 1.5)
                     {
@@ -279,9 +385,14 @@ Shader "Custom/ScreenInvertSweep"
                         return half4(debugNormal * 0.5 + 0.5, 1.0);
                     }
 
-                    float mask = max(max(DepthOutline(debugUV),
-                                         CurvatureOutline(debugUV)),
-                                     ContourLines(debugUV));
+                    float mask =
+                        max(
+                            max(
+                                max(
+                                    DepthOutline(debugUV),
+                                    CurvatureOutline(debugUV)),
+                                TransparentDepthOutline(debugUV)),
+                            ContourLines(debugUV));
                     return half4(mask, mask, mask, 1.0);
                 }
 
@@ -291,9 +402,23 @@ Shader "Custom/ScreenInvertSweep"
                 if (inside <= 0.001) return half4(0, 0, 0, 0);
 
                 float2 screenUV = GetNormalizedScreenSpaceUV(input.positionHCS);
-                float outline = DepthOutline(screenUV);
-                outline = max(outline, CurvatureOutline(screenUV));
-                outline = max(outline, ContourLines(screenUV));
+                float outline =
+                    DepthOutline(screenUV);
+
+                outline =
+                    max(
+                        outline,
+                        CurvatureOutline(screenUV));
+
+                outline =
+                    max(
+                        outline,
+                        TransparentDepthOutline(screenUV));
+
+                outline =
+                    max(
+                        outline,
+                        ContourLines(screenUV));
 
                 half3 colour = lerp(_ScanColor.rgb, _EdgeColor.rgb, outline);
 

@@ -112,6 +112,11 @@ public class ScreenInvertTest : MonoBehaviour
         _material = null;
     }
 
+    public void Trigger(bool on)
+    {
+        trigger = on;
+    }
+
     void Build()
     {
         _camera = targetCamera ? targetCamera : Camera.main;

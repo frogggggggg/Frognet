@@ -42,6 +42,15 @@ public class UniversalCamera : MonoBehaviour
         /// </summary>
         public float fieldOfView;
 
+        /// <summary>
+        /// Projection state passed through the behaviour stack. These are only
+        /// committed to the Camera when an active behaviour declares that it
+        /// writes projection, so holder rigs cannot accidentally fight the
+        /// camera rig that owns projection.
+        /// </summary>
+        public bool orthographic;
+        public float orthographicSize;
+
         public Vector3 Forward => rotation * Vector3.forward;
         public Vector3 Right   => rotation * Vector3.right;
         public Vector3 Up      => rotation * Vector3.up;
@@ -82,6 +91,46 @@ public class UniversalCamera : MonoBehaviour
     {
         public string name = "Mode";
 
+        [Header("Execution")]
+        [Tooltip("When this mode drives the camera. LateUpdate is normally best for cameras, " +
+                 "Update is useful when matching Update-driven movement, and FixedUpdate is " +
+                 "available for physics-driven rigs.")]
+        public Phase phase = Phase.LateUpdate;
+
+        [Header("Cursor")]
+        [Tooltip("Lock the hardware cursor to the centre while this mode is active.")]
+        public bool lockCursor = true;
+
+        [Tooltip("Hide the hardware cursor while this mode is active.")]
+        public bool hideCursor = true;
+
+        [Tooltip("Move the hardware cursor to the centre when this mode becomes active. " +
+                 "A locked cursor is already centred automatically.")]
+        public bool centerCursorOnEnter = true;
+
+        [Header("Transition In")]
+        [Tooltip("When entering this mode through SetMode, blend the selected camera outputs " +
+                 "from their current values instead of applying the new mode immediately. " +
+                 "SetMode(..., snap: true) always bypasses this transition.")]
+        public bool transitionOnEnter = false;
+
+        [Min(0f)]
+        [Tooltip("Seconds taken to blend into this mode.")]
+        public float transitionDuration = 0.35f;
+
+        [Tooltip("Blend world position from the outgoing pose into this mode.")]
+        public bool transitionPosition = true;
+
+        [Tooltip("Blend world rotation from the outgoing pose into this mode.")]
+        public bool transitionRotation = true;
+
+        [Tooltip("Blend Camera field of view from its outgoing value into this mode. " +
+                 "This is independent of the normal Field Of View Smoothing setting.")]
+        public bool transitionFieldOfView = true;
+
+        [Tooltip("Shape of the transition. X is normalized time and Y is blend amount.")]
+        public AnimationCurve transitionCurve = AnimationCurve.EaseInOut(0f, 0f, 1f, 1f);
+
         [Tooltip("Applied top to bottom. Rotation usually belongs above the " +
                  "position behaviours that depend on facing.")]
         [SerializeReference]
@@ -102,6 +151,19 @@ public class UniversalCamera : MonoBehaviour
 
         /// <summary>True if this behaviour cannot do anything without a target.</summary>
         public virtual bool RequiresTarget => false;
+
+        /// <summary>
+        /// True when this behaviour intentionally changes CameraFrame.fieldOfView.
+        /// Used so holder rigs that merely happen to find a child Camera do not
+        /// reset that Camera's FOV and fight the rig that actually owns FOV.
+        /// </summary>
+        public virtual bool WritesFieldOfView => false;
+
+        /// <summary>
+        /// True when this behaviour intentionally controls Camera.orthographic
+        /// and/or Camera.orthographicSize.
+        /// </summary>
+        public virtual bool WritesProjection => false;
 
         public abstract void Apply(ref CameraFrame frame, in CameraContext ctx);
     }
@@ -141,12 +203,16 @@ public class UniversalCamera : MonoBehaviour
              "Useful when the player spawns after this component wakes up.")]
     public string targetTag = "";
 
-    [Header("Execution")]
-    [Tooltip("LateUpdate is almost always right: it runs after player movement, " +
-             "so the camera never trails a frame behind.")]
-    public Phase phase = Phase.LateUpdate;
+    // Kept only so scenes/prefabs made with the older component-level Phase
+    // migrate cleanly. It is hidden after migration; runtime execution uses the
+    // active mode's Phase instead.
+    [SerializeField, HideInInspector]
+    Phase phase = Phase.LateUpdate;
 
-    [Tooltip("Camera whose field of view behaviours may drive. Left empty it " +
+    [SerializeField, HideInInspector]
+    bool _modePhaseMigrated;
+
+    [Tooltip("Camera whose field of view / projection behaviours may drive. Left empty it " +
              "looks on this object, then in children -- so a rig sitting on a " +
              "holder still finds the Camera parented under it.")]
     public Camera targetCamera;
@@ -170,22 +236,48 @@ public class UniversalCamera : MonoBehaviour
     public CameraMode ActiveMode =>
         modes != null && activeMode >= 0 && activeMode < modes.Count ? modes[activeMode] : null;
 
-    /// <summary>Switch by index. Returns false if there is no such mode.</summary>
+    /// <summary>Execution phase selected by the currently active mode.</summary>
+    public Phase ActivePhase => ActiveMode != null ? ActiveMode.phase : phase;
+
+    /// <summary>
+    /// Switch by index. The incoming mode owns the transition policy: if its
+    /// Transition On Enter option is enabled, the selected outputs blend from
+    /// the camera's current state. Passing snap=true always bypasses that blend.
+    /// </summary>
     public bool SetMode(int index, bool snap = false)
     {
         if (modes == null || index < 0 || index >= modes.Count) return false;
-        if (index == activeMode) return true;
+
+        CameraMode mode = modes[index];
+
+        // Calling SetMode for the already-active mode is still useful when a UI
+        // or pause screen has temporarily changed the cursor state.
+        if (index == activeMode)
+        {
+            ApplyCursorSettings(mode);
+            if (snap) Teleport();
+            return true;
+        }
 
         activeMode = index;
 
         // Re-seed the incoming behaviours from the pose the camera is in right
-        // now, so a switch continues from where the outgoing mode left off
-        // rather than snapping back to whatever this mode last remembered.
-        CameraMode mode = modes[index];
+        // now, so input-driven behaviours continue from the outgoing view
+        // instead of resurrecting state from the last time this mode was active.
         for (int i = 0; i < mode.behaviours.Count; i++)
             mode.behaviours[i]?.Initialise(this);
 
-        if (snap) Teleport();
+        ApplyCursorSettings(mode);
+
+        if (snap)
+        {
+            Teleport();
+        }
+        else
+        {
+            BeginModeTransition(mode);
+        }
+
         return true;
     }
 
@@ -213,19 +305,69 @@ public class UniversalCamera : MonoBehaviour
         modes.Insert(0, new CameraMode
         {
             name = "Default",
+            phase = phase,
             behaviours = new List<CameraBehaviour>(behaviours)
         });
 
         behaviours.Clear();
     }
 
-    void OnValidate() => MigrateLegacyBehaviours();
+    /// <summary>
+    /// Older versions stored Phase once on UniversalCamera. On the first load
+    /// after upgrading, copy that value into every existing mode so behaviour
+    /// stays unchanged. After that every mode is independent.
+    /// </summary>
+    void MigrateLegacyPhase()
+    {
+        if (_modePhaseMigrated || modes == null || modes.Count == 0) return;
+
+        for (int i = 0; i < modes.Count; i++)
+        {
+            if (modes[i] != null)
+                modes[i].phase = phase;
+        }
+
+        _modePhaseMigrated = true;
+    }
+
+    void RunMigrations()
+    {
+        MigrateLegacyBehaviours();
+        MigrateLegacyPhase();
+    }
+
+    void OnValidate() => RunMigrations();
 
     bool _snapNextTick = true;      // snap on the first tick so we never lerp in from the origin
     float _nextTargetSearch;
     UniversalCamera _parentRig;
     int _lastTickFrame = -1;
     float _baseFieldOfView = 60f;
+    bool _baseOrthographic;
+    float _baseOrthographicSize = 5f;
+
+    // Only a rig that actually contains an active projection behaviour is
+    // allowed to change Camera.orthographic / orthographicSize. This mirrors
+    // FOV ownership and prevents parent/child UniversalCamera rigs that resolve
+    // the same Camera from fighting over its projection.
+    bool _projectionWasDriven;
+
+    // Only a rig that actually contains an active FOV behaviour is allowed to
+    // drive the Camera's FOV. Without this, a holder rig and a camera rig can
+    // both resolve the same child Camera: one widens FOV while the other writes
+    // the base FOV back, producing the visible back-and-forth flicker.
+    bool _fovWasDriven;
+
+    // Destination-mode transition state. Start values are captured exactly when
+    // SetMode is called, then selected outputs are blended toward the incoming
+    // mode's live result every tick.
+    bool _transitionActive;
+    float _transitionElapsed;
+    Vector3 _transitionStartPosition;
+    Quaternion _transitionStartRotation = Quaternion.identity;
+    float _transitionStartFieldOfView = 60f;
+
+    public bool IsTransitioning => _transitionActive;
 
     /// <summary>
     /// The Camera this rig drives, or null. Searches children as well as this
@@ -247,12 +389,64 @@ public class UniversalCamera : MonoBehaviour
         if (snap) Teleport();
     }
 
-    /// <summary>Skip smoothing for one tick. Call after a respawn or a cut.</summary>
-    public void Teleport() => _snapNextTick = true;
+    /// <summary>
+    /// Skip smoothing for one tick. Call after a respawn or a cut. A teleport is
+    /// intentionally stronger than a mode transition, so it cancels any blend.
+    /// </summary>
+    public void Teleport()
+    {
+        _transitionActive = false;
+        _transitionElapsed = 0f;
+        _snapNextTick = true;
+    }
+
+    /// <summary>Capture the outgoing state for a destination-owned transition.</summary>
+    void BeginModeTransition(CameraMode mode)
+    {
+        if (mode == null || !mode.transitionOnEnter || mode.transitionDuration <= 0f ||
+            (!mode.transitionPosition && !mode.transitionRotation &&
+             !mode.transitionFieldOfView))
+        {
+            _transitionActive = false;
+            _transitionElapsed = 0f;
+            return;
+        }
+
+        _transitionActive = true;
+        _transitionElapsed = 0f;
+        _transitionStartPosition = transform.position;
+        _transitionStartRotation = transform.rotation;
+        _transitionStartFieldOfView = targetCamera ? targetCamera.fieldOfView : _baseFieldOfView;
+
+        // A transition is itself the deliberate way into the new mode. Do not
+        // let a queued one-frame snap defeat it.
+        _snapNextTick = false;
+    }
+
+    /// <summary>Apply the cursor policy owned by a camera mode.</summary>
+    void ApplyCursorSettings(CameraMode mode)
+    {
+        if (mode == null) return;
+
+        Cursor.lockState = mode.lockCursor ? CursorLockMode.Locked : CursorLockMode.None;
+        Cursor.visible = !mode.hideCursor;
+
+        // CursorLockMode.Locked centres the pointer itself. When the cursor is
+        // intentionally left unlocked, the new Input System lets us explicitly
+        // move it to screen centre on entry as well.
+        if (mode.centerCursorOnEnter && !mode.lockCursor)
+        {
+#if ENABLE_INPUT_SYSTEM
+            if (Mouse.current != null)
+                Mouse.current.WarpCursorPosition(new Vector2(Screen.width * 0.5f,
+                                                             Screen.height * 0.5f));
+#endif
+        }
+    }
 
     void Awake()
     {
-        MigrateLegacyBehaviours();
+        RunMigrations();
 
         if (transform.parent)
             _parentRig = transform.parent.GetComponentInParent<UniversalCamera>();
@@ -260,26 +454,54 @@ public class UniversalCamera : MonoBehaviour
         // Whatever the Camera was authored with is the resting value, so there
         // is no duplicate field to keep in sync with it.
         targetCamera = ResolveCamera();
-        if (targetCamera) _baseFieldOfView = targetCamera.fieldOfView;
+        if (targetCamera)
+        {
+            _baseFieldOfView = targetCamera.fieldOfView;
+            _baseOrthographic = targetCamera.orthographic;
+            _baseOrthographicSize = targetCamera.orthographicSize;
+        }
 
         CameraMode mode = ActiveMode;
         if (mode == null) return;
 
         for (int i = 0; i < mode.behaviours.Count; i++)
             mode.behaviours[i]?.Initialise(this);
+
+        ApplyCursorSettings(mode);
     }
 
-    void OnEnable() => Teleport();
+    void OnEnable()
+    {
+        Teleport();
+        ApplyCursorSettings(ActiveMode);
+    }
 
-    void Update()     { if (phase == Phase.Update)     Tick(Time.deltaTime); }
-    void LateUpdate() { if (phase == Phase.LateUpdate) Tick(Time.deltaTime); }
+    void OnApplicationFocus(bool hasFocus)
+    {
+        if (hasFocus && isActiveAndEnabled)
+            ApplyCursorSettings(ActiveMode);
+    }
+
+    void Update()
+    {
+        if (ActivePhase == Phase.Update)
+            Tick(Time.deltaTime);
+    }
+
+    void LateUpdate()
+    {
+        if (ActivePhase == Phase.LateUpdate)
+            Tick(Time.deltaTime);
+    }
 
     void FixedUpdate()
     {
-        if (phase != Phase.FixedUpdate) return;
+        if (ActivePhase != Phase.FixedUpdate) return;
 
         // FixedUpdate can run several times in one rendered frame, so the
-        // once-per-frame guard below must not block the later steps.
+        // once-per-rendered-frame guard below must not block later physics steps.
+        // Mouse input is separately guarded inside ReadLookDelta, so the same
+        // rendered-frame mouse delta is still consumed only once.
         _lastTickFrame = -1;
         Tick(Time.fixedDeltaTime);
     }
@@ -294,8 +516,15 @@ public class UniversalCamera : MonoBehaviour
         if (_lastTickFrame == Time.frameCount) return;
         _lastTickFrame = Time.frameCount;
 
-        if (phase != Phase.FixedUpdate && _parentRig && _parentRig.isActiveAndEnabled &&
-            _parentRig.phase != Phase.FixedUpdate)
+        Phase tickPhase = ActivePhase;
+
+        // If parent and child are running in the same rendered-frame phase,
+        // force the parent first so hierarchy execution order cannot make the
+        // child compose against last frame's parent rotation. Do not pull a
+        // parent configured for a different phase forward into this one; that
+        // would defeat having Phase be genuinely per-mode.
+        if (tickPhase != Phase.FixedUpdate && _parentRig && _parentRig.isActiveAndEnabled &&
+            _parentRig.ActivePhase == tickPhase)
         {
             _parentRig.Tick(deltaTime);
         }
@@ -309,12 +538,18 @@ public class UniversalCamera : MonoBehaviour
         {
             position = transform.position,
             rotation = transform.rotation,
-            fieldOfView = _baseFieldOfView
+            fieldOfView = _baseFieldOfView,
+            orthographic = targetCamera ? targetCamera.orthographic : _baseOrthographic,
+            orthographicSize = targetCamera
+                ? targetCamera.orthographicSize
+                : _baseOrthographicSize
         };
 
         bool snap = _snapNextTick;
 
         List<CameraBehaviour> list = mode.behaviours;
+        bool fovDrivenThisTick = false;
+        bool projectionDrivenThisTick = false;
 
         for (int i = 0; i < list.Count; i++)
         {
@@ -329,18 +564,128 @@ public class UniversalCamera : MonoBehaviour
 
             var ctx = new CameraContext(this, transform, resolved, deltaTime, snap);
             behaviour.Apply(ref frame, in ctx);
+
+            if (behaviour.WritesFieldOfView)
+                fovDrivenThisTick = true;
+
+            if (behaviour.WritesProjection)
+                projectionDrivenThisTick = true;
         }
 
-        transform.SetPositionAndRotation(frame.position, frame.rotation);
+        // Advance a destination-owned transition once, then use the same blend
+        // value for position, rotation and FOV so they arrive together.
+        bool transitionThisTick = _transitionActive && mode.transitionOnEnter &&
+                                  mode.transitionDuration > 0f;
+        bool transitionCompletesThisTick = false;
+        float transitionWeight = 1f;
 
-        if (targetCamera)
+        if (transitionThisTick)
         {
-            // Eased here rather than inside the behaviour, so switching to a
-            // mode that has no field of view behaviour still returns smoothly
-            // instead of snapping back to the resting value.
-            targetCamera.fieldOfView = Mathf.Lerp(targetCamera.fieldOfView,
-                                                  frame.fieldOfView,
-                                                  Damp(fieldOfViewSmoothing, deltaTime, snap));
+            _transitionElapsed += Mathf.Max(0f, deltaTime);
+
+            float linear = Mathf.Clamp01(
+                _transitionElapsed / Mathf.Max(mode.transitionDuration, 0.0001f));
+
+            transitionWeight = mode.transitionCurve != null
+                ? Mathf.Clamp01(mode.transitionCurve.Evaluate(linear))
+                : linear;
+
+            transitionCompletesThisTick = linear >= 1f;
+        }
+
+        Vector3 outputPosition = frame.position;
+        Quaternion outputRotation = frame.rotation;
+
+        if (transitionThisTick)
+        {
+            if (mode.transitionPosition)
+                outputPosition = Vector3.Lerp(_transitionStartPosition,
+                                              frame.position,
+                                              transitionWeight);
+
+            if (mode.transitionRotation)
+                outputRotation = Quaternion.Slerp(_transitionStartRotation,
+                                                  frame.rotation,
+                                                  transitionWeight);
+        }
+
+        transform.SetPositionAndRotation(outputPosition, outputRotation);
+
+        if (targetCamera && (projectionDrivenThisTick || _projectionWasDriven))
+        {
+            if (projectionDrivenThisTick)
+            {
+                targetCamera.orthographic = frame.orthographic;
+
+                // orthographicSize exists even while the camera is perspective,
+                // but only write it when Orthographic is actually requested.
+                if (frame.orthographic)
+                    targetCamera.orthographicSize =
+                        Mathf.Max(0.0001f, frame.orthographicSize);
+
+                _projectionWasDriven = true;
+            }
+            else
+            {
+                // The new mode has no projection behaviour. Return control to
+                // the values authored on the Camera and release ownership.
+                targetCamera.orthographic = _baseOrthographic;
+                targetCamera.orthographicSize = _baseOrthographicSize;
+                _projectionWasDriven = false;
+            }
+        }
+
+        if (targetCamera && (fovDrivenThisTick || _fovWasDriven))
+        {
+            // A rig that has never driven FOV leaves it completely alone. This
+            // matters on split rigs where both the holder and child can resolve
+            // the same Camera. Otherwise the non-FOV rig writes the authored FOV
+            // every tick while the FOV rig writes the widened value.
+            float wantedFov = fovDrivenThisTick ? frame.fieldOfView : _baseFieldOfView;
+
+            if (transitionThisTick && mode.transitionFieldOfView)
+            {
+                // Mode-transition FOV is explicit, so it takes precedence over
+                // ordinary FOV smoothing while this transition is active.
+                targetCamera.fieldOfView = Mathf.Lerp(_transitionStartFieldOfView,
+                                                      wantedFov,
+                                                      transitionWeight);
+
+                if (fovDrivenThisTick)
+                {
+                    _fovWasDriven = true;
+                }
+                else if (transitionCompletesThisTick ||
+                         Mathf.Abs(targetCamera.fieldOfView - _baseFieldOfView) < 0.001f)
+                {
+                    targetCamera.fieldOfView = _baseFieldOfView;
+                    _fovWasDriven = false;
+                }
+            }
+            else
+            {
+                float weight = Damp(fieldOfViewSmoothing, deltaTime, snap);
+                targetCamera.fieldOfView = Mathf.Lerp(targetCamera.fieldOfView,
+                                                      wantedFov,
+                                                      weight);
+
+                if (fovDrivenThisTick)
+                {
+                    _fovWasDriven = true;
+                }
+                else if (weight >= 0.9999f ||
+                         Mathf.Abs(targetCamera.fieldOfView - _baseFieldOfView) < 0.001f)
+                {
+                    targetCamera.fieldOfView = _baseFieldOfView;
+                    _fovWasDriven = false;
+                }
+            }
+        }
+
+        if (transitionCompletesThisTick)
+        {
+            _transitionActive = false;
+            _transitionElapsed = 0f;
         }
 
         _snapNextTick = false;
@@ -421,6 +766,114 @@ public class UniversalCamera : MonoBehaviour
             frame.position = Vector3.SmoothDamp(frame.position, desired,
                                                 ref _velocity, smoothTime, Mathf.Infinity,
                                                 ctx.DeltaTime);
+        }
+    }
+
+    /// <summary>
+    /// Move only the camera's "height" component so it sits on the same height
+    /// plane as the target while preserving its sideways/forward placement.
+    ///
+    /// TargetLocal is the useful mode for a surface-walking character: height
+    /// is measured along the TARGET'S local up axis, so the behaviour still
+    /// works when the target is standing on walls, ceilings, curved cells, etc.
+    /// </summary>
+    [Serializable]
+    public class MatchTargetHeight : CameraBehaviour
+    {
+        public enum HeightSpace
+        {
+            TargetLocal,
+            TargetParentLocal,
+            World
+        }
+
+        [Tooltip("TargetLocal follows the target's own local up axis. This is " +
+                 "normally what you want for a virus that can walk on arbitrary surfaces.")]
+        public HeightSpace space = HeightSpace.TargetLocal;
+
+        [Tooltip("Extra height relative to the target in the selected space. " +
+                 "0 means exactly the same height.")]
+        public float heightOffset = 0f;
+
+        [Tooltip("Seconds to ease onto the target's height. 0 snaps.")]
+        public float smoothTime = 0.08f;
+
+        public override bool RequiresTarget => true;
+
+        public override void Apply(ref CameraFrame frame, in CameraContext ctx)
+        {
+            Vector3 desired = frame.position;
+
+            switch (space)
+            {
+                case HeightSpace.TargetParentLocal:
+                {
+                    Transform parent = ctx.Target.parent;
+
+                    if (parent)
+                    {
+                        Vector3 cameraLocal =
+                            parent.InverseTransformPoint(frame.position);
+
+                        Vector3 targetLocal =
+                            ctx.Target.localPosition;
+
+                        cameraLocal.y =
+                            targetLocal.y +
+                            heightOffset;
+
+                        desired =
+                            parent.TransformPoint(cameraLocal);
+                    }
+                    else
+                    {
+                        desired.y =
+                            ctx.Target.position.y +
+                            heightOffset;
+                    }
+
+                    break;
+                }
+
+                case HeightSpace.World:
+                {
+                    desired.y =
+                        ctx.Target.position.y +
+                        heightOffset;
+
+                    break;
+                }
+
+                default:
+                {
+                    // Express the current camera point in the target's local
+                    // frame. The target itself is local (0,0,0), so y=0 is
+                    // exactly its local-height plane. Preserve local X/Z and
+                    // change only local Y.
+                    Vector3 cameraInTarget =
+                        ctx.Target.InverseTransformPoint(frame.position);
+
+                    cameraInTarget.y =
+                        heightOffset;
+
+                    desired =
+                        ctx.Target.TransformPoint(cameraInTarget);
+
+                    break;
+                }
+            }
+
+            float t =
+                Damp(
+                    smoothTime,
+                    ctx.DeltaTime,
+                    ctx.Snap);
+
+            frame.position =
+                Vector3.LerpUnclamped(
+                    frame.position,
+                    desired,
+                    t);
         }
     }
 
@@ -674,6 +1127,7 @@ public class UniversalCamera : MonoBehaviour
         [NonSerialized] bool _initialised;
         [NonSerialized] Quaternion _upBasis = Quaternion.identity;
         [NonSerialized] bool _upBasisSeeded;
+        [NonSerialized] int _lastMouseInputFrame = -1;
 
         public override bool RequiresTarget => basis == Basis.Target || basis == Basis.TargetUp;
 
@@ -692,6 +1146,7 @@ public class UniversalCamera : MonoBehaviour
             _yaw = Mathf.DeltaAngle(0f, e.y);
             _initialised = true;
             _upBasisSeeded = false;
+            _lastMouseInputFrame = -1;
         }
 
         /// <summary>
@@ -725,7 +1180,7 @@ public class UniversalCamera : MonoBehaviour
 
             if (!requireCursorLock || Cursor.lockState == CursorLockMode.Locked)
             {
-                Vector2 delta = ReadLookDelta(ctx.DeltaTime, stickSpeed);
+                Vector2 delta = ReadLookDelta(ctx.DeltaTime, stickSpeed, ref _lastMouseInputFrame);
                 if (yaw) _yaw += delta.x * sensitivity.x;
                 if (pitch) _pitch += (invertY ? delta.y : -delta.y) * sensitivity.y;
             }
@@ -782,11 +1237,13 @@ public class UniversalCamera : MonoBehaviour
 
         [NonSerialized] Quaternion _rotation = Quaternion.identity;
         [NonSerialized] bool _initialised;
+        [NonSerialized] int _lastMouseInputFrame = -1;
 
         public override void Initialise(UniversalCamera owner)
         {
             _rotation = owner.transform.rotation;
             _initialised = true;
+            _lastMouseInputFrame = -1;
         }
 
         public override void Apply(ref CameraFrame frame, in CameraContext ctx)
@@ -795,7 +1252,7 @@ public class UniversalCamera : MonoBehaviour
 
             Vector2 delta = Vector2.zero;
             if (!requireCursorLock || Cursor.lockState == CursorLockMode.Locked)
-                delta = ReadLookDelta(ctx.DeltaTime, stickSpeed);
+                delta = ReadLookDelta(ctx.DeltaTime, stickSpeed, ref _lastMouseInputFrame);
 
             float yaw   = delta.x * sensitivity.x;
             float pitch = (invertY ? delta.y : -delta.y) * sensitivity.y;
@@ -817,52 +1274,179 @@ public class UniversalCamera : MonoBehaviour
     }
 
     /// <summary>
-    /// Widens the field of view with the target's speed, which is the usual way
-    /// speed is sold: the edges of the frame rush past faster than the centre.
+    /// Selects the Camera projection for this mode.
     ///
-    /// Speed comes from the target's position delta rather than a Rigidbody, so
-    /// it works against anything that moves, including something driven
-    /// kinematically or by an animation.
+    /// In Perspective mode this behaviour writes an exact base field of view.
+    /// A SpeedFieldOfView placed BELOW it in the behaviour list can then add
+    /// speed-based FOV on top.
+    ///
+    /// In Orthographic mode it controls orthographicSize. Projection itself
+    /// switches immediately, while size may optionally smooth.
+    /// </summary>
+    [Serializable]
+    public class CameraProjection : CameraBehaviour
+    {
+        public enum Projection
+        {
+            Perspective,
+            Orthographic
+        }
+
+        public Projection projection = Projection.Perspective;
+
+        [Range(1f, 179f)]
+        [Tooltip("Field of view used when Projection is Perspective.")]
+        public float perspectiveFieldOfView = 60f;
+
+        [Min(0.0001f)]
+        [Tooltip("Camera size used when Projection is Orthographic.")]
+        public float orthographicSize = 5f;
+
+        [Advanced]
+        [Min(0f)]
+        [Tooltip("Seconds to ease Orthographic Size toward its target. 0 snaps. " +
+                 "Perspective FOV uses the UniversalCamera's normal Field Of View Smoothing.")]
+        public float orthographicSizeSmoothing = 0f;
+
+        public override bool WritesProjection => true;
+
+        // Perspective FOV is part of this behaviour. In Orthographic mode FOV
+        // is intentionally left alone because Unity does not use it.
+        public override bool WritesFieldOfView =>
+            projection == Projection.Perspective;
+
+        public override void Apply(ref CameraFrame frame, in CameraContext ctx)
+        {
+            bool wantsOrtho = projection == Projection.Orthographic;
+            frame.orthographic = wantsOrtho;
+
+            if (wantsOrtho)
+            {
+                float wanted = Mathf.Max(0.0001f, orthographicSize);
+
+                frame.orthographicSize = Mathf.Lerp(
+                    frame.orthographicSize,
+                    wanted,
+                    Damp(orthographicSizeSmoothing, ctx.DeltaTime, ctx.Snap));
+            }
+            else
+            {
+                frame.fieldOfView = Mathf.Clamp(perspectiveFieldOfView, 1f, 179f);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Widens field of view from authoritative movement speed. VirusMovement is
+    /// preferred when available, then Rigidbody velocity, with Transform delta
+    /// retained only as a generic fallback for animated/kinematic targets.
     /// </summary>
     [Serializable]
     public class SpeedFieldOfView : CameraBehaviour
     {
-        [Tooltip("Degrees added at full speed, on top of the Camera's own value.")]
+        [Tooltip("Degrees added at full movement speed, on top of the Camera's authored FOV.")]
         public float extraFieldOfView = 22f;
 
-        [Tooltip("Target speed, in units per second, that earns the full amount.")]
+        [Tooltip("Fallback full-effect speed when the target has no VirusMovement. " +
+                 "When VirusMovement is found, its totalSpeed is used instead.")]
         public float speedForFullEffect = 14f;
 
         [Advanced]
-        [Tooltip("Speed below which nothing happens, so ordinary drifting does " +
-                 "not breathe the view in and out.")]
+        [Tooltip("Actual movement speed below this value produces no FOV increase.")]
         public float deadZone = 2f;
+
+        [Advanced]
+        [Tooltip("Prefer VirusMovement.speed / VirusMovement.totalSpeed when that component " +
+                 "exists on the target or one of its parents. This avoids deriving speed " +
+                 "from render-frame position deltas, which can alternate high/low on an " +
+                 "interpolated Rigidbody and make unsmoothed FOV flicker.")]
+        public bool useMovementSpeed = true;
 
         [NonSerialized] Vector3 _lastPosition;
         [NonSerialized] bool _seeded;
+        [NonSerialized] Transform _cachedTarget;
+        [NonSerialized] VirusMovement _movement;
+        [NonSerialized] Rigidbody _rigidbody;
 
         public override bool RequiresTarget => true;
+        public override bool WritesFieldOfView => true;
 
-        public override void Initialise(UniversalCamera owner) => _seeded = false;
+        public override void Initialise(UniversalCamera owner)
+        {
+            _seeded = false;
+            _cachedTarget = null;
+            _movement = null;
+            _rigidbody = null;
+        }
+
+        void CacheSpeedSource(Transform target)
+        {
+            if (_cachedTarget == target) return;
+
+            _cachedTarget = target;
+            _movement = null;
+            _rigidbody = null;
+
+            if (!target) return;
+
+            if (useMovementSpeed)
+            {
+                _movement = target.GetComponentInParent<VirusMovement>();
+                if (!_movement)
+                    _movement = target.GetComponentInChildren<VirusMovement>();
+            }
+
+            // Rigidbody velocity is a much better fallback than position delta
+            // for a physics-driven target, especially with interpolation on.
+            _rigidbody = target.GetComponentInParent<Rigidbody>();
+            if (!_rigidbody)
+                _rigidbody = target.GetComponentInChildren<Rigidbody>();
+        }
 
         public override void Apply(ref CameraFrame frame, in CameraContext ctx)
         {
-            // The first tick after activation has no previous position to
-            // measure against, and guessing one would spike the speed.
-            if (!_seeded)
+            CacheSpeedSource(ctx.Target);
+
+            float speed;
+            float fullSpeed;
+
+            if (_movement)
             {
+                // VirusMovement owns the authoritative speed. Flying comes from
+                // Rigidbody.linearVelocity; grounded speed comes from the actual
+                // graph-space step. totalSpeed is flySpeed or walkSpeed for the
+                // current state, so the FOV tracks the movement system itself.
+                speed = _movement.speed;
+                fullSpeed = Mathf.Max(_movement.totalSpeed, deadZone + 1e-4f);
+
                 _lastPosition = ctx.Target.position;
                 _seeded = true;
-                return;
+            }
+            else if (_rigidbody && !_rigidbody.isKinematic)
+            {
+                speed = _rigidbody.linearVelocity.magnitude;
+                fullSpeed = Mathf.Max(speedForFullEffect, deadZone + 1e-4f);
+
+                _lastPosition = ctx.Target.position;
+                _seeded = true;
+            }
+            else
+            {
+                // Generic fallback for animation/kinematic targets.
+                if (!_seeded)
+                {
+                    _lastPosition = ctx.Target.position;
+                    _seeded = true;
+                    return;
+                }
+
+                float dt = Mathf.Max(ctx.DeltaTime, 1e-5f);
+                speed = (ctx.Target.position - _lastPosition).magnitude / dt;
+                fullSpeed = Mathf.Max(speedForFullEffect, deadZone + 1e-4f);
+                _lastPosition = ctx.Target.position;
             }
 
-            float dt = Mathf.Max(ctx.DeltaTime, 1e-5f);
-            float speed = (ctx.Target.position - _lastPosition).magnitude / dt;
-            _lastPosition = ctx.Target.position;
-
-            // No smoothing here on purpose. The rig eases the field of view
-            // itself, so smoothing the speed as well would just add lag.
-            float t = Mathf.InverseLerp(deadZone, speedForFullEffect, speed);
+            float t = Mathf.InverseLerp(deadZone, fullSpeed, speed);
             frame.fieldOfView += extraFieldOfView * t;
         }
     }
@@ -897,30 +1481,45 @@ public class UniversalCamera : MonoBehaviour
     // -----------------------------------------------------------------------
 
     /// <summary>
-    /// Look delta for this frame, with both devices brought into the same units.
+    /// Look delta with mouse and stick treated according to how each device is
+    /// actually sampled. Mouse movement is an accumulated rendered-frame delta,
+    /// while a stick is a held value integrated over time.
     ///
-    /// Mouse delta is already an accumulated per-frame movement, so scaling it
-    /// by deltaTime would make sensitivity drift with framerate. A stick is a
-    /// held position, not a delta, so it does need deltaTime. Treating the two
-    /// the same is the usual reason pad look feels wrong at a framerate other
-    /// than the one it was tuned at.
+    /// The per-behaviour lastMouseInputFrame guard is important for FixedUpdate:
+    /// Unity may execute several physics ticks during one rendered frame. Reading
+    /// the same mouse delta on every one of those ticks multiplies rotation and
+    /// makes FixedUpdate sensitivity disagree with Update/LateUpdate. Each look
+    /// behaviour therefore consumes mouse movement at most once per rendered
+    /// frame, while gamepad look continues to integrate every tick using dt.
     /// </summary>
-    static Vector2 ReadLookDelta(float deltaTime, float stickSpeed)
+    static Vector2 ReadLookDelta(float deltaTime, float stickSpeed, ref int lastMouseInputFrame)
     {
-#if ENABLE_INPUT_SYSTEM
         Vector2 delta = Vector2.zero;
 
-        if (Mouse.current != null)
-            delta += Mouse.current.delta.ReadValue();
+#if ENABLE_INPUT_SYSTEM
+        int frame = Time.frameCount;
+        if (lastMouseInputFrame != frame)
+        {
+            if (Mouse.current != null)
+                delta += Mouse.current.delta.ReadValue();
+
+            lastMouseInputFrame = frame;
+        }
 
         if (Gamepad.current != null)
             delta += Gamepad.current.rightStick.ReadValue() * stickSpeed * deltaTime;
 
-        return delta;
 #elif ENABLE_LEGACY_INPUT_MANAGER
-        return new Vector2(Input.GetAxisRaw("Mouse X"), Input.GetAxisRaw("Mouse Y"));
-#else
-        return Vector2.zero;
+        // Legacy mouse axes are also rendered-frame values. Gate them exactly
+        // the same way so multiple FixedUpdate calls cannot reuse one delta.
+        int frame = Time.frameCount;
+        if (lastMouseInputFrame != frame)
+        {
+            delta = new Vector2(Input.GetAxisRaw("Mouse X"), Input.GetAxisRaw("Mouse Y"));
+            lastMouseInputFrame = frame;
+        }
 #endif
+
+        return delta;
     }
 }

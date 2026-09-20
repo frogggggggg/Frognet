@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.Events;
 using Pathfinding;
 #if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
@@ -26,7 +27,7 @@ using UnityEngine.InputSystem;
 [RequireComponent(typeof(Rigidbody))]
 public class VirusMovement : MonoBehaviour
 {
-    public enum State { Flying, Grounded }
+    public enum State { Flying, Grounded, FocusMode }
 
     public enum Smoothing
     {
@@ -82,10 +83,81 @@ public class VirusMovement : MonoBehaviour
     [Tooltip("Mode name switched to while grounded. Leave empty to not switch.")]
     public string groundedCameraMode = "Grounded";
 
+    [Header("Focus Mode")]
+    [Tooltip("Camera mode used while Focus Mode is active. The destination UniversalCamera mode's transition settings are respected.")]
+    public string focusCameraMode = "Focus";
+
+    [Tooltip("Normally Focus Mode is entered while crawling on a surface. When enabled, EnterFocusMode does nothing unless the virus is currently Grounded.")]
+    public bool requireGroundedForFocusMode = true;
+
+    [Tooltip("Optional actions fired when Focus Mode begins. Hook your screen-invert script's Trigger/Play/Start method here.")]
+    public UnityEvent onFocusModeEnter;
+
+    [Tooltip("Optional actions fired when Focus Mode ends. Hook your screen-invert script's Untrigger/Reverse/Stop method here.")]
+    public UnityEvent onFocusModeExit;
+
+    [Header("Focus Hold / Slam")]
+    [Tooltip("VISUAL-ONLY transform moved by the focus charge/slam. Assign the virus mesh/model child, NOT the VirusMovement/Rigidbody root. " +
+             "If left empty, the existing Body reference is used only when Body is a child and is not the locomotion root.")]
+    public Transform focusVisualBody;
+
+    [Tooltip("Seconds after the WorldButton completes before Focus Mode actually begins. Movement stops immediately; camera switching, state change, button hiding, and On Focus Mode Enter wait for this delay.")]
+    [Min(0f)]
+    public float focusEntryDelay = 0.18f;
+
+    [Tooltip("How far the visual Body rises outward from the current surface during the hold.")]
+    [Min(0f)]
+    public float focusHoldLiftAmount = 0.30f;
+
+    [Tooltip("Shape of the rise during the hold. Above 1 makes the lift build harder near completion.")]
+    [Min(0.1f)]
+    public float focusHoldLiftPower = 1.35f;
+
+    [Tooltip("How far BELOW the authored Body position the visual body impacts when the hold completes.")]
+    [Min(0f)]
+    public float focusSlamDownAmount = 0.16f;
+
+    [Tooltip("Seconds from the raised hold pose to the downward impact.")]
+    [Min(0.01f)]
+    public float focusSlamDuration = 0.10f;
+
+    [Tooltip("Seconds for the body to recover from impact back to its authored position.")]
+    [Min(0.01f)]
+    public float focusSlamRecoveryDuration = 0.18f;
+
+    [Tooltip("How quickly a cancelled/incomplete hold returns the visual body to normal.")]
+    [Min(0.01f)]
+    public float focusHoldCancelReturnSpeed = 10f;
+
+    [Header("World Button")]
+    [Tooltip("Interaction button that should exist only while the virus is Grounded. " +
+             "VirusMovement automatically shows it while Grounded and hides it while Flying or in Focus Mode.")]
+    public WorldButton groundedWorldButton;
+
     [Header("Speeds")]
     public float flySpeed = 12f;
     public float walkSpeed = 4f;
     public float jumpForce = 8f;
+
+    [Header("Ground Walk Accel / Decel")]
+    [Tooltip("When off, grounded movement uses Walk Speed immediately like before. When on, grounded speed ramps using the AnimationCurve graphs below.")]
+    public bool useWalkSpeedCurves = false;
+
+    [Tooltip("Seconds to transition from the current grounded speed toward Walk Speed after movement input begins.")]
+    [Min(0.01f)]
+    public float walkAccelerationTime = 0.28f;
+
+    [Tooltip("Acceleration graph. X = normalized time 0 to 1. Y = normalized progress from the starting speed to the requested speed.")]
+    public AnimationCurve walkAccelerationCurve =
+        AnimationCurve.EaseInOut(0f, 0f, 1f, 1f);
+
+    [Tooltip("Seconds to transition from the current grounded speed to zero after movement input is released.")]
+    [Min(0.01f)]
+    public float walkDecelerationTime = 0.20f;
+
+    [Tooltip("Deceleration graph. X = normalized time 0 to 1. Y = normalized progress from release speed toward zero.")]
+    public AnimationCurve walkDecelerationCurve =
+        AnimationCurve.EaseInOut(0f, 0f, 1f, 1f);
 
     [Header("Feel")]
     [Tooltip("How quickly the virus turns to face where it is going, as a " +
@@ -119,6 +191,48 @@ public class VirusMovement : MonoBehaviour
     public Vector3 flyingLeadAxis = Vector3.down;
 
     public State state { get; private set; } = State.Flying;
+
+    /// <summary>
+    /// Actual movement speed in world units per second. While flying this is the
+    /// Rigidbody velocity magnitude. While grounded it is measured from the
+    /// graph movement step, so camera effects do not have to estimate speed from
+    /// render-frame Transform deltas.
+    /// </summary>
+    public float speed
+    {
+        get
+        {
+            if (state == State.Flying)
+                return _rb ? _rb.linearVelocity.magnitude : 0f;
+
+            if (state == State.Grounded)
+                return _groundedSpeed;
+
+            return 0f;
+        }
+    }
+
+    /// <summary>
+    /// Intended top movement speed for the current locomotion state. Focus Mode
+    /// has no player movement, so its total speed is zero.
+    /// </summary>
+    public float totalSpeed
+    {
+        get
+        {
+            if (state == State.Flying) return Mathf.Max(flySpeed, 0f);
+            if (state == State.Grounded) return Mathf.Max(walkSpeed, 0f);
+            return 0f;
+        }
+    }
+
+    /// <summary>Current speed normalised against the current state's top speed.</summary>
+    public float normalizedSpeed => totalSpeed > 1e-5f
+        ? Mathf.Clamp01(speed / totalSpeed)
+        : 0f;
+
+    /// <summary>True while player locomotion/input is locked in Focus Mode.</summary>
+    public bool IsFocusMode => state == State.FocusMode;
 
     /// <summary>Outward normal of the graph triangle under the virus.</summary>
     public Vector3 surfaceNormal { get; private set; } = Vector3.up;
@@ -164,6 +278,32 @@ public class VirusMovement : MonoBehaviour
     bool _jumpQueued;
     float _landingLockedUntil;
     float _moveLockedUntil;
+    float _groundedSpeed;
+
+    // Desired crawl speed, separate from _groundedSpeed which measures the
+    // actual movement achieved across the graph.
+    float _groundedCommandSpeed;
+    float _walkCurveElapsed;
+    float _walkCurveStartSpeed;
+    bool _walkHadInput;
+    Vector3 _lastGroundMoveDirection;
+
+    bool _focusEntryPending;
+    float _focusEntryCompleteAt;
+
+    WorldButton _boundFocusButton;
+
+    Transform _focusVisualTarget;
+    Vector3 _bodyAuthoredLocalPosition;
+    bool _bodyPositionSeeded;
+
+    bool _focusHoldActive;
+    bool _focusBodyReturning;
+
+    bool _focusSlamActive;
+    float _focusSlamElapsed;
+    float _focusSlamStartOffset;
+    float _focusBodyOffset;
 
     void Awake()
     {
@@ -178,11 +318,85 @@ public class VirusMovement : MonoBehaviour
         if (!_camera && Camera.main) _camera = Camera.main.transform;
 
         _targetRotation = transform.rotation;
+
+        SeedFocusBodyPosition();
+        BindGroundedWorldButtonEvents();
+        RefreshGroundedWorldButton();
+    }
+
+    void OnEnable()
+    {
+        BindGroundedWorldButtonEvents();
+    }
+
+    void OnDisable()
+    {
+        UnbindGroundedWorldButtonEvents();
+        RestoreFocusBodyImmediately();
+    }
+
+    void OnValidate()
+    {
+        focusEntryDelay = Mathf.Max(0f, focusEntryDelay);
+        focusHoldLiftAmount = Mathf.Max(0f, focusHoldLiftAmount);
+        focusHoldLiftPower = Mathf.Max(0.1f, focusHoldLiftPower);
+        focusSlamDownAmount = Mathf.Max(0f, focusSlamDownAmount);
+        focusSlamDuration = Mathf.Max(0.01f, focusSlamDuration);
+        focusSlamRecoveryDuration = Mathf.Max(0.01f, focusSlamRecoveryDuration);
+        focusHoldCancelReturnSpeed = Mathf.Max(0.01f, focusHoldCancelReturnSpeed);
+
+        walkAccelerationTime = Mathf.Max(0.01f, walkAccelerationTime);
+        walkDecelerationTime = Mathf.Max(0.01f, walkDecelerationTime);
+    }
+
+    void LateUpdate()
+    {
+        UpdateFocusBodyAnimation(Time.deltaTime);
     }
 
     void Update()
     {
         if (!_camera && Camera.main) _camera = Camera.main.transform;
+
+        // Keep the prompt tied to locomotion state even if another system
+        // temporarily changes it. This does not call Show() every frame, so
+        // an in-progress hold is not reset.
+        RefreshGroundedWorldButton();
+
+        // Hold completion kills locomotion immediately, but the rest of the
+        // Focus transition waits for the configured delay/slam beat.
+        if (_focusEntryPending)
+        {
+            _move = Vector2.zero;
+            _jumpQueued = false;
+            _groundedSpeed = 0f;
+
+            if (_rb)
+            {
+                _rb.linearVelocity = Vector3.zero;
+                _rb.angularVelocity = Vector3.zero;
+            }
+
+            if (Time.time >= _focusEntryCompleteAt)
+                CompleteFocusModeEntry();
+
+            return;
+        }
+
+        // Focus Mode owns the player completely. No movement input is read, no
+        // jump can queue, GroundedStep does not run, and rotation is left alone.
+        // Escape is the only locomotion-script input still listened for.
+        if (state == State.FocusMode)
+        {
+            _move = Vector2.zero;
+            _jumpQueued = false;
+            _groundedSpeed = 0f;
+
+            if (ReadFocusExitPressed())
+                ExitFocusMode();
+
+            return;
+        }
 
         _move = ReadMove();
 
@@ -287,6 +501,80 @@ public class VirusMovement : MonoBehaviour
     // Grounded
     // -----------------------------------------------------------------------
 
+    float UpdateGroundWalkCommandSpeed(float inputAmount, float dt)
+    {
+        float topSpeed = Mathf.Max(0f, walkSpeed);
+        float requestedSpeed = topSpeed * Mathf.Clamp01(inputAmount);
+
+        if (!useWalkSpeedCurves)
+        {
+            _groundedCommandSpeed = requestedSpeed;
+            _walkHadInput = inputAmount > 0.001f;
+            _walkCurveElapsed = 0f;
+            _walkCurveStartSpeed = _groundedCommandSpeed;
+            return _groundedCommandSpeed;
+        }
+
+        bool hasInput = inputAmount > 0.001f;
+
+        // Start a new traversal only when crossing between pressed/released.
+        // This avoids restarting the graph every frame from analog-stick noise.
+        if (hasInput != _walkHadInput)
+        {
+            _walkCurveElapsed = 0f;
+            _walkCurveStartSpeed = _groundedCommandSpeed;
+            _walkHadInput = hasInput;
+        }
+
+        _walkCurveElapsed += Mathf.Max(0f, dt);
+
+        if (hasInput)
+        {
+            float t = Mathf.Clamp01(
+                _walkCurveElapsed / Mathf.Max(0.01f, walkAccelerationTime));
+
+            float progress = walkAccelerationCurve != null
+                ? Mathf.Clamp01(walkAccelerationCurve.Evaluate(t))
+                : t;
+
+            _groundedCommandSpeed = Mathf.LerpUnclamped(
+                _walkCurveStartSpeed,
+                requestedSpeed,
+                progress);
+
+            if (t >= 1f)
+                _groundedCommandSpeed = requestedSpeed;
+        }
+        else
+        {
+            float t = Mathf.Clamp01(
+                _walkCurveElapsed / Mathf.Max(0.01f, walkDecelerationTime));
+
+            float progress = walkDecelerationCurve != null
+                ? Mathf.Clamp01(walkDecelerationCurve.Evaluate(t))
+                : t;
+
+            _groundedCommandSpeed = Mathf.LerpUnclamped(
+                _walkCurveStartSpeed,
+                0f,
+                progress);
+
+            if (t >= 1f)
+                _groundedCommandSpeed = 0f;
+        }
+
+        return Mathf.Max(0f, _groundedCommandSpeed);
+    }
+
+    void ResetGroundWalkSpeedProfile()
+    {
+        _groundedCommandSpeed = 0f;
+        _walkCurveElapsed = 0f;
+        _walkCurveStartSpeed = 0f;
+        _walkHadInput = false;
+        _lastGroundMoveDirection = Vector3.zero;
+    }
+
     void GroundedStep(float dt)
     {
         if (AstarPath.active == null)
@@ -322,12 +610,43 @@ public class VirusMovement : MonoBehaviour
         // where it hit instead of sliding straight off it.
         Vector2 input = Time.time < _moveLockedUntil ? Vector2.zero : _move;
 
-        Vector3 wish = tangentF * input.y + tangentR * input.x;
-        if (wish.sqrMagnitude > 1f) wish.Normalize();
+        Vector3 inputWish = tangentF * input.y + tangentR * input.x;
+        float inputAmount = Mathf.Clamp01(input.magnitude);
 
-        // Step in world units so walkSpeed stays metres per second whatever the
-        // cell is scaled to, then convert into graph space to query.
-        Vector3 desired = worldPos + wish * (walkSpeed * dt);
+        bool hasMoveInput =
+            inputWish.sqrMagnitude > 1e-6f &&
+            inputAmount > 0.001f;
+
+        Vector3 wishDirection;
+
+        if (hasMoveInput)
+        {
+            wishDirection = inputWish.normalized;
+            _lastGroundMoveDirection = wishDirection;
+        }
+        else
+        {
+            // Curve-based deceleration carries the virus in its last crawl
+            // direction while continuously re-projecting onto the curved cell.
+            wishDirection = Vector3.ProjectOnPlane(
+                _lastGroundMoveDirection,
+                up);
+
+            if (wishDirection.sqrMagnitude > 1e-6f)
+                wishDirection.Normalize();
+            else
+                wishDirection = Vector3.zero;
+        }
+
+        float commandedWalkSpeed = UpdateGroundWalkCommandSpeed(
+            hasMoveInput ? inputAmount : 0f,
+            dt);
+
+        Vector3 wish = wishDirection * commandedWalkSpeed;
+
+        // Step in world units so Walk Speed remains metres per second whatever
+        // the cell scale.
+        Vector3 desired = worldPos + wish * dt;
 
         _constraint.graphMask = _graphMask;
         NNInfo nearest = AstarPath.active.GetNearest(WorldToGraph(desired), _constraint);
@@ -338,6 +657,7 @@ public class VirusMovement : MonoBehaviour
             return;
         }
 
+        Vector3 previousGraphPosition = _graphPosition;
         _graphPosition = nearest.position;
 
         Vector3 smoothedPosition = SmoothSurface(cellSpace, nearest.node,
@@ -345,13 +665,27 @@ public class VirusMovement : MonoBehaviour
                                                  out Vector3 smoothedNormal);
         surfaceNormal = smoothedNormal;
 
+        // Measure only movement across the cell surface. Both graph points are
+        // converted through the cell's current transform, so motion of the cell
+        // itself does not falsely count as player speed.
+        if (dt > 1e-5f)
+        {
+            Vector3 previousWorld = GraphToWorld(previousGraphPosition);
+            Vector3 currentWorld = GraphToWorld(_graphPosition);
+            _groundedSpeed = Vector3.Distance(previousWorld, currentWorld) / dt;
+        }
+        else
+        {
+            _groundedSpeed = 0f;
+        }
+
         // Falls through a chain rather than bailing out. Leaving the target
         // untouched when the heading degenerated is why the virus sometimes
         // stopped facing the ground: the stored forward can drift parallel to
         // the normal as the surface curves, and projecting it then collapses
         // to zero. The last fallback cannot fail.
-        Vector3 heading = wish.sqrMagnitude > 1e-4f
-            ? wish
+        Vector3 heading = wishDirection.sqrMagnitude > 1e-4f
+            ? wishDirection
             : Vector3.ProjectOnPlane(GraphDirToWorld(_graphForward), surfaceNormal);
 
         if (heading.sqrMagnitude < 1e-4f)
@@ -532,13 +866,153 @@ public class VirusMovement : MonoBehaviour
     }
 
     // -----------------------------------------------------------------------
+    // Focus Mode
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Enter the non-interactive Focus Mode. Intended for UnityEvents such as a
+    /// completed WorldButton hold. Player locomotion/jump/rotation input stops,
+    /// the configured camera mode is selected, and On Focus Mode Enter fires.
+    /// </summary>
+    public void EnterFocusMode()
+    {
+        if (state == State.FocusMode ||
+            _focusEntryPending)
+            return;
+
+        if (requireGroundedForFocusMode &&
+            state != State.Grounded)
+            return;
+
+        // IMMEDIATE portion: stop player control the instant the hold completes.
+        _move = Vector2.zero;
+        _jumpQueued = false;
+        _groundedSpeed = 0f;
+        ResetGroundWalkSpeedProfile();
+
+        if (_rb)
+        {
+            _rb.linearVelocity = Vector3.zero;
+            _rb.angularVelocity = Vector3.zero;
+
+            // Never convert an airborne Rigidbody to kinematic during this
+            // visual sequence. Normal use enters focus from Grounded, where it
+            // is already kinematic.
+            if (state == State.Grounded)
+                _rb.isKinematic = true;
+        }
+
+        _focusHoldActive = false;
+        _focusBodyReturning = false;
+
+        BeginFocusSlam();
+
+        // DELAYED portion: state/camera/events/button visibility.
+        _focusEntryPending = true;
+        _focusEntryCompleteAt =
+            Time.time +
+            Mathf.Max(0f, focusEntryDelay);
+
+        if (focusEntryDelay <= 0f)
+            CompleteFocusModeEntry();
+    }
+
+    void CompleteFocusModeEntry()
+    {
+        if (!_focusEntryPending)
+            return;
+
+        _focusEntryPending = false;
+
+        state = State.FocusMode;
+        RefreshGroundedWorldButton();
+
+        _move = Vector2.zero;
+        _jumpQueued = false;
+        _groundedSpeed = 0f;
+
+        if (_rb)
+        {
+            _rb.linearVelocity = Vector3.zero;
+            _rb.angularVelocity = Vector3.zero;
+            _rb.isKinematic = true;
+        }
+
+        SetCameraMode(focusCameraMode);
+        onFocusModeEnter?.Invoke();
+    }
+
+    /// <summary>
+    /// Leave Focus Mode and resume normal grounded movement. This is public so
+    /// another UI/event can exit as well as the built-in Escape key.
+    /// </summary>
+    public void ExitFocusMode()
+    {
+        if (_focusEntryPending)
+        {
+            _focusEntryPending = false;
+            _focusHoldActive = false;
+            _focusSlamActive = false;
+            _focusBodyReturning = true;
+
+            _move = Vector2.zero;
+            _jumpQueued = false;
+            _groundedSpeed = 0f;
+            return;
+        }
+
+        if (state != State.FocusMode)
+            return;
+
+        state = State.Grounded;
+        RefreshGroundedWorldButton();
+
+        _move = Vector2.zero;
+        _jumpQueued = false;
+        _groundedSpeed = 0f;
+        ResetGroundWalkSpeedProfile();
+        _moveLockedUntil = Time.time; // movement is available immediately
+
+        if (_rb)
+        {
+            _rb.linearVelocity = Vector3.zero;
+            _rb.angularVelocity = Vector3.zero;
+            _rb.isKinematic = true;
+        }
+
+        // Reverse/disable the screen effect first, then let the destination
+        // Grounded camera mode perform whatever transition it has configured.
+        onFocusModeExit?.Invoke();
+        SetCameraMode(groundedCameraMode);
+    }
+
+    /// <summary>Convenience function for UI buttons that want one method.</summary>
+    public void ToggleFocusMode()
+    {
+        if (state == State.FocusMode ||
+            _focusEntryPending)
+            ExitFocusMode();
+        else
+            EnterFocusMode();
+    }
+
+    // -----------------------------------------------------------------------
     // State changes
     // -----------------------------------------------------------------------
 
     void Launch(Vector3 velocity)
     {
+        _focusEntryPending = false;
+        _focusHoldActive = false;
+        _focusSlamActive = false;
+        _focusBodyReturning = true;
+
         state = State.Flying;
+        RefreshGroundedWorldButton();
+
         _jumpQueued = false;
+        _groundedSpeed = 0f;
+        ResetGroundWalkSpeedProfile();
 
         // Release the cell. Local-space graphs all sit at the origin, so a
         // stale binding would convert the next query through the wrong cell.
@@ -546,8 +1020,13 @@ public class VirusMovement : MonoBehaviour
         cellSpace = null;
         _graphMask = GraphMask.everything;
 
+        // Reassert ALL physics invariants required for flight. Focus visuals
+        // are completely separate from this Transform/Rigidbody.
         _rb.isKinematic = false;
+        _rb.useGravity = false;
+        _rb.constraints = RigidbodyConstraints.FreezeRotation;
         _rb.linearVelocity = velocity;
+        _rb.angularVelocity = Vector3.zero;
 
         SetCameraMode(flyingCameraMode);
 
@@ -591,6 +1070,10 @@ public class VirusMovement : MonoBehaviour
             return false;
 
         state = State.Grounded;
+        RefreshGroundedWorldButton();
+
+        _groundedSpeed = 0f;
+        ResetGroundWalkSpeedProfile();
         _moveLockedUntil = Time.time + landingDelay;
         cell = landedOn;
         cellSpace = space;
@@ -700,6 +1183,292 @@ public class VirusMovement : MonoBehaviour
         return rotationSharpness <= 0f ? 1f : 1f - Mathf.Exp(-rotationSharpness * dt);
     }
 
+    void BindGroundedWorldButtonEvents()
+    {
+        if (_boundFocusButton == groundedWorldButton)
+            return;
+
+        UnbindGroundedWorldButtonEvents();
+
+        _boundFocusButton = groundedWorldButton;
+
+        if (!_boundFocusButton)
+            return;
+
+        _boundFocusButton.onHoldStarted.AddListener(OnFocusHoldStarted);
+        _boundFocusButton.onHoldCancelled.AddListener(OnFocusHoldCancelled);
+    }
+
+    void UnbindGroundedWorldButtonEvents()
+    {
+        if (!_boundFocusButton)
+            return;
+
+        _boundFocusButton.onHoldStarted.RemoveListener(OnFocusHoldStarted);
+        _boundFocusButton.onHoldCancelled.RemoveListener(OnFocusHoldCancelled);
+        _boundFocusButton = null;
+    }
+
+    void OnFocusHoldStarted()
+    {
+        if (state != State.Grounded ||
+            _focusEntryPending)
+            return;
+
+        SeedFocusBodyPosition();
+
+        _focusHoldActive = true;
+        _focusBodyReturning = false;
+        _focusSlamActive = false;
+    }
+
+    void OnFocusHoldCancelled()
+    {
+        if (_focusEntryPending ||
+            state == State.FocusMode)
+            return;
+
+        _focusHoldActive = false;
+        _focusSlamActive = false;
+        _focusBodyReturning = true;
+    }
+
+    void BeginFocusSlam()
+    {
+        SeedFocusBodyPosition();
+
+        // A WorldButton can complete earlier in the frame than this script's
+        // LateUpdate. Guarantee the slam starts from the fully charged height
+        // rather than one-frame-short of it.
+        if (groundedWorldButton && groundedWorldButton.IsCompleted)
+            _focusBodyOffset = Mathf.Max(_focusBodyOffset, focusHoldLiftAmount);
+
+        _focusSlamStartOffset = _focusBodyOffset;
+        _focusSlamElapsed = 0f;
+        _focusSlamActive = true;
+    }
+
+    Transform ResolveFocusVisualTarget()
+    {
+        // Explicit reference wins, but NEVER permit the locomotion root.
+        if (focusVisualBody &&
+            focusVisualBody != transform &&
+            (!_rb || focusVisualBody != _rb.transform))
+        {
+            return focusVisualBody;
+        }
+
+        // Backward-compatible fallback: the old Body reference is safe only
+        // when it is genuinely a separate visual child.
+        if (body &&
+            body != transform &&
+            (!_rb || body != _rb.transform))
+        {
+            return body;
+        }
+
+        return null;
+    }
+
+    void SeedFocusBodyPosition()
+    {
+        Transform resolved =
+            ResolveFocusVisualTarget();
+
+        if (!resolved)
+        {
+            _focusVisualTarget = null;
+            _bodyPositionSeeded = false;
+            return;
+        }
+
+        if (_bodyPositionSeeded &&
+            _focusVisualTarget == resolved)
+            return;
+
+        _focusVisualTarget = resolved;
+        _bodyAuthoredLocalPosition =
+            _focusVisualTarget.localPosition;
+
+        _bodyPositionSeeded = true;
+        _focusBodyOffset = 0f;
+    }
+
+    void RestoreFocusBodyImmediately()
+    {
+        if (_focusVisualTarget &&
+            _bodyPositionSeeded)
+        {
+            _focusVisualTarget.localPosition =
+                _bodyAuthoredLocalPosition;
+        }
+
+        _focusHoldActive = false;
+        _focusBodyReturning = false;
+        _focusSlamActive = false;
+        _focusBodyOffset = 0f;
+    }
+
+    void UpdateFocusBodyAnimation(float dt)
+    {
+        SeedFocusBodyPosition();
+
+        if (!_focusVisualTarget ||
+            !_bodyPositionSeeded)
+            return;
+
+        if (_focusSlamActive)
+        {
+            _focusSlamElapsed += dt;
+
+            float slamDuration =
+                Mathf.Max(0.01f, focusSlamDuration);
+
+            float recoveryDuration =
+                Mathf.Max(0.01f, focusSlamRecoveryDuration);
+
+            if (_focusSlamElapsed <= slamDuration)
+            {
+                float t =
+                    Mathf.Clamp01(
+                        _focusSlamElapsed /
+                        slamDuration);
+
+                // Accelerates hard into the impact.
+                float slamT = t * t * t;
+
+                _focusBodyOffset =
+                    Mathf.LerpUnclamped(
+                        _focusSlamStartOffset,
+                        -focusSlamDownAmount,
+                        slamT);
+            }
+            else
+            {
+                float t =
+                    Mathf.Clamp01(
+                        (_focusSlamElapsed - slamDuration) /
+                        recoveryDuration);
+
+                float smooth =
+                    t * t * (3f - 2f * t);
+
+                _focusBodyOffset =
+                    Mathf.LerpUnclamped(
+                        -focusSlamDownAmount,
+                        0f,
+                        smooth);
+
+                if (t >= 1f)
+                {
+                    _focusSlamActive = false;
+                    _focusBodyOffset = 0f;
+                }
+            }
+        }
+        else if (_focusHoldActive &&
+                 groundedWorldButton &&
+                 groundedWorldButton.IsHolding)
+        {
+            float progress =
+                Mathf.Clamp01(
+                    groundedWorldButton.HoldProgress);
+
+            float liftT =
+                Mathf.Pow(
+                    progress,
+                    Mathf.Max(
+                        0.1f,
+                        focusHoldLiftPower));
+
+            _focusBodyOffset =
+                focusHoldLiftAmount *
+                liftT;
+        }
+        else if (_focusBodyReturning ||
+                 Mathf.Abs(_focusBodyOffset) > 0.0001f)
+        {
+            float response =
+                1f -
+                Mathf.Exp(
+                    -Mathf.Max(
+                        0.01f,
+                        focusHoldCancelReturnSpeed) *
+                    dt);
+
+            _focusBodyOffset =
+                Mathf.Lerp(
+                    _focusBodyOffset,
+                    0f,
+                    response);
+
+            if (Mathf.Abs(_focusBodyOffset) < 0.0005f)
+            {
+                _focusBodyOffset = 0f;
+                _focusBodyReturning = false;
+            }
+        }
+
+        // Only the VISUAL child moves. Locomotion/navmesh root remains untouched.
+        Vector3 outwardWorld =
+            (state == State.Grounded ||
+             state == State.FocusMode ||
+             _focusEntryPending)
+                ? surfaceNormal
+                : transform.up;
+
+        if (outwardWorld.sqrMagnitude < 0.000001f)
+            outwardWorld = transform.up;
+
+        outwardWorld.Normalize();
+
+        Transform parent =
+            _focusVisualTarget.parent;
+
+        Vector3 localOffset =
+            parent
+                ? parent.InverseTransformVector(
+                    outwardWorld *
+                    _focusBodyOffset)
+                : outwardWorld *
+                  _focusBodyOffset;
+
+        _focusVisualTarget.localPosition =
+            _bodyAuthoredLocalPosition +
+            localOffset;
+    }
+
+    /// <summary>
+    /// Grounded owns the interaction prompt. Only change visibility when needed;
+    /// repeatedly calling WorldButton.Show() would reset an active hold.
+    /// </summary>
+    void RefreshGroundedWorldButton()
+    {
+        BindGroundedWorldButtonEvents();
+
+        if (!groundedWorldButton)
+            return;
+
+        bool shouldShow = state == State.Grounded;
+
+        if (shouldShow)
+        {
+            bool visualMissing = groundedWorldButton.visualRoot &&
+                                 !groundedWorldButton.visualRoot.activeSelf;
+
+            if (!groundedWorldButton.enabled || visualMissing)
+                groundedWorldButton.Show();
+        }
+        else
+        {
+            bool visualStillVisible = groundedWorldButton.visualRoot &&
+                                      groundedWorldButton.visualRoot.activeSelf;
+
+            if (groundedWorldButton.enabled || visualStillVisible)
+                groundedWorldButton.Hide();
+        }
+    }
+
     /// <summary>
     /// Push a mode name to every rig. Rigs that have no mode by that name are
     /// left alone rather than warned about -- a holder and a camera will often
@@ -720,6 +1489,18 @@ public class VirusMovement : MonoBehaviour
     // Input (new Input System: this project has activeInputHandler = 1, so the
     // legacy Input class throws at runtime)
     // -----------------------------------------------------------------------
+
+    static bool ReadFocusExitPressed()
+    {
+#if ENABLE_INPUT_SYSTEM
+        return Keyboard.current != null &&
+               Keyboard.current.escapeKey.wasPressedThisFrame;
+#elif ENABLE_LEGACY_INPUT_MANAGER
+        return Input.GetKeyDown(KeyCode.Escape);
+#else
+        return false;
+#endif
+    }
 
     static Vector2 ReadMove()
     {
