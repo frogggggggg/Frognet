@@ -1,0 +1,29 @@
+// Every item in this folder is loaded at startup. Any number of items may share a file:
+// each 'name:' at the left margin starts a new one.
+//
+//   name           what the item is called, and how it is looked up
+//   description    flavour text
+//   maxStack       how many fit in one slot, defaults to 1
+//   prefab         Resources path of the pickup prefab, defaults to the shared one
+//   data           shared defaults every copy of this item starts with
+//   modified_data  per copy overrides a freshly created copy starts with
+
+name: meat helmet
+description: a meaty helmet
+maxStack: 1
+data:
+    durability: 100
+    maxDurability: 100
+    consumable: speed(1, 1)
+    equipable: head
+// A new copy comes out of the box already worn down to 50 of its 100 durability.
+modified_data:
+    durability: 50
+
+name: Pebble
+description: Just a pebble
+maxStack: 5
+data:
+    durability: 5
+    consumable: speed(1, 2)
+    equipable: head

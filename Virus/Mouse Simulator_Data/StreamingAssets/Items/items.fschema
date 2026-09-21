@@ -1,0 +1,36 @@
+// The shape of an item file.
+//
+//   name = type       a value: float, int, bool or string
+//   name = [ ... ]    any combination of the entries inside
+//   name = { ... }    exactly one of the entries inside
+//   name = other      reuse the shape of another top level declaration
+//
+// Nesting is unlimited. Nothing may take more than four numeric arguments or more than one
+// string. Every schema needs a top level 'name = string'; that is how records are looked up.
+
+name = string
+description = string
+maxStack = int
+prefab = string
+
+data =
+[
+    durability = float
+    maxDurability = float
+    label = string
+
+    consumable =
+    {
+        food = float
+        speed = float float
+    }
+
+    equipable =
+    {
+        head
+        torso
+        legs
+    }
+]
+
+modified_data = data

@@ -19,6 +19,7 @@ using UnityEngine;
 /// target. Ground walking, flying spin, landing preparation, and landing-pose
 /// preservation all drive those same targets.
 /// </summary>
+[DefaultExecutionOrder(100)]
 public class SpiderLegWalker : MonoBehaviour
 {
     class RuntimeLeg
@@ -110,9 +111,30 @@ public class SpiderLegWalker : MonoBehaviour
         public Vector3 stepEnd;
         public Vector3 stepNormal;
 
+        // Ground support is authoritative while planted. A planted foot is
+        // stored as a LOCAL point on this transform, exactly as if it were a
+        // child of the surface.
         public Transform support;
         public Vector3 supportLocalPoint;
+
+        // Body motion measured RELATIVE to the support. World motion of a
+        // moving platform must not look like the virus walking across it.
+        public Vector3 supportLastBodyLocalPoint;
+        public bool supportBodyLocalInitialized;
+        public Vector3 supportRelativeBodyVelocity;
+
+        // While a foot is swinging, BOTH ends of the step can remain in the
+        // support's local frame. Therefore a translating/rotating Rigidbody
+        // carries the entire gait arc smoothly instead of leaving it behind in
+        // world space for a frame.
+        public Transform stepStartSupport;
+        public Vector3 stepStartSupportLocalPoint;
+        public bool stepStartSupportLocalValid;
+
         public Transform stepEndSupport;
+        public Vector3 stepEndSupportLocalPoint;
+        public Vector3 stepEndSupportLocalNormal;
+        public bool stepEndSupportLocalValid;
     }
 
     [Header("References")]
@@ -484,8 +506,17 @@ public class SpiderLegWalker : MonoBehaviour
     Vector3 _groundFrameRight;
     Vector3 _groundFrameForward;
 
+    // The gait frame itself is also stored relative to the support. This is
+    // important for rotating platforms: rotation around the surface normal
+    // does not change the normal, so normal-only transport cannot detect it.
+    Transform _groundFrameSupport;
+    Vector3 _groundFrameSupportLocalNormal;
+    Vector3 _groundFrameSupportLocalRight;
+    Vector3 _groundFrameSupportLocalForward;
+
     Vector3 _previousGroundFacing;
     bool _groundFacingSeeded;
+    Transform _groundFacingSupport;
     float _groundTurnIntensity;
 
     Vector3 _lastGroundBodyPosition;
@@ -664,7 +695,10 @@ public class SpiderLegWalker : MonoBehaviour
         bool grounded = IsGrounded();
 
         if (grounded)
+        {
+            UpdateGroundSupportRelativeMotion(Time.deltaTime);
             UpdateGroundFrame(Time.deltaTime);
+        }
 
         RefreshLegSlotAngles();
         UpdateGeneratedRootTransforms();
@@ -721,7 +755,10 @@ public class SpiderLegWalker : MonoBehaviour
 
     bool IsGrounded()
     {
-        return !movement || movement.state == VirusMovement.State.Grounded;
+        // FocusMode is non-interactive Grounded, not an unowned transition
+        // state. Keeping this semantic in VirusMovement prevents every support
+        // consumer from having to duplicate the state list.
+        return !movement || movement.IsSurfaceAttached;
     }
 
     bool IsFlying()
@@ -732,7 +769,7 @@ public class SpiderLegWalker : MonoBehaviour
     Vector3 SurfaceNormal()
     {
         if (movement &&
-            movement.state == VirusMovement.State.Grounded &&
+            movement.IsSurfaceAttached &&
             movement.surfaceNormal.sqrMagnitude > 0.000001f)
             return movement.surfaceNormal.normalized;
 
@@ -944,6 +981,46 @@ public class SpiderLegWalker : MonoBehaviour
         }
     }
 
+    Transform PrimaryGroundSupport()
+    {
+        for (int i = 0; i < _legs.Count; i++)
+        {
+            RuntimeLeg leg = _legs[i];
+
+            if (leg.planted &&
+                leg.support)
+            {
+                return leg.support;
+            }
+        }
+
+        return null;
+    }
+
+    void CaptureGroundFrameOnSupport(
+        Transform support)
+    {
+        _groundFrameSupport = support;
+
+        if (!support)
+            return;
+
+        _groundFrameSupportLocalNormal =
+            SafeNormal(
+                support.InverseTransformDirection(
+                    _groundFrameNormal));
+
+        _groundFrameSupportLocalRight =
+            SafeNormal(
+                support.InverseTransformDirection(
+                    _groundFrameRight));
+
+        _groundFrameSupportLocalForward =
+            SafeNormal(
+                support.InverseTransformDirection(
+                    _groundFrameForward));
+    }
+
     void InitializeGroundFrame(Vector3 normal)
     {
         normal = SafeNormal(normal);
@@ -984,11 +1061,102 @@ public class SpiderLegWalker : MonoBehaviour
         _groundFrameForward = forward;
         _groundFrameInitialized = true;
 
+        CaptureGroundFrameOnSupport(
+            PrimaryGroundSupport());
+
         _groundFacingSeeded = false;
+        _groundFacingSupport = null;
         _groundTurnIntensity = 0f;
 
         _lastGroundBodyPosition = Body.position;
         _groundBodyPositionSeeded = true;
+    }
+
+    void UpdateGroundSupportRelativeMotion(float dt)
+    {
+        dt = Mathf.Max(dt, 0.00001f);
+
+        for (int i = 0; i < _legs.Count; i++)
+        {
+            RuntimeLeg leg = _legs[i];
+
+            if (!leg.planted)
+                continue;
+
+            if (leg.support)
+            {
+                Vector3 bodyLocal =
+                    leg.support.InverseTransformPoint(
+                        Body.position);
+
+                if (!leg.supportBodyLocalInitialized)
+                {
+                    leg.supportLastBodyLocalPoint = bodyLocal;
+                    leg.supportBodyLocalInitialized = true;
+                    leg.supportRelativeBodyVelocity = Vector3.zero;
+                    continue;
+                }
+
+                Vector3 localDelta =
+                    bodyLocal -
+                    leg.supportLastBodyLocalPoint;
+
+                leg.supportLastBodyLocalPoint =
+                    bodyLocal;
+
+                // TransformVector turns a delta in support-local coordinates
+                // back into the support's current world frame. Pure movement
+                // of the support itself therefore contributes ZERO.
+                leg.supportRelativeBodyVelocity =
+                    leg.support.TransformVector(
+                        localDelta) /
+                    dt;
+            }
+            else
+            {
+                leg.supportBodyLocalInitialized = false;
+                leg.supportRelativeBodyVelocity = _bodyVelocity;
+            }
+        }
+    }
+
+    Vector3 GroundPlanarVelocity(
+        RuntimeLeg leg,
+        Vector3 normal)
+    {
+        Vector3 velocity =
+            leg != null &&
+            leg.planted &&
+            leg.support
+                ? leg.supportRelativeBodyVelocity
+                : _bodyVelocity;
+
+        return
+            Vector3.ProjectOnPlane(
+                velocity,
+                normal);
+    }
+
+    Vector3 GroundPlanarVelocity(Vector3 normal)
+    {
+        for (int i = 0; i < _legs.Count; i++)
+        {
+            RuntimeLeg leg = _legs[i];
+
+            if (leg.planted &&
+                leg.support)
+            {
+                return
+                    Vector3.ProjectOnPlane(
+                        leg.supportRelativeBodyVelocity,
+                        normal);
+            }
+        }
+
+        return
+            Vector3.ProjectOnPlane(
+                _bodyVelocity,
+                normal);
     }
 
     void UpdateGroundFrame(float dt)
@@ -1001,14 +1169,49 @@ public class SpiderLegWalker : MonoBehaviour
             return;
         }
 
+        Transform support =
+            PrimaryGroundSupport();
+
+        Vector3 previousNormal =
+            _groundFrameNormal;
+
+        Vector3 previousRight =
+            _groundFrameRight;
+
+        // Reconstruct last frame's basis from the support's CURRENT transform.
+        // This is the equivalent of parenting the gait frame to the platform.
+        if (support)
+        {
+            if (_groundFrameSupport != support)
+            {
+                CaptureGroundFrameOnSupport(support);
+            }
+            else
+            {
+                previousNormal =
+                    SafeNormal(
+                        support.TransformDirection(
+                            _groundFrameSupportLocalNormal));
+
+                previousRight =
+                    SafeNormal(
+                        support.TransformDirection(
+                            _groundFrameSupportLocalRight));
+            }
+        }
+        else
+        {
+            _groundFrameSupport = null;
+        }
+
         Quaternion transport =
             Quaternion.FromToRotation(
-                _groundFrameNormal,
+                previousNormal,
                 normal);
 
         Vector3 right =
             transport *
-            _groundFrameRight;
+            previousRight;
 
         right =
             Vector3.ProjectOnPlane(
@@ -1025,12 +1228,10 @@ public class SpiderLegWalker : MonoBehaviour
                 right,
                 normal).normalized;
 
-        // Follow the actual travel direction gradually. Turning the body no
-        // longer instantly rotates every leg slot around the virus.
+        // Follow motion RELATIVE TO the surface. A moving platform by itself
+        // no longer rotates/re-aims the gait.
         Vector3 planarVelocity =
-            Vector3.ProjectOnPlane(
-                _bodyVelocity,
-                normal);
+            GroundPlanarVelocity(normal);
 
         if (planarVelocity.sqrMagnitude > 0.01f)
         {
@@ -1042,7 +1243,8 @@ public class SpiderLegWalker : MonoBehaviour
                     desiredForward,
                     forward) < 0f)
             {
-                desiredForward = -desiredForward;
+                desiredForward =
+                    -desiredForward;
             }
 
             float follow =
@@ -1072,6 +1274,8 @@ public class SpiderLegWalker : MonoBehaviour
         _groundFrameRight = right;
         _groundFrameForward = forward;
 
+        CaptureGroundFrameOnSupport(support);
+
         UpdateGroundTurnScramble(
             normal,
             dt);
@@ -1081,10 +1285,44 @@ public class SpiderLegWalker : MonoBehaviour
         Vector3 normal,
         float dt)
     {
-        Vector3 facing =
-            Vector3.ProjectOnPlane(
-                Body.forward,
-                normal);
+        Transform support =
+            PrimaryGroundSupport();
+
+        Vector3 facing;
+        Vector3 turnAxis;
+
+        if (support)
+        {
+            if (_groundFacingSupport != support)
+            {
+                _groundFacingSeeded = false;
+                _groundFacingSupport = support;
+            }
+
+            turnAxis =
+                SafeNormal(
+                    support.InverseTransformDirection(
+                        normal));
+
+            facing =
+                Vector3.ProjectOnPlane(
+                    support.InverseTransformDirection(
+                        Body.forward),
+                    turnAxis);
+        }
+        else
+        {
+            if (_groundFacingSupport)
+                _groundFacingSeeded = false;
+
+            _groundFacingSupport = null;
+            turnAxis = normal;
+
+            facing =
+                Vector3.ProjectOnPlane(
+                    Body.forward,
+                    normal);
+        }
 
         float signedTurnRate = 0f;
 
@@ -1098,7 +1336,7 @@ public class SpiderLegWalker : MonoBehaviour
                     Vector3.SignedAngle(
                         _previousGroundFacing,
                         facing,
-                        normal);
+                        turnAxis);
 
                 signedTurnRate =
                     signed /
@@ -1238,34 +1476,22 @@ public class SpiderLegWalker : MonoBehaviour
     }
 
     void ApplyPlantedFootFollow(
-        Vector3 normal)
+        Vector3 normal,
+        float dt)
     {
         if (!_groundBodyPositionSeeded)
         {
             _lastGroundBodyPosition = Body.position;
             _groundBodyPositionSeeded = true;
-            return;
         }
-
-        Vector3 bodyDelta =
-            Body.position -
-            _lastGroundBodyPosition;
 
         _lastGroundBodyPosition =
             Body.position;
 
-        Vector3 planarDelta =
-            Vector3.ProjectOnPlane(
-                bodyDelta,
-                normal);
-
-        if (planarDelta.sqrMagnitude < 0.0000001f ||
-            plantedFootFollow <= 0f)
+        if (plantedFootFollow <= 0f)
             return;
 
-        Vector3 followDelta =
-            planarDelta *
-            plantedFootFollow;
+        dt = Mathf.Max(dt, 0.00001f);
 
         for (int i = 0; i < _legs.Count; i++)
         {
@@ -1275,9 +1501,32 @@ public class SpiderLegWalker : MonoBehaviour
                 leg.stepping)
                 continue;
 
+            Vector3 current =
+                CurrentPlantedPoint(leg);
+
+            // This velocity has already had the platform's own translation and
+            // rotation removed. Only motion of the VIRUS across the platform
+            // may cause planted-foot creep.
+            Vector3 relativeDelta =
+                GroundPlanarVelocity(
+                    leg,
+                    normal) *
+                dt;
+
+            if (relativeDelta.sqrMagnitude <
+                0.0000001f)
+            {
+                AssignTarget(
+                    leg,
+                    current);
+
+                continue;
+            }
+
             Vector3 moved =
-                CurrentPlantedPoint(leg) +
-                followDelta;
+                current +
+                relativeDelta *
+                plantedFootFollow;
 
             leg.plantedPoint = moved;
 
@@ -1288,7 +1537,9 @@ public class SpiderLegWalker : MonoBehaviour
                         moved);
             }
 
-            AssignTarget(leg, moved);
+            AssignTarget(
+                leg,
+                moved);
         }
     }
 
@@ -1475,7 +1726,7 @@ public class SpiderLegWalker : MonoBehaviour
     float CurrentGroundMovementSpeed()
     {
         if (movement &&
-            movement.state == VirusMovement.State.Grounded)
+            movement.IsSurfaceAttached)
         {
             return
                 Mathf.Max(
@@ -1495,7 +1746,7 @@ public class SpiderLegWalker : MonoBehaviour
     float GroundMovement01()
     {
         if (movement &&
-            movement.state == VirusMovement.State.Grounded)
+            movement.IsSurfaceAttached)
         {
             return
                 Mathf.Clamp01(
@@ -1648,7 +1899,7 @@ public class SpiderLegWalker : MonoBehaviour
     {
         Vector3 normal = SurfaceNormal();
 
-        ApplyPlantedFootFollow(normal);
+        ApplyPlantedFootFollow(normal, dt);
 
         debugLargestGroundFootError = 0f;
 
@@ -1738,8 +1989,8 @@ public class SpiderLegWalker : MonoBehaviour
                 continue;
 
             Vector3 planarVelocity =
-                Vector3.ProjectOnPlane(
-                    _bodyVelocity,
+                GroundPlanarVelocity(
+                    leg,
                     normal);
 
             // Once the hard distance requirement is met, scoring decides WHICH
@@ -1879,8 +2130,8 @@ public class SpiderLegWalker : MonoBehaviour
             Body.position + radial * distance;
 
         Vector3 planarVelocity =
-            Vector3.ProjectOnPlane(
-                _bodyVelocity,
+            GroundPlanarVelocity(
+                leg,
                 surfaceNormal);
 
         GetLegSlotBasis(
@@ -2051,7 +2302,7 @@ public class SpiderLegWalker : MonoBehaviour
             point =
                 hit.point +
                 hitNormal * FootCenterClearance();
-            support = hit.transform;
+            support = ResolveHitSupport(hit);
             return true;
         }
 
@@ -2061,61 +2312,83 @@ public class SpiderLegWalker : MonoBehaviour
         return false;
     }
 
-    void BeginStep(
+    void SetStepEnd(
         RuntimeLeg leg,
-        Vector3 target,
-        Vector3 normal,
+        Vector3 worldPoint,
+        Vector3 worldNormal,
         Transform support)
     {
-        leg.stepping = true;
-        leg.stepTimer = 0f;
-        leg.stepStart = CurrentPlantedPoint(leg);
-        leg.stepEnd = target;
-        leg.stepNormal = SafeNormal(normal);
+        leg.stepEnd = worldPoint;
+        leg.stepNormal = SafeNormal(worldNormal);
         leg.stepEndSupport = support;
+        leg.stepEndSupportLocalValid = false;
+
+        if (support)
+        {
+            leg.stepEndSupportLocalPoint =
+                support.InverseTransformPoint(
+                    worldPoint);
+
+            leg.stepEndSupportLocalNormal =
+                SafeNormal(
+                    support.InverseTransformDirection(
+                        worldNormal));
+
+            leg.stepEndSupportLocalValid = true;
+        }
     }
 
-    void AdvanceStep(
-        RuntimeLeg leg,
-        int index,
-        float dt)
+    Vector3 CurrentStepStartPoint(
+        RuntimeLeg leg)
     {
-        leg.stepTimer += dt;
-
-        if (retargetSwingFeet)
+        if (leg.stepStartSupport &&
+            leg.stepStartSupportLocalValid)
         {
-            Vector3 normal = SurfaceNormal();
-
-            if (TryDesiredGroundPoint(
-                leg,
-                index,
-                normal,
-                out Vector3 newest,
-                out Vector3 newestNormal,
-                out Transform newestSupport))
-            {
-                float response =
-                    1f -
-                    Mathf.Exp(
-                        -swingRetargetSharpness * dt);
-
-                leg.stepEnd =
-                    Vector3.Lerp(
-                        leg.stepEnd,
-                        newest,
-                        response);
-
-                leg.stepNormal =
-                    Vector3.Slerp(
-                        leg.stepNormal,
-                        newestNormal,
-                        response).normalized;
-
-                leg.stepEndSupport =
-                    newestSupport;
-            }
+            leg.stepStart =
+                leg.stepStartSupport.TransformPoint(
+                    leg.stepStartSupportLocalPoint);
         }
 
+        return leg.stepStart;
+    }
+
+    Vector3 CurrentStepEndPoint(
+        RuntimeLeg leg)
+    {
+        if (leg.stepEndSupport &&
+            leg.stepEndSupportLocalValid)
+        {
+            leg.stepEnd =
+                leg.stepEndSupport.TransformPoint(
+                    leg.stepEndSupportLocalPoint);
+        }
+        else if (!leg.stepEndSupport)
+        {
+            leg.stepEndSupportLocalValid = false;
+        }
+
+        return leg.stepEnd;
+    }
+
+    Vector3 CurrentStepNormal(
+        RuntimeLeg leg)
+    {
+        if (leg.stepEndSupport &&
+            leg.stepEndSupportLocalValid)
+        {
+            leg.stepNormal =
+                SafeNormal(
+                    leg.stepEndSupport.TransformDirection(
+                        leg.stepEndSupportLocalNormal));
+        }
+
+        return SafeNormal(
+            leg.stepNormal);
+    }
+
+    float CurrentStepNormalizedTime(
+        RuntimeLeg leg)
+    {
         float gaitRate =
             GroundGaitRate();
 
@@ -2129,24 +2402,38 @@ public class SpiderLegWalker : MonoBehaviour
                 gaitRate,
                 0.01f);
 
-        float t =
+        return
             Mathf.Clamp01(
                 leg.stepTimer /
-                Mathf.Max(duration, 0.01f));
+                Mathf.Max(
+                    duration,
+                    0.01f));
+    }
+
+    Vector3 CurrentSwingPoint(
+        RuntimeLeg leg)
+    {
+        float t =
+            CurrentStepNormalizedTime(
+                leg);
 
         float smooth =
-            t * t * (3f - 2f * t);
+            t * t *
+            (3f - 2f * t);
 
         smooth =
             Mathf.Lerp(
                 smooth,
-                1f - Mathf.Pow(1f - t, 2.25f),
+                1f -
+                    Mathf.Pow(
+                        1f - t,
+                        2.25f),
                 0.25f * chaos);
 
         Vector3 basePoint =
             Vector3.LerpUnclamped(
-                leg.stepStart,
-                leg.stepEnd,
+                CurrentStepStartPoint(leg),
+                CurrentStepEndPoint(leg),
                 smooth);
 
         float speed01 =
@@ -2165,27 +2452,130 @@ public class SpiderLegWalker : MonoBehaviour
                 speed01);
 
         float lift =
-            Mathf.Sin(t * Mathf.PI) * height;
+            Mathf.Sin(
+                t * Mathf.PI) *
+            height;
+
+        return
+            basePoint +
+            CurrentStepNormal(leg) *
+            lift;
+    }
+
+    void BeginStep(
+        RuntimeLeg leg,
+        Vector3 target,
+        Vector3 normal,
+        Transform support)
+    {
+        leg.stepping = true;
+        leg.stepTimer = 0f;
+
+        leg.stepStart =
+            CurrentPlantedPoint(
+                leg);
+
+        leg.stepStartSupport =
+            leg.support;
+
+        leg.stepStartSupportLocalValid =
+            false;
+
+        if (leg.stepStartSupport)
+        {
+            leg.stepStartSupportLocalPoint =
+                leg.stepStartSupport.InverseTransformPoint(
+                    leg.stepStart);
+
+            leg.stepStartSupportLocalValid =
+                true;
+        }
+
+        SetStepEnd(
+            leg,
+            target,
+            normal,
+            support);
+    }
+
+    void AdvanceStep(
+        RuntimeLeg leg,
+        int index,
+        float dt)
+    {
+        leg.stepTimer += dt;
+
+        // Refresh the support-anchored endpoint BEFORE retargeting. If the
+        // platform moved since last frame, the old local point has already moved
+        // with it exactly like a child transform.
+        Vector3 currentEnd =
+            CurrentStepEndPoint(
+                leg);
+
+        Vector3 currentNormal =
+            CurrentStepNormal(
+                leg);
+
+        if (retargetSwingFeet)
+        {
+            Vector3 normal =
+                SurfaceNormal();
+
+            if (TryDesiredGroundPoint(
+                leg,
+                index,
+                normal,
+                out Vector3 newest,
+                out Vector3 newestNormal,
+                out Transform newestSupport))
+            {
+                float response =
+                    1f -
+                    Mathf.Exp(
+                        -swingRetargetSharpness *
+                        dt);
+
+                SetStepEnd(
+                    leg,
+                    Vector3.Lerp(
+                        currentEnd,
+                        newest,
+                        response),
+                    Vector3.Slerp(
+                        currentNormal,
+                        newestNormal,
+                        response).normalized,
+                    newestSupport);
+            }
+        }
 
         AssignTarget(
             leg,
-            basePoint +
-            leg.stepNormal * lift);
+            CurrentSwingPoint(
+                leg));
 
-        if (t < 1f)
+        if (CurrentStepNormalizedTime(leg) < 1f)
             return;
+
+        Vector3 finalPoint =
+            CurrentStepEndPoint(
+                leg);
+
+        Transform finalSupport =
+            leg.stepEndSupport;
 
         leg.stepping = false;
         leg.lastStepEndTime = Time.time;
 
         Plant(
             leg,
-            leg.stepEnd,
-            leg.stepEndSupport);
+            finalPoint,
+            finalSupport);
 
         AssignTarget(
             leg,
-            CurrentPlantedPoint(leg));
+            CurrentPlantedPoint(
+                leg));
     }
 
     // ---------------------------------------------------------------------
@@ -2251,7 +2641,14 @@ public class SpiderLegWalker : MonoBehaviour
             // see an old/default/zero target.
             leg.stepping = false;
             leg.support = null;
+            leg.supportBodyLocalInitialized = false;
+            leg.supportRelativeBodyVelocity = Vector3.zero;
+
+            leg.stepStartSupport = null;
+            leg.stepStartSupportLocalValid = false;
             leg.stepEndSupport = null;
+            leg.stepEndSupportLocalValid = false;
+
             leg.planted = true;
 
             AssignTarget(leg, startPoint);
@@ -3034,6 +3431,8 @@ public class SpiderLegWalker : MonoBehaviour
             SurfaceNormal();
 
         InitializeGroundFrame(normal);
+        _groundFrameSupport = null;
+        _groundFacingSupport = null;
         _lastGroundStepStartTime = -999f;
         _holdPoseCaptured = false;
 
@@ -3113,7 +3512,7 @@ public class SpiderLegWalker : MonoBehaviour
                 hit.point +
                 n * FootCenterClearance();
 
-            support = hit.transform;
+            support = ResolveHitSupport(hit);
             return true;
         }
 
@@ -3137,7 +3536,7 @@ public class SpiderLegWalker : MonoBehaviour
                 hit.point +
                 n * FootCenterClearance();
 
-            support = hit.transform;
+            support = ResolveHitSupport(hit);
             return true;
         }
 
@@ -3170,28 +3569,54 @@ public class SpiderLegWalker : MonoBehaviour
         leg.plantedPoint = worldPoint;
         leg.support = support;
 
+        leg.supportBodyLocalInitialized = false;
+        leg.supportRelativeBodyVelocity = Vector3.zero;
+
         if (support)
         {
             leg.supportLocalPoint =
                 support.InverseTransformPoint(
                     worldPoint);
+
+            leg.supportLastBodyLocalPoint =
+                support.InverseTransformPoint(
+                    Body.position);
+
+            leg.supportBodyLocalInitialized = true;
         }
+
+        // A completed plant owns the foot again; old swing anchors must not
+        // survive into the next step.
+        leg.stepStartSupport = null;
+        leg.stepStartSupportLocalValid = false;
+        leg.stepEndSupport = null;
+        leg.stepEndSupportLocalValid = false;
     }
 
     Vector3 CurrentPlantedPoint(
         RuntimeLeg leg)
     {
-        // A support object can be destroyed (or unloaded with its scene) while
-        // a foot is standing on it. Fall back to the last world point instead
-        // of dereferencing a dead transform.
+        // The support-local point is authoritative. Reconstructing it every
+        // frame means translation, rotation and Rigidbody interpolation carry
+        // the foot exactly as though the foot transform were parented there.
         if (leg.support)
         {
-            return
+            Vector3 worldPoint =
                 leg.support.TransformPoint(
                     leg.supportLocalPoint);
+
+            // Keep the fallback current in case the support is destroyed
+            // between frames.
+            leg.plantedPoint =
+                worldPoint;
+
+            return worldPoint;
         }
 
         leg.support = null;
+        leg.supportBodyLocalInitialized = false;
+        leg.supportRelativeBodyVelocity = Vector3.zero;
+
         return leg.plantedPoint;
     }
 
@@ -3202,6 +3627,8 @@ public class SpiderLegWalker : MonoBehaviour
             SurfaceNormal();
 
         InitializeGroundFrame(normal);
+        _groundFrameSupport = null;
+        _groundFacingSupport = null;
         _lastGroundStepStartTime = -999f;
         _holdPoseCaptured = false;
 
@@ -3631,18 +4058,39 @@ public class SpiderLegWalker : MonoBehaviour
             leg.root.position;
 
         Vector3 candidateP3;
+        bool surfaceAnchored = false;
 
-        if (leg.targetInitialized &&
-            IsUsableLegTarget(leg.targetPoint))
+        // LateUpdate may run after Rigidbody interpolation has produced a newer
+        // support transform than Update saw. Rebuild the grounded endpoint from
+        // support-local coordinates HERE, immediately before drawing the mesh.
+        if (IsGrounded() &&
+            leg.planted &&
+            !leg.stepping &&
+            leg.support)
+        {
+            candidateP3 =
+                CurrentPlantedPoint(
+                    leg);
+
+            surfaceAnchored = true;
+        }
+        else if (IsGrounded() &&
+                 leg.planted &&
+                 leg.stepping &&
+                 (leg.stepStartSupport ||
+                  leg.stepEndSupport))
+        {
+            candidateP3 =
+                CurrentSwingPoint(
+                    leg);
+
+            surfaceAnchored = true;
+        }
+        else if (leg.targetInitialized &&
+                 IsUsableLegTarget(leg.targetPoint))
         {
             candidateP3 =
                 leg.targetPoint;
-
-            leg.lastSafeTargetPoint =
-                candidateP3;
-
-            leg.lastSafeTargetInitialized =
-                true;
         }
         else if (leg.lastSafeTargetInitialized &&
                  IsUsableLegTarget(leg.lastSafeTargetPoint))
@@ -3674,13 +4122,35 @@ public class SpiderLegWalker : MonoBehaviour
                     0.05f);
         }
 
-        // Final visual safety layer. Even if some upstream state produces a
-        // finite but wildly wrong endpoint for a frame, the mesh refuses to
-        // teleport there.
-        Vector3 p3 =
-            GuardRenderedEndpoint(
+        if (IsUsableLegTarget(candidateP3))
+        {
+            leg.lastSafeTargetPoint =
+                candidateP3;
+
+            leg.lastSafeTargetInitialized =
+                true;
+        }
+
+        Vector3 p3;
+
+        if (surfaceAnchored)
+        {
+            // This point came from a known support-local anchor. Its movement is
+            // authoritative, even if a fast Rigidbody translated/rotated farther
+            // than the generic teleport guard normally permits.
+            p3 = candidateP3;
+            AcceptRenderedEndpoint(
                 leg,
-                candidateP3);
+                p3);
+        }
+        else
+        {
+            // Free/airborne targets still retain the visual safety guard.
+            p3 =
+                GuardRenderedEndpoint(
+                    leg,
+                    candidateP3);
+        }
 
         Vector3 delta =
             p3 - p0;
@@ -4189,6 +4659,20 @@ public class SpiderLegWalker : MonoBehaviour
         return
             (x & 0x00FFFFFF) /
             16777215f;
+    }
+
+    static Transform ResolveHitSupport(RaycastHit hit)
+    {
+        // A Collider may be a child of a Rigidbody. Anchoring to the Rigidbody
+        // transform gives every collider on that moving body one coherent local
+        // coordinate frame and follows Rigidbody interpolation naturally.
+        Rigidbody attached =
+            hit.rigidbody;
+
+        return
+            attached
+                ? attached.transform
+                : hit.transform;
     }
 
     /// <summary>

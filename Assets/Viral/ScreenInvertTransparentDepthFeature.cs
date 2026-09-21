@@ -35,6 +35,13 @@ public class ScreenInvertTransparentDepthFeature : ScriptableRendererFeature
         [Tooltip("This must run before URP draws transparent objects.")]
         public RenderPassEvent passEvent =
             RenderPassEvent.BeforeRenderingTransparents;
+
+        [Header("Build-Safe Shader References")]
+        [Tooltip("REQUIRED FOR BUILDS. Assign Hidden/ScreenInvertTransparentLinearDepth here so Unity cannot strip it.")]
+        public Shader transparentDepthShader;
+
+        [Tooltip("Assign Custom/ScreenInvertSweep here as a build reference too. The feature does not render with it directly, but the serialized reference prevents build stripping if your sweep material is created at runtime.")]
+        public Shader screenInvertSweepShader;
     }
 
     public Settings settings = new Settings();
@@ -47,17 +54,51 @@ public class ScreenInvertTransparentDepthFeature : ScriptableRendererFeature
 
     public override void Create()
     {
+        CoreUtils.Destroy(
+            _depthMaterial);
+
+        _depthMaterial = null;
+        _pass = null;
+
+        Shader.SetGlobalFloat(
+            AvailableID,
+            0f);
+
         Shader shader =
-            Shader.Find(
-                "Hidden/ScreenInvertTransparentLinearDepth");
+            settings.transparentDepthShader;
+
+#if UNITY_EDITOR
+        // Editor convenience only. The serialized field is what makes the
+        // player build reliable. Shader.Find by itself is not a build-safe
+        // dependency because Unity may strip a shader referenced only by name.
+        if (!shader)
+        {
+            shader =
+                Shader.Find(
+                    "Hidden/ScreenInvertTransparentLinearDepth");
+        }
+#endif
 
         if (!shader)
         {
             Debug.LogError(
                 "ScreenInvertTransparentDepthFeature: " +
-                "Hidden/ScreenInvertTransparentLinearDepth shader was not found.");
+                "Transparent Depth Shader is not assigned. " +
+                "Assign Hidden/ScreenInvertTransparentLinearDepth in the " +
+                "Renderer Feature settings. This reference is required so " +
+                "the shader is included in player builds.");
 
             return;
+        }
+
+        if (!settings.screenInvertSweepShader)
+        {
+            Debug.LogWarning(
+                "ScreenInvertTransparentDepthFeature: " +
+                "Screen Invert Sweep Shader is not assigned. If the sweep " +
+                "shader/material is created only at runtime, Unity may strip " +
+                "Custom/ScreenInvertSweep from a player build. Assign it in " +
+                "this Renderer Feature to guarantee inclusion.");
         }
 
         _depthMaterial =
@@ -152,6 +193,12 @@ public class ScreenInvertTransparentDepthFeature : ScriptableRendererFeature
         {
             _overrideMaterial =
                 overrideMaterial;
+
+            // ScreenInvertSweep samples _CameraDepthTexture. In the Editor
+            // some other view/effect may incidentally force depth creation,
+            // while a clean player build may not. Explicitly request it.
+            ConfigureInput(
+                ScriptableRenderPassInput.Depth);
         }
 
         public void Setup(

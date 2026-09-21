@@ -21,7 +21,7 @@ Material:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_Name: New Material
-  m_Shader: {fileID: -6465566751694194690, guid: e3a9ea6bb36f64d4aa3559b843b3af4e, type: 3}
+  m_Shader: {fileID: 4800000, guid: 2d685ee99f4129245b4be032a1892f78, type: 3}
   m_Parent: {fileID: 0}
   m_ModifiedSerializedProperties: 0
   m_ValidKeywords: []
@@ -102,6 +102,10 @@ Material:
         m_Texture: {fileID: 0}
         m_Scale: {x: 1, y: 1}
         m_Offset: {x: 0, y: 0}
+    - _Triplanar_073cafeb2fd54688948bd42a51c25111_Texture_1_Texture2D:
+        m_Texture: {fileID: -6148593233745163446, guid: 51243264633769b4da6f3333a4a7e27e, type: 2}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
     - _UpTex:
         m_Texture: {fileID: 0}
         m_Scale: {x: 1, y: 1}
@@ -124,15 +128,20 @@ Material:
     - _AlphaClip: 0
     - _AlphaToMask: 0
     - _AtmosphereThickness: 0
+    - _BackLightStrength: 0
     - _Blend: 0
     - _BlendModePreserveSpecular: 1
     - _BumpScale: 1
+    - _CellDepth: 0
     - _ClearCoatMask: 0
     - _ClearCoatSmoothness: 0
+    - _Contrast: 7.32
     - _Cull: 2
     - _Cutoff: 0.5
+    - _DepthOffset: 0.4
     - _DetailAlbedoMapScale: 1
     - _DetailNormalMapScale: 1
+    - _DetailScale: 8
     - _DstBlend: 0
     - _DstBlendAlpha: 0
     - _EnvironmentReflections: 1
@@ -140,13 +149,19 @@ Material:
     - _GlossMapScale: 0
     - _Glossiness: 0
     - _GlossyReflections: 0
+    - _HorizonStrength: 0
+    - _LightStrength: 0
+    - _MembraneSharpness: 0.1
+    - _MembraneWidth: 0.343
     - _Metallic: 0
     - _OcclusionStrength: 1
     - _Parallax: 0.005
     - _QueueControl: 0
     - _QueueOffset: 0
     - _ReceiveShadows: 1
+    - _RidgeStrength: 0.28
     - _Rotation: 0
+    - _Scale: 2
     - _Smoothness: 0.5
     - _SmoothnessTextureChannel: 0
     - _SpecularHighlights: 1
@@ -156,20 +171,32 @@ Material:
     - _SunSize: 0
     - _SunSizeConvergence: 1
     - _Surface: 0
+    - _TimeScale: 0.01
+    - _WarpScale: 3
+    - _WarpStrength: 0.13
     - _WorkflowMode: 1
     - _ZWrite: 1
-    - _blend: 1.18
-    - _scale: 708.55
+    - _blend: 1.2
+    - _dither: 0
+    - _scale: 68.7
     - _size: 1
-    - _stretch: 2.1
-    - _white: 1.38
+    - _stretch: 0
+    - _white: 1
     m_Colors:
     - _BaseColor: {r: 1, g: 1, b: 1, a: 1}
-    - _Color: {r: 0.6320754, g: 0.39915496, b: 0.3965379, a: 1}
+    - _Color: {r: 0.3773585, g: 0.33360034, b: 0.33285868, a: 1}
+    - _ColorA: {r: 1, g: 0, b: 0, a: 1}
+    - _ColorB: {r: 0.12918282, g: 0, b: 1, a: 1}
+    - _ColorC: {r: 1, g: 0.17857143, b: 0, a: 1}
+    - _DriftDirection: {r: 0, g: 0, b: 0, a: 0}
     - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}
     - _GroundColor: {r: 0.36899996, g: 0.34899998, b: 0.34099993, a: 1}
+    - _HorizonColor: {r: 0, g: 0, b: 0, a: 1}
+    - _LightDir: {r: 0.4, g: 0.7, b: 0.3, a: 0}
+    - _MembraneColor: {r: 0.2924528, g: 0.0124154445, b: 0.015244725, a: 1}
     - _SkyTint: {r: 1, g: 0, b: 0, a: 1}
     - _SpecColor: {r: 0.19999996, g: 0.19999996, b: 0.19999996, a: 1}
     - _Tint: {r: 0.025587406, g: 0.09061892, b: 0.23584908, a: 0.5}
+    - _darkends: {r: 0, g: 0, b: 0, a: 0}
   m_BuildTextureStacks: []
   m_AllowLocking: 1

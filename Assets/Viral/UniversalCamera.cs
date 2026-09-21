@@ -14,6 +14,22 @@ using UnityEngine.InputSystem;
 /// than touching the transform, so they stack instead of fighting each other.
 /// The component writes the finished frame to the transform once per tick.
 ///
+/// ORDER IS AUTHORITATIVE. Read the list literally from top to bottom:
+/// each row receives the frame produced above it and changes only what it owns.
+/// A later position/rotation row never feeds backward into an earlier row on
+/// the next frame.
+///
+/// Example:
+///   Target Position      -> choose the pivot
+///   Mouse Look           -> choose the facing
+///   Position Offset      -> move backward in that facing
+///   Camera Collision     -> shorten only if blocked
+///
+/// Another example:
+///   Look At Target
+///   Target Position (Y only, offset -2)
+/// means "aim first, then move down"; moving down does NOT make LookAt re-aim.
+///
 /// Order matters, and it reads top to bottom. A typical third person camera:
 ///   Holder: MouseLook (yaw only) -> FollowTarget (the player)
 ///   Camera: MouseLook (pitch only) -> DistanceFromTarget (the holder)
@@ -128,11 +144,14 @@ public class UniversalCamera : MonoBehaviour
                  "This is independent of the normal Field Of View Smoothing setting.")]
         public bool transitionFieldOfView = true;
 
+        [Tooltip("Smoothly morph the projection matrix when changing between " +
+                 "Orthographic and Perspective (or between different projection sizes).")]
+        public bool transitionProjection = true;
+
         [Tooltip("Shape of the transition. X is normalized time and Y is blend amount.")]
         public AnimationCurve transitionCurve = AnimationCurve.EaseInOut(0f, 0f, 1f, 1f);
 
-        [Tooltip("Applied top to bottom. Rotation usually belongs above the " +
-                 "position behaviours that depend on facing.")]
+        [Tooltip("Applied literally top to bottom. Each row changes only its own output.")]
         [SerializeReference]
         public List<CameraBehaviour> behaviours = new List<CameraBehaviour>();
     }
@@ -165,6 +184,18 @@ public class UniversalCamera : MonoBehaviour
         /// </summary>
         public virtual bool WritesProjection => false;
 
+        /// <summary>
+        /// True when this behaviour is a final POSITION correction rather than
+        /// a new upstream camera base. It still affects every behaviour BELOW
+        /// it this tick, but it is removed before the next tick begins.
+        /// </summary>
+        public virtual bool IsPositionModifier => false;
+
+        /// <summary>
+        /// Rotation equivalent of IsPositionModifier.
+        /// </summary>
+        public virtual bool IsRotationModifier => false;
+
         public abstract void Apply(ref CameraFrame frame, in CameraContext ctx);
     }
 
@@ -188,6 +219,244 @@ public class UniversalCamera : MonoBehaviour
         return new Vector3(x ? desired.x : current.x,
                            y ? desired.y : current.y,
                            z ? desired.z : current.z);
+    }
+
+
+    // -----------------------------------------------------------------------
+    // Simple stack vocabulary
+    // -----------------------------------------------------------------------
+
+    [Serializable]
+    public struct AxisMask
+    {
+        public bool x;
+        public bool y;
+        public bool z;
+
+        public AxisMask(bool x, bool y, bool z)
+        {
+            this.x = x;
+            this.y = y;
+            this.z = z;
+        }
+
+        public static AxisMask All => new AxisMask(true, true, true);
+        public static AxisMask None => new AxisMask(false, false, false);
+
+        public bool Any => x || y || z;
+
+        public Vector3 Filter(Vector3 value)
+        {
+            return new Vector3(
+                x ? value.x : 0f,
+                y ? value.y : 0f,
+                z ? value.z : 0f);
+        }
+
+        public Vector3 Merge(Vector3 current, Vector3 desired)
+        {
+            return new Vector3(
+                x ? desired.x : current.x,
+                y ? desired.y : current.y,
+                z ? desired.z : current.z);
+        }
+    }
+
+    /// <summary>
+    /// One common coordinate vocabulary for every spatial behaviour.
+    ///
+    /// World    = global XYZ.
+    /// Self     = the CameraFrame produced by the behaviours above this one.
+    /// Parent   = this rig's Transform parent.
+    /// Target   = target's full transform.
+    /// TargetUp = origin at target, Y follows target.up, but target spin around
+    ///            that up axis does not drag the basis around.
+    /// </summary>
+    public enum ReferenceSpace
+    {
+        World,
+        Self,
+        Parent,
+        Target,
+        TargetUp
+    }
+
+    static Quaternion BuildTargetUpBasis(
+        Transform target,
+        Quaternion fallbackRotation)
+    {
+        if (!target)
+            return fallbackRotation;
+
+        Vector3 up =
+            target.up.sqrMagnitude > 0.000001f
+                ? target.up.normalized
+                : Vector3.up;
+
+        Vector3 forward =
+            Vector3.ProjectOnPlane(
+                fallbackRotation * Vector3.forward,
+                up);
+
+        if (forward.sqrMagnitude < 0.000001f)
+        {
+            forward =
+                Vector3.ProjectOnPlane(
+                    target.forward,
+                    up);
+        }
+
+        if (forward.sqrMagnitude < 0.000001f)
+        {
+            Vector3 axis =
+                Mathf.Abs(up.y) < 0.9f
+                    ? Vector3.up
+                    : Vector3.right;
+
+            forward =
+                Vector3.Cross(
+                    axis,
+                    up);
+        }
+
+        forward.Normalize();
+
+        return Quaternion.LookRotation(
+            forward,
+            up);
+    }
+
+    static void ResolveSpace(
+        in CameraFrame frame,
+        in CameraContext ctx,
+        ReferenceSpace space,
+        out Vector3 origin,
+        out Quaternion rotation)
+    {
+        switch (space)
+        {
+            case ReferenceSpace.Self:
+                origin = frame.position;
+                rotation = frame.rotation;
+                return;
+
+            case ReferenceSpace.Parent:
+                if (ctx.Self.parent)
+                {
+                    origin = ctx.Self.parent.position;
+                    rotation = ctx.Self.parent.rotation;
+                }
+                else
+                {
+                    origin = Vector3.zero;
+                    rotation = Quaternion.identity;
+                }
+                return;
+
+            case ReferenceSpace.Target:
+                if (ctx.Target)
+                {
+                    origin = ctx.Target.position;
+                    rotation = ctx.Target.rotation;
+                }
+                else
+                {
+                    origin = Vector3.zero;
+                    rotation = Quaternion.identity;
+                }
+                return;
+
+            case ReferenceSpace.TargetUp:
+                if (ctx.Target)
+                {
+                    origin = ctx.Target.position;
+                    rotation =
+                        BuildTargetUpBasis(
+                            ctx.Target,
+                            frame.rotation);
+                }
+                else
+                {
+                    origin = Vector3.zero;
+                    rotation = Quaternion.identity;
+                }
+                return;
+
+            default:
+                origin = Vector3.zero;
+                rotation = Quaternion.identity;
+                return;
+        }
+    }
+
+    static Vector3 WorldToSpacePoint(
+        Vector3 worldPoint,
+        Vector3 origin,
+        Quaternion rotation)
+    {
+        return
+            Quaternion.Inverse(rotation) *
+            (worldPoint - origin);
+    }
+
+    static Vector3 SpaceToWorldPoint(
+        Vector3 localPoint,
+        Vector3 origin,
+        Quaternion rotation)
+    {
+        return
+            origin +
+            rotation *
+            localPoint;
+    }
+
+    static Vector3 SignedEuler(
+        Quaternion rotation)
+    {
+        Vector3 e =
+            rotation.eulerAngles;
+
+        return new Vector3(
+            Mathf.DeltaAngle(0f, e.x),
+            Mathf.DeltaAngle(0f, e.y),
+            Mathf.DeltaAngle(0f, e.z));
+    }
+
+    static Quaternion MergeRotationAxes(
+        Quaternion current,
+        Quaternion desired,
+        AxisMask axes,
+        Quaternion reference)
+    {
+        if (axes.x && axes.y && axes.z)
+            return desired;
+
+        if (!axes.Any)
+            return current;
+
+        Quaternion inv =
+            Quaternion.Inverse(
+                reference);
+
+        Vector3 currentEuler =
+            SignedEuler(
+                inv *
+                current);
+
+        Vector3 desiredEuler =
+            SignedEuler(
+                inv *
+                desired);
+
+        Vector3 merged =
+            axes.Merge(
+                currentEuler,
+                desiredEuler);
+
+        return
+            reference *
+            Quaternion.Euler(
+                merged);
     }
 
     // -----------------------------------------------------------------------
@@ -260,6 +529,10 @@ public class UniversalCamera : MonoBehaviour
         }
 
         activeMode = index;
+
+        // A new stack begins from the camera's actual visible pose.
+        _positionFeedbackSeeded = false;
+        _rotationFeedbackSeeded = false;
 
         // Re-seed the incoming behaviours from the pose the camera is in right
         // now, so input-driven behaviours continue from the outgoing view
@@ -366,6 +639,17 @@ public class UniversalCamera : MonoBehaviour
     Vector3 _transitionStartPosition;
     Quaternion _transitionStartRotation = Quaternion.identity;
     float _transitionStartFieldOfView = 60f;
+    Matrix4x4 _transitionStartProjection = Matrix4x4.identity;
+    bool _projectionMatrixOverrideActive;
+
+    // Pose immediately BEFORE the first final modifier of each channel.
+    // These are fed into the next tick so a lower behaviour cannot feed its
+    // correction backward into behaviours above it.
+    bool _positionFeedbackSeeded;
+    Vector3 _positionFeedbackPosition;
+
+    bool _rotationFeedbackSeeded;
+    Quaternion _rotationFeedbackRotation = Quaternion.identity;
 
     public bool IsTransitioning => _transitionActive;
 
@@ -397,6 +681,9 @@ public class UniversalCamera : MonoBehaviour
     {
         _transitionActive = false;
         _transitionElapsed = 0f;
+        _positionFeedbackSeeded = false;
+        _rotationFeedbackSeeded = false;
+        ClearProjectionMatrixOverride();
         _snapNextTick = true;
     }
 
@@ -405,7 +692,7 @@ public class UniversalCamera : MonoBehaviour
     {
         if (mode == null || !mode.transitionOnEnter || mode.transitionDuration <= 0f ||
             (!mode.transitionPosition && !mode.transitionRotation &&
-             !mode.transitionFieldOfView))
+             !mode.transitionFieldOfView && !mode.transitionProjection))
         {
             _transitionActive = false;
             _transitionElapsed = 0f;
@@ -418,9 +705,106 @@ public class UniversalCamera : MonoBehaviour
         _transitionStartRotation = transform.rotation;
         _transitionStartFieldOfView = targetCamera ? targetCamera.fieldOfView : _baseFieldOfView;
 
+        if (targetCamera)
+        {
+            // projectionMatrix is the exact image currently on screen. If a
+            // previous projection transition is interrupted, this captures the
+            // partially-morphed matrix rather than popping back to a canonical
+            // Perspective/Orthographic matrix first.
+            _transitionStartProjection =
+                targetCamera.projectionMatrix;
+        }
+
         // A transition is itself the deliberate way into the new mode. Do not
         // let a queued one-frame snap defeat it.
         _snapNextTick = false;
+    }
+
+    Matrix4x4 BuildProjectionMatrix(
+        bool orthographic,
+        float orthographicSize,
+        float fieldOfView)
+    {
+        if (!targetCamera)
+            return Matrix4x4.identity;
+
+        float aspect =
+            Mathf.Max(
+                0.0001f,
+                targetCamera.aspect);
+
+        float nearClip =
+            Mathf.Max(
+                0.0001f,
+                targetCamera.nearClipPlane);
+
+        float farClip =
+            Mathf.Max(
+                nearClip + 0.0001f,
+                targetCamera.farClipPlane);
+
+        if (orthographic)
+        {
+            float halfHeight =
+                Mathf.Max(
+                    0.0001f,
+                    orthographicSize);
+
+            float halfWidth =
+                halfHeight *
+                aspect;
+
+            return Matrix4x4.Ortho(
+                -halfWidth,
+                halfWidth,
+                -halfHeight,
+                halfHeight,
+                nearClip,
+                farClip);
+        }
+
+        return Matrix4x4.Perspective(
+            Mathf.Clamp(
+                fieldOfView,
+                1f,
+                179f),
+            aspect,
+            nearClip,
+            farClip);
+    }
+
+    static Matrix4x4 LerpProjectionMatrix(
+        Matrix4x4 from,
+        Matrix4x4 to,
+        float t)
+    {
+        t = Mathf.Clamp01(t);
+
+        Matrix4x4 result =
+            new Matrix4x4();
+
+        for (int i = 0;
+             i < 16;
+             i++)
+        {
+            result[i] =
+                Mathf.LerpUnclamped(
+                    from[i],
+                    to[i],
+                    t);
+        }
+
+        return result;
+    }
+
+    void ClearProjectionMatrixOverride()
+    {
+        if (!targetCamera ||
+            !_projectionMatrixOverrideActive)
+            return;
+
+        targetCamera.ResetProjectionMatrix();
+        _projectionMatrixOverrideActive = false;
     }
 
     /// <summary>Apply the cursor policy owned by a camera mode.</summary>
@@ -536,8 +920,14 @@ public class UniversalCamera : MonoBehaviour
 
         var frame = new CameraFrame
         {
-            position = transform.position,
-            rotation = transform.rotation,
+            position = _positionFeedbackSeeded
+                ? _positionFeedbackPosition
+                : transform.position,
+
+            rotation = _rotationFeedbackSeeded
+                ? _rotationFeedbackRotation
+                : transform.rotation,
+
             fieldOfView = _baseFieldOfView,
             orthographic = targetCamera ? targetCamera.orthographic : _baseOrthographic,
             orthographicSize = targetCamera
@@ -551,6 +941,15 @@ public class UniversalCamera : MonoBehaviour
         bool fovDrivenThisTick = false;
         bool projectionDrivenThisTick = false;
 
+        bool positionModifierSeen = false;
+        bool rotationModifierSeen = false;
+
+        Vector3 nextPositionFeedback =
+            frame.position;
+
+        Quaternion nextRotationFeedback =
+            frame.rotation;
+
         for (int i = 0; i < list.Count; i++)
         {
             var behaviour = list[i];
@@ -562,6 +961,28 @@ public class UniversalCamera : MonoBehaviour
             // normal, and an exception here would stall the whole list.
             if (behaviour.RequiresTarget && !resolved) continue;
 
+            // Capture the channel at the exact point where the first final
+            // modifier begins. This makes ordering persist across frames.
+            if (!positionModifierSeen &&
+                behaviour.IsPositionModifier)
+            {
+                nextPositionFeedback =
+                    frame.position;
+
+                positionModifierSeen =
+                    true;
+            }
+
+            if (!rotationModifierSeen &&
+                behaviour.IsRotationModifier)
+            {
+                nextRotationFeedback =
+                    frame.rotation;
+
+                rotationModifierSeen =
+                    true;
+            }
+
             var ctx = new CameraContext(this, transform, resolved, deltaTime, snap);
             behaviour.Apply(ref frame, in ctx);
 
@@ -571,6 +992,20 @@ public class UniversalCamera : MonoBehaviour
             if (behaviour.WritesProjection)
                 projectionDrivenThisTick = true;
         }
+
+        _positionFeedbackSeeded =
+            positionModifierSeen;
+
+        if (positionModifierSeen)
+            _positionFeedbackPosition =
+                nextPositionFeedback;
+
+        _rotationFeedbackSeeded =
+            rotationModifierSeen;
+
+        if (rotationModifierSeen)
+            _rotationFeedbackRotation =
+                nextRotationFeedback;
 
         // Advance a destination-owned transition once, then use the same blend
         // value for position, rotation and FOV so they arrive together.
@@ -613,26 +1048,80 @@ public class UniversalCamera : MonoBehaviour
 
         if (targetCamera && (projectionDrivenThisTick || _projectionWasDriven))
         {
-            if (projectionDrivenThisTick)
+            bool wantedOrthographic =
+                projectionDrivenThisTick
+                    ? frame.orthographic
+                    : _baseOrthographic;
+
+            float wantedOrthographicSize =
+                projectionDrivenThisTick
+                    ? Mathf.Max(
+                        0.0001f,
+                        frame.orthographicSize)
+                    : _baseOrthographicSize;
+
+            // Keep the Camera's ordinary serialized/runtime values pointed at
+            // the DESTINATION mode. During a projection transition the custom
+            // projectionMatrix below is what is actually rendered.
+            targetCamera.orthographic =
+                wantedOrthographic;
+
+            targetCamera.orthographicSize =
+                wantedOrthographicSize;
+
+            bool transitionProjectionThisTick =
+                transitionThisTick &&
+                mode.transitionProjection;
+
+            if (transitionProjectionThisTick)
             {
-                targetCamera.orthographic = frame.orthographic;
+                // Use the incoming stack's final FOV as the Perspective end of
+                // the morph. FOV is a separate stack channel, but while the
+                // custom matrix is active this target matrix is authoritative.
+                float targetFov =
+                    fovDrivenThisTick
+                        ? frame.fieldOfView
+                        : _baseFieldOfView;
 
-                // orthographicSize exists even while the camera is perspective,
-                // but only write it when Orthographic is actually requested.
-                if (frame.orthographic)
-                    targetCamera.orthographicSize =
-                        Mathf.Max(0.0001f, frame.orthographicSize);
+                Matrix4x4 destinationProjection =
+                    BuildProjectionMatrix(
+                        wantedOrthographic,
+                        wantedOrthographicSize,
+                        targetFov);
 
-                _projectionWasDriven = true;
+                targetCamera.projectionMatrix =
+                    LerpProjectionMatrix(
+                        _transitionStartProjection,
+                        destinationProjection,
+                        transitionWeight);
+
+                _projectionMatrixOverrideActive =
+                    true;
             }
             else
             {
-                // The new mode has no projection behaviour. Return control to
-                // the values authored on the Camera and release ownership.
-                targetCamera.orthographic = _baseOrthographic;
-                targetCamera.orthographicSize = _baseOrthographicSize;
-                _projectionWasDriven = false;
+                ClearProjectionMatrixOverride();
             }
+
+            _projectionWasDriven =
+                projectionDrivenThisTick;
+
+            if (!projectionDrivenThisTick)
+            {
+                // The destination mode owns no Projection row. Returning to
+                // authored Camera projection is still allowed to transition.
+                targetCamera.orthographic =
+                    _baseOrthographic;
+
+                targetCamera.orthographicSize =
+                    _baseOrthographicSize;
+            }
+        }
+        else
+        {
+            // No projection ownership at all. Make sure a completed/interrupted
+            // matrix morph cannot remain latched on the Camera.
+            ClearProjectionMatrixOverride();
         }
 
         if (targetCamera && (fovDrivenThisTick || _fovWasDriven))
@@ -686,6 +1175,10 @@ public class UniversalCamera : MonoBehaviour
         {
             _transitionActive = false;
             _transitionElapsed = 0f;
+
+            // The final frame already reached transitionWeight = 1. Return
+            // projection ownership to Unity's canonical destination matrix.
+            ClearProjectionMatrixOverride();
         }
 
         _snapNextTick = false;
@@ -718,11 +1211,1314 @@ public class UniversalCamera : MonoBehaviour
         if (found) SetTarget(found.transform);
     }
 
+
     // -----------------------------------------------------------------------
-    // Position behaviours
+    // Primitive spatial behaviours
     // -----------------------------------------------------------------------
 
-    /// <summary>Move toward a target, optionally on selected axes only.</summary>
+    /// <summary>
+    /// Copy selected POSITION axes from a target.
+    ///
+    /// Examples:
+    ///   XYZ + Target space + Offset 0 = sit exactly on the target.
+    ///   Y only + Target space + Offset Y -2 = move to target-local height -2
+    ///   while preserving the current target-local X/Z.
+    ///
+    /// This owns POSITION ONLY.
+    /// </summary>
+    [Serializable]
+    public class TargetPosition : CameraBehaviour
+    {
+        public AxisMask axes =
+            AxisMask.All;
+
+        public ReferenceSpace space =
+            ReferenceSpace.Target;
+
+        [Tooltip("Added to the target position in the selected coordinate space.")]
+        public Vector3 offset =
+            Vector3.zero;
+
+        [Advanced]
+        [Min(0f)]
+        [Tooltip("Optional follow smoothing. 0 = exact. Kept in Advanced so the " +
+                 "normal mental model stays 'copy these axes'.")]
+        public float smoothTime = 0f;
+
+        [NonSerialized]
+        bool _seeded;
+
+        [NonSerialized]
+        Vector3 _smoothedWorld;
+
+        // TargetUp has infinitely many valid headings around target.up.
+        // Pick the one whose requested X/Z offset is closest to the camera
+        // when this behaviour becomes active, then parallel-transport that
+        // heading as target.up changes.
+        [NonSerialized]
+        bool _targetUpBasisSeeded;
+
+        [NonSerialized]
+        Quaternion _targetUpBasis =
+            Quaternion.identity;
+
+        [NonSerialized]
+        Transform _targetUpBasisTarget;
+
+        public override bool RequiresTarget => true;
+        public override bool IsPositionModifier => true;
+
+        public override void Initialise(
+            UniversalCamera owner)
+        {
+            _seeded = false;
+            _targetUpBasisSeeded = false;
+            _targetUpBasisTarget = null;
+        }
+
+        Quaternion ClosestTargetUpBasis(
+            in CameraFrame frame,
+            Transform target)
+        {
+            if (!target)
+                return frame.rotation;
+
+            Vector3 up =
+                target.up.sqrMagnitude > 0.000001f
+                    ? target.up.normalized
+                    : Vector3.up;
+
+            // A different target is a different orbit. Re-seed from the
+            // camera's current visible position.
+            if (_targetUpBasisTarget != target)
+            {
+                _targetUpBasisTarget =
+                    target;
+
+                _targetUpBasisSeeded =
+                    false;
+            }
+
+            if (!_targetUpBasisSeeded)
+            {
+                Vector3 radial =
+                    Vector3.ProjectOnPlane(
+                        frame.position -
+                        target.position,
+                        up);
+
+                Vector3 horizontalOffset =
+                    new Vector3(
+                        offset.x,
+                        0f,
+                        offset.z);
+
+                // If this row actually asks for an orbital X/Z offset, rotate
+                // that offset around target.up so its world-space endpoint is
+                // the closest equivalent endpoint to the incoming camera.
+                if (radial.sqrMagnitude > 0.000001f &&
+                    horizontalOffset.sqrMagnitude > 0.000001f)
+                {
+                    radial.Normalize();
+                    horizontalOffset.Normalize();
+
+                    Quaternion radialFrame =
+                        Quaternion.LookRotation(
+                            radial,
+                            up);
+
+                    // Rotate the authored local horizontal-offset direction
+                    // onto the radial frame's +Z direction.
+                    Quaternion localOffsetToForward =
+                        Quaternion.FromToRotation(
+                            horizontalOffset,
+                            Vector3.forward);
+
+                    _targetUpBasis =
+                        radialFrame *
+                        localOffsetToForward;
+                }
+                else
+                {
+                    // With no meaningful horizontal offset, position does not
+                    // constrain heading. Use the incoming camera orientation as
+                    // the least-surprising seed.
+                    _targetUpBasis =
+                        BuildTargetUpBasis(
+                            target,
+                            frame.rotation);
+                }
+
+                _targetUpBasis =
+                    Quaternion.Normalize(
+                        _targetUpBasis);
+
+                _targetUpBasisSeeded =
+                    true;
+
+                return _targetUpBasis;
+            }
+
+            // Once chosen, keep the SAME heading relative to the surface.
+            // Only transport it as target.up itself changes. Target spin around
+            // its up axis cannot drag the camera to another orbital position.
+            Vector3 currentUp =
+                _targetUpBasis *
+                Vector3.up;
+
+            _targetUpBasis =
+                Quaternion.FromToRotation(
+                    currentUp,
+                    up) *
+                _targetUpBasis;
+
+            _targetUpBasis =
+                Quaternion.Normalize(
+                    _targetUpBasis);
+
+            return _targetUpBasis;
+        }
+
+        public override void Apply(
+            ref CameraFrame frame,
+            in CameraContext ctx)
+        {
+            Vector3 origin;
+            Quaternion basis;
+
+            if (space == ReferenceSpace.TargetUp)
+            {
+                origin =
+                    ctx.Target.position;
+
+                basis =
+                    ClosestTargetUpBasis(
+                        in frame,
+                        ctx.Target);
+            }
+            else
+            {
+                ResolveSpace(
+                    in frame,
+                    in ctx,
+                    space,
+                    out origin,
+                    out basis);
+            }
+
+            Vector3 upstreamLocal =
+                WorldToSpacePoint(
+                    frame.position,
+                    origin,
+                    basis);
+
+            Vector3 targetLocal =
+                WorldToSpacePoint(
+                    ctx.Target.position,
+                    origin,
+                    basis);
+
+            Vector3 desiredLocal =
+                targetLocal +
+                offset;
+
+            if (!_seeded)
+            {
+                _smoothedWorld =
+                    frame.position;
+
+                _seeded = true;
+            }
+
+            Vector3 currentLocal =
+                WorldToSpacePoint(
+                    _smoothedWorld,
+                    origin,
+                    basis);
+
+            // Axes not owned by this row always come fresh from the stack above.
+            currentLocal =
+                new Vector3(
+                    axes.x ? currentLocal.x : upstreamLocal.x,
+                    axes.y ? currentLocal.y : upstreamLocal.y,
+                    axes.z ? currentLocal.z : upstreamLocal.z);
+
+            float t =
+                Damp(
+                    smoothTime,
+                    ctx.DeltaTime,
+                    ctx.Snap);
+
+            Vector3 resultLocal =
+                new Vector3(
+                    axes.x
+                        ? Mathf.Lerp(
+                            currentLocal.x,
+                            desiredLocal.x,
+                            t)
+                        : upstreamLocal.x,
+
+                    axes.y
+                        ? Mathf.Lerp(
+                            currentLocal.y,
+                            desiredLocal.y,
+                            t)
+                        : upstreamLocal.y,
+
+                    axes.z
+                        ? Mathf.Lerp(
+                            currentLocal.z,
+                            desiredLocal.z,
+                            t)
+                        : upstreamLocal.z);
+
+            _smoothedWorld =
+                SpaceToWorldPoint(
+                    resultLocal,
+                    origin,
+                    basis);
+
+            frame.position =
+                _smoothedWorld;
+        }
+    }
+
+    /// <summary>
+    /// Add a POSITION value in a selected coordinate space.
+    ///
+    /// This replaces the old "distance from target" idea. A normal third-person
+    /// boom is simply:
+    ///   TargetPosition
+    ///   Mouse Look
+    ///   Position Offset     Self  (0,0,-4)
+    /// </summary>
+    [Serializable]
+    public class AddPosition : CameraBehaviour
+    {
+        public AxisMask axes =
+            AxisMask.All;
+
+        public ReferenceSpace space =
+            ReferenceSpace.Self;
+
+        public Vector3 value =
+            Vector3.zero;
+
+        public override bool RequiresTarget =>
+            space == ReferenceSpace.Target ||
+            space == ReferenceSpace.TargetUp;
+
+        public override bool IsPositionModifier => true;
+
+        public override void Apply(
+            ref CameraFrame frame,
+            in CameraContext ctx)
+        {
+            ResolveSpace(
+                in frame,
+                in ctx,
+                space,
+                out _,
+                out Quaternion basis);
+
+            frame.position +=
+                basis *
+                axes.Filter(
+                    value);
+        }
+    }
+
+    /// <summary>
+    /// Aim selected ROTATION axes at a target.
+    ///
+    /// Offset is the aim point in TARGET LOCAL coordinates.
+    /// Put a position row below this if you want to aim first and then move
+    /// without re-aiming on the next frame.
+    /// </summary>
+    [Serializable]
+    public class AimAtTarget : CameraBehaviour
+    {
+        public AxisMask axes =
+            AxisMask.All;
+
+        [Tooltip("Aim point on the target, in target-local coordinates.")]
+        public Vector3 offset =
+            Vector3.zero;
+
+        [Tooltip("Defines the orientation frame used when applying Pitch/Yaw/Roll.")]
+        public ReferenceSpace space =
+            ReferenceSpace.TargetUp;
+
+        [Advanced]
+        [Min(0f)]
+        public float smoothTime =
+            0f;
+
+        [NonSerialized]
+        bool _seeded;
+
+        [NonSerialized]
+        Quaternion _smoothedRotation =
+            Quaternion.identity;
+
+        public override bool RequiresTarget => true;
+        public override bool IsRotationModifier => true;
+
+        public override void Initialise(
+            UniversalCamera owner)
+        {
+            _seeded = false;
+        }
+
+        public override void Apply(
+            ref CameraFrame frame,
+            in CameraContext ctx)
+        {
+            Vector3 aimPoint =
+                ctx.Target.TransformPoint(
+                    offset);
+
+            Vector3 direction =
+                aimPoint -
+                frame.position;
+
+            if (direction.sqrMagnitude <
+                0.000001f)
+                return;
+
+            direction.Normalize();
+
+            ResolveSpace(
+                in frame,
+                in ctx,
+                space,
+                out _,
+                out Quaternion reference);
+
+            Vector3 up =
+                reference *
+                Vector3.up;
+
+            if (Mathf.Abs(
+                    Vector3.Dot(
+                        direction,
+                        up.normalized)) >
+                0.9999f)
+            {
+                // At the exact pole, derive a stable up from the current frame.
+                up =
+                    Vector3.ProjectOnPlane(
+                        frame.Up,
+                        direction);
+
+                if (up.sqrMagnitude <
+                    0.000001f)
+                {
+                    up =
+                        reference *
+                        Vector3.right;
+                }
+            }
+
+            Quaternion fullDesired =
+                Quaternion.LookRotation(
+                    direction,
+                    up);
+
+            Quaternion desired =
+                MergeRotationAxes(
+                    frame.rotation,
+                    fullDesired,
+                    axes,
+                    reference);
+
+            if (!_seeded)
+            {
+                _smoothedRotation =
+                    frame.rotation;
+
+                _seeded = true;
+            }
+
+            // Keep axes we do NOT own attached to the upstream frame.
+            _smoothedRotation =
+                MergeRotationAxes(
+                    frame.rotation,
+                    _smoothedRotation,
+                    axes,
+                    reference);
+
+            _smoothedRotation =
+                Quaternion.Slerp(
+                    _smoothedRotation,
+                    desired,
+                    Damp(
+                        smoothTime,
+                        ctx.DeltaTime,
+                        ctx.Snap));
+
+            frame.rotation =
+                _smoothedRotation;
+        }
+    }
+
+    /// <summary>
+    /// Mouse/stick rotation in the same ordered stack as every other operation.
+    ///
+    /// Axes mean:
+    ///   X = Pitch
+    ///   Y = Yaw
+    ///   Z = Roll/Horizon
+    ///
+    /// Mouse input changes Pitch/Yaw. Z decides whether this row also owns roll.
+    /// With Space = TargetUp and Z enabled, the horizon stays aligned to target.up.
+    /// Space = Self gives an unclamped/free-look style local rotation.
+    /// </summary>
+    [Serializable]
+    public class MouseRotation : CameraBehaviour
+    {
+        public AxisMask axes =
+            AxisMask.All;
+
+        [Tooltip("X = pitch sensitivity, Y = yaw sensitivity. Z is reserved for roll.")]
+        public Vector3 value =
+            new Vector3(
+                0.12f,
+                0.12f,
+                0f);
+
+        [Tooltip("Constant Pitch/Yaw/Roll offset, in degrees.")]
+        public Vector3 offset =
+            Vector3.zero;
+
+        public ReferenceSpace space =
+            ReferenceSpace.TargetUp;
+
+        [Min(0f)]
+        [Tooltip("Seconds to ease toward the mouse-controlled rotation. 0 = raw.")]
+        public float smoothTime =
+            0f;
+
+        [Advanced]
+        public bool invertY = false;
+
+        [Advanced]
+        public bool limitPitch = true;
+
+        [Advanced]
+        public Vector2 pitchLimit =
+            new Vector2(
+                -60f,
+                70f);
+
+        [Advanced]
+        public bool requireCursorLock = true;
+
+        [Advanced]
+        [Tooltip("Gamepad stick speed before sensitivity. No effect on mouse.")]
+        public float stickSpeed = 1000f;
+
+        [NonSerialized]
+        float _pitch;
+
+        [NonSerialized]
+        float _yaw;
+
+        [NonSerialized]
+        bool _initialised;
+
+        [NonSerialized]
+        Quaternion _freeRotation =
+            Quaternion.identity;
+
+        [NonSerialized]
+        Quaternion _targetUpBasis =
+            Quaternion.identity;
+
+        [NonSerialized]
+        bool _targetUpBasisSeeded;
+
+        [NonSerialized]
+        Quaternion _smoothedRotation =
+            Quaternion.identity;
+
+        [NonSerialized]
+        bool _smoothedRotationSeeded;
+
+        [NonSerialized]
+        int _lastMouseInputFrame =
+            -1;
+
+        public override bool RequiresTarget =>
+            space == ReferenceSpace.Target ||
+            space == ReferenceSpace.TargetUp;
+
+        public override bool IsRotationModifier => true;
+
+        public override void Initialise(
+            UniversalCamera owner)
+        {
+            _initialised = false;
+            _targetUpBasisSeeded = false;
+            _smoothedRotationSeeded = false;
+            _lastMouseInputFrame = -1;
+        }
+
+        void ApplySmoothedRotation(
+            ref CameraFrame frame,
+            Quaternion desired,
+            Quaternion reference,
+            in CameraContext ctx)
+        {
+            if (!_smoothedRotationSeeded)
+            {
+                _smoothedRotation =
+                    frame.rotation;
+
+                _smoothedRotationSeeded =
+                    true;
+            }
+
+            // Axes this row does NOT own must remain whatever the rows above
+            // produced this frame rather than acquiring their own lag.
+            _smoothedRotation =
+                MergeRotationAxes(
+                    frame.rotation,
+                    _smoothedRotation,
+                    axes,
+                    reference);
+
+            _smoothedRotation =
+                Quaternion.Slerp(
+                    _smoothedRotation,
+                    desired,
+                    Damp(
+                        smoothTime,
+                        ctx.DeltaTime,
+                        ctx.Snap));
+
+            frame.rotation =
+                _smoothedRotation;
+        }
+
+        Quaternion TargetUpBasis(
+            Transform target,
+            Quaternion incoming)
+        {
+            if (!_targetUpBasisSeeded)
+            {
+                _targetUpBasis =
+                    BuildTargetUpBasis(
+                        target,
+                        incoming);
+
+                _targetUpBasisSeeded =
+                    true;
+
+                return _targetUpBasis;
+            }
+
+            Vector3 currentUp =
+                _targetUpBasis *
+                Vector3.up;
+
+            Vector3 wantedUp =
+                target.up.sqrMagnitude >
+                0.000001f
+                    ? target.up.normalized
+                    : Vector3.up;
+
+            _targetUpBasis =
+                Quaternion.FromToRotation(
+                    currentUp,
+                    wantedUp) *
+                _targetUpBasis;
+
+            _targetUpBasis =
+                Quaternion.Normalize(
+                    _targetUpBasis);
+
+            return _targetUpBasis;
+        }
+
+        Quaternion MouseBasis(
+            in CameraFrame frame,
+            in CameraContext ctx)
+        {
+            switch (space)
+            {
+                case ReferenceSpace.Parent:
+                    return ctx.Self.parent
+                        ? ctx.Self.parent.rotation
+                        : Quaternion.identity;
+
+                case ReferenceSpace.Target:
+                    return ctx.Target
+                        ? ctx.Target.rotation
+                        : Quaternion.identity;
+
+                case ReferenceSpace.TargetUp:
+                    return ctx.Target
+                        ? TargetUpBasis(
+                            ctx.Target,
+                            frame.rotation)
+                        : Quaternion.identity;
+
+                default:
+                    return Quaternion.identity;
+            }
+        }
+
+        void SeedFromIncoming(
+            Quaternion basis,
+            Quaternion incoming)
+        {
+            Quaternion relative =
+                Quaternion.Normalize(
+                    Quaternion.Inverse(
+                        basis) *
+                    incoming);
+
+            Vector3 forward =
+                relative *
+                Vector3.forward;
+
+            float horizontal =
+                Mathf.Sqrt(
+                    forward.x * forward.x +
+                    forward.z * forward.z);
+
+            if (horizontal >
+                0.00001f)
+            {
+                _yaw =
+                    Mathf.Atan2(
+                        forward.x,
+                        forward.z) *
+                    Mathf.Rad2Deg;
+            }
+            else
+            {
+                Vector3 right =
+                    relative *
+                    Vector3.right;
+
+                _yaw =
+                    Mathf.Atan2(
+                        -right.z,
+                        right.x) *
+                    Mathf.Rad2Deg;
+            }
+
+            _pitch =
+                Mathf.Atan2(
+                    -forward.y,
+                    Mathf.Max(
+                        horizontal,
+                        0.00001f)) *
+                Mathf.Rad2Deg;
+
+            if (limitPitch)
+            {
+                _pitch =
+                    Mathf.Clamp(
+                        _pitch,
+                        pitchLimit.x,
+                        pitchLimit.y);
+            }
+
+            _freeRotation =
+                incoming;
+
+            _initialised =
+                true;
+        }
+
+        public override void Apply(
+            ref CameraFrame frame,
+            in CameraContext ctx)
+        {
+            Vector2 delta =
+                Vector2.zero;
+
+            if (!requireCursorLock ||
+                Cursor.lockState ==
+                CursorLockMode.Locked)
+            {
+                delta =
+                    ReadLookDelta(
+                        ctx.DeltaTime,
+                        stickSpeed,
+                        ref _lastMouseInputFrame);
+            }
+
+            if (space == ReferenceSpace.Self)
+            {
+                if (!_initialised)
+                {
+                    _freeRotation =
+                        frame.rotation;
+
+                    _initialised =
+                        true;
+                }
+
+                float pitchDelta =
+                    axes.x
+                        ? (invertY ? delta.y : -delta.y) * value.x
+                        : 0f;
+
+                float yawDelta =
+                    axes.y
+                        ? delta.x * value.y
+                        : 0f;
+
+                Quaternion step =
+                    Quaternion.Euler(
+                        pitchDelta,
+                        yawDelta,
+                        0f);
+
+                _freeRotation =
+                    Quaternion.Normalize(
+                        _freeRotation *
+                        step);
+
+                Quaternion offsetRotation =
+                    Quaternion.Euler(
+                        axes.Filter(
+                            offset));
+
+                Quaternion selfDesired =
+                    _freeRotation *
+                    offsetRotation;
+
+                // In Self/free mode the rotation is a whole quaternion rather
+                // than decomposed against an external basis.
+                if (!_smoothedRotationSeeded)
+                {
+                    _smoothedRotation =
+                        frame.rotation;
+
+                    _smoothedRotationSeeded =
+                        true;
+                }
+
+                _smoothedRotation =
+                    Quaternion.Slerp(
+                        _smoothedRotation,
+                        selfDesired,
+                        Damp(
+                            smoothTime,
+                            ctx.DeltaTime,
+                            ctx.Snap));
+
+                frame.rotation =
+                    _smoothedRotation;
+
+                return;
+            }
+
+            Quaternion basis =
+                MouseBasis(
+                    in frame,
+                    in ctx);
+
+            if (!_initialised)
+            {
+                SeedFromIncoming(
+                    basis,
+                    frame.rotation);
+            }
+
+            if (axes.y)
+            {
+                _yaw +=
+                    delta.x *
+                    value.y;
+            }
+
+            if (axes.x)
+            {
+                _pitch +=
+                    (invertY
+                        ? delta.y
+                        : -delta.y) *
+                    value.x;
+            }
+
+            _yaw =
+                Mathf.Repeat(
+                    _yaw,
+                    360f);
+
+            if (limitPitch &&
+                axes.x)
+            {
+                _pitch =
+                    Mathf.Clamp(
+                        _pitch,
+                        pitchLimit.x,
+                        pitchLimit.y);
+            }
+
+            Quaternion controlled =
+                basis *
+                Quaternion.Euler(
+                    _pitch + offset.x,
+                    _yaw + offset.y,
+                    offset.z);
+
+            // First build the exact rotation this row would own, then smooth
+            // only toward that result. Unowned axes still come directly from
+            // the rows above.
+            Quaternion desired =
+                MergeRotationAxes(
+                    frame.rotation,
+                    controlled,
+                    axes,
+                    basis);
+
+            ApplySmoothedRotation(
+                ref frame,
+                desired,
+                basis,
+                in ctx);
+        }
+    }
+
+    /// <summary>
+    /// Add a ROTATION value after whatever rotation rows came above it.
+    ///
+    /// Fixed = constant offset.
+    /// PerSecond = continuously accumulate Value as degrees/second.
+    /// </summary>
+    [Serializable]
+    public class RotationOffset : CameraBehaviour
+    {
+        public enum Rate
+        {
+            Fixed,
+            PerSecond
+        }
+
+        public AxisMask axes =
+            AxisMask.All;
+
+        public ReferenceSpace space =
+            ReferenceSpace.Self;
+
+        public Vector3 value =
+            Vector3.zero;
+
+        [Tooltip("Optional additional fixed rotation in degrees.")]
+        public Vector3 offset =
+            Vector3.zero;
+
+        public Rate rate =
+            Rate.Fixed;
+
+        [NonSerialized]
+        Vector3 _accumulated;
+
+        public override bool RequiresTarget =>
+            space == ReferenceSpace.Target ||
+            space == ReferenceSpace.TargetUp;
+
+        public override bool IsRotationModifier => true;
+
+        public override void Initialise(
+            UniversalCamera owner)
+        {
+            _accumulated =
+                Vector3.zero;
+        }
+
+        public override void Apply(
+            ref CameraFrame frame,
+            in CameraContext ctx)
+        {
+            Vector3 amount;
+
+            if (rate == Rate.PerSecond)
+            {
+                _accumulated +=
+                    value *
+                    ctx.DeltaTime;
+
+                amount =
+                    _accumulated +
+                    offset;
+            }
+            else
+            {
+                amount =
+                    value +
+                    offset;
+            }
+
+            amount =
+                axes.Filter(
+                    amount);
+
+            Quaternion delta =
+                Quaternion.Euler(
+                    amount);
+
+            if (space == ReferenceSpace.Self)
+            {
+                frame.rotation =
+                    frame.rotation *
+                    delta;
+
+                return;
+            }
+
+            ResolveSpace(
+                in frame,
+                in ctx,
+                space,
+                out _,
+                out Quaternion basis);
+
+            Quaternion worldDelta =
+                basis *
+                delta *
+                Quaternion.Inverse(
+                    basis);
+
+            frame.rotation =
+                worldDelta *
+                frame.rotation;
+        }
+    }
+
+    /// <summary>
+    /// Final obstruction correction. It NEVER decides where the camera wants to
+    /// be; the rows above already did that. It only shortens the line from pivot
+    /// to the current frame.position when geometry blocks it.
+    /// </summary>
+    [Serializable]
+    public class CameraCollision : CameraBehaviour
+    {
+        [Tooltip("Pivot offset in target-local coordinates.")]
+        public Vector3 offset =
+            Vector3.zero;
+
+        [Min(0f)]
+        public float radius =
+            0.2f;
+
+        [Min(0f)]
+        public float minimumDistance =
+            0.4f;
+
+        public LayerMask layers =
+            ~0;
+
+        public override bool RequiresTarget => true;
+        public override bool IsPositionModifier => true;
+
+        public override void Apply(
+            ref CameraFrame frame,
+            in CameraContext ctx)
+        {
+            Vector3 pivot =
+                ctx.Target.TransformPoint(
+                    offset);
+
+            Vector3 delta =
+                frame.position -
+                pivot;
+
+            float distance =
+                delta.magnitude;
+
+            if (distance <=
+                0.00001f)
+                return;
+
+            Vector3 direction =
+                delta /
+                distance;
+
+            if (Physics.SphereCast(
+                pivot,
+                radius,
+                direction,
+                out RaycastHit hit,
+                distance,
+                layers,
+                QueryTriggerInteraction.Ignore))
+            {
+                float allowed =
+                    Mathf.Max(
+                        minimumDistance,
+                        hit.distance);
+
+                frame.position =
+                    pivot +
+                    direction *
+                    allowed;
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Camera value behaviours
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Set the Camera field of view. Value + Offset is the final FOV.
+    /// </summary>
+    [Serializable]
+    public class FieldOfView : CameraBehaviour
+    {
+        [Range(1f, 179f)]
+        public float value =
+            60f;
+
+        public float offset =
+            0f;
+
+        public override bool WritesFieldOfView => true;
+
+        public override void Apply(
+            ref CameraFrame frame,
+            in CameraContext ctx)
+        {
+            frame.fieldOfView =
+                Mathf.Clamp(
+                    value +
+                    offset,
+                    1f,
+                    179f);
+        }
+    }
+
+    /// <summary>
+    /// Add FOV based on authoritative movement speed.
+    /// Put it BELOW FieldOfView when you want "base FOV, then speed boost".
+    /// </summary>
+    [Serializable]
+    public class SpeedFOV : CameraBehaviour
+    {
+        [Tooltip("FOV added at full movement speed.")]
+        public float value =
+            22f;
+
+        public float speedForFullEffect =
+            14f;
+
+        [Advanced]
+        public float deadZone =
+            2f;
+
+        [Advanced]
+        public bool useMovementSpeed =
+            true;
+
+        [NonSerialized]
+        Vector3 _lastPosition;
+
+        [NonSerialized]
+        bool _seeded;
+
+        [NonSerialized]
+        Transform _cachedTarget;
+
+        [NonSerialized]
+        VirusMovement _movement;
+
+        [NonSerialized]
+        Rigidbody _rigidbody;
+
+        public override bool RequiresTarget => true;
+        public override bool WritesFieldOfView => true;
+
+        public override void Initialise(
+            UniversalCamera owner)
+        {
+            _seeded = false;
+            _cachedTarget = null;
+            _movement = null;
+            _rigidbody = null;
+        }
+
+        void CacheSpeedSource(
+            Transform target)
+        {
+            if (_cachedTarget ==
+                target)
+                return;
+
+            _cachedTarget =
+                target;
+
+            _movement = null;
+            _rigidbody = null;
+
+            if (!target)
+                return;
+
+            if (useMovementSpeed)
+            {
+                _movement =
+                    target.GetComponentInParent<VirusMovement>();
+
+                if (!_movement)
+                {
+                    _movement =
+                        target.GetComponentInChildren<VirusMovement>();
+                }
+            }
+
+            _rigidbody =
+                target.GetComponentInParent<Rigidbody>();
+
+            if (!_rigidbody)
+            {
+                _rigidbody =
+                    target.GetComponentInChildren<Rigidbody>();
+            }
+        }
+
+        public override void Apply(
+            ref CameraFrame frame,
+            in CameraContext ctx)
+        {
+            CacheSpeedSource(
+                ctx.Target);
+
+            float speed;
+            float fullSpeed;
+
+            if (_movement)
+            {
+                speed =
+                    _movement.speed;
+
+                fullSpeed =
+                    Mathf.Max(
+                        _movement.totalSpeed,
+                        deadZone +
+                        0.0001f);
+
+                _lastPosition =
+                    ctx.Target.position;
+
+                _seeded = true;
+            }
+            else if (_rigidbody &&
+                     !_rigidbody.isKinematic)
+            {
+                speed =
+                    _rigidbody.linearVelocity.magnitude;
+
+                fullSpeed =
+                    Mathf.Max(
+                        speedForFullEffect,
+                        deadZone +
+                        0.0001f);
+
+                _lastPosition =
+                    ctx.Target.position;
+
+                _seeded = true;
+            }
+            else
+            {
+                if (!_seeded)
+                {
+                    _lastPosition =
+                        ctx.Target.position;
+
+                    _seeded = true;
+                    return;
+                }
+
+                float dt =
+                    Mathf.Max(
+                        ctx.DeltaTime,
+                        0.00001f);
+
+                speed =
+                    (ctx.Target.position -
+                     _lastPosition).magnitude /
+                    dt;
+
+                fullSpeed =
+                    Mathf.Max(
+                        speedForFullEffect,
+                        deadZone +
+                        0.0001f);
+
+                _lastPosition =
+                    ctx.Target.position;
+            }
+
+            float t =
+                Mathf.InverseLerp(
+                    deadZone,
+                    fullSpeed,
+                    speed);
+
+            frame.fieldOfView +=
+                value *
+                t;
+        }
+    }
+
+    /// <summary>
+    /// Projection owns only perspective-vs-orthographic and orthographic size.
+    /// Perspective FOV belongs to the separate FieldOfView behaviour.
+    /// </summary>
+    [Serializable]
+    public class Projection : CameraBehaviour
+    {
+        public enum Mode
+        {
+            Perspective,
+            Orthographic
+        }
+
+        public Mode value =
+            Mode.Perspective;
+
+        [Min(0.0001f)]
+        [Tooltip("Used only when Value = Orthographic.")]
+        public float orthographicSize =
+            5f;
+
+        public override bool WritesProjection => true;
+
+        public override void Apply(
+            ref CameraFrame frame,
+            in CameraContext ctx)
+        {
+            frame.orthographic =
+                value ==
+                Mode.Orthographic;
+
+            if (frame.orthographic)
+            {
+                frame.orthographicSize =
+                    Mathf.Max(
+                        0.0001f,
+                        orthographicSize);
+            }
+        }
+    }
+
+
+    // -----------------------------------------------------------------------
+    // Legacy compatibility
+    //
+    // These old behaviour types remain only so existing scenes/prefabs keep
+    // their SerializeReference data. They are NOT offered by Add Step.
+    // Replace them with the primitive stack rows when convenient.
+    // -----------------------------------------------------------------------
+
     [Serializable]
     public class FollowTarget : CameraBehaviour
     {
@@ -769,14 +2565,6 @@ public class UniversalCamera : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Move only the camera's "height" component so it sits on the same height
-    /// plane as the target while preserving its sideways/forward placement.
-    ///
-    /// TargetLocal is the useful mode for a surface-walking character: height
-    /// is measured along the TARGET'S local up axis, so the behaviour still
-    /// works when the target is standing on walls, ceilings, curved cells, etc.
-    /// </summary>
     [Serializable]
     public class MatchTargetHeight : CameraBehaviour
     {
@@ -799,9 +2587,14 @@ public class UniversalCamera : MonoBehaviour
         public float smoothTime = 0.08f;
 
         public override bool RequiresTarget => true;
+        public override bool IsPositionModifier => true;
 
         public override void Apply(ref CameraFrame frame, in CameraContext ctx)
         {
+            // Contract: this behaviour owns POSITION ONLY.
+            Quaternion incomingRotation =
+                frame.rotation;
+
             Vector3 desired = frame.position;
 
             switch (space)
@@ -874,13 +2667,13 @@ public class UniversalCamera : MonoBehaviour
                     frame.position,
                     desired,
                     t);
+
+            // Explicit even though we never intentionally touched rotation.
+            frame.rotation =
+                incomingRotation;
         }
     }
 
-    /// <summary>
-    /// Nudge the pose by a fixed offset. Self space is the usual one for a
-    /// camera: it shifts along the camera's own axes after it has been aimed.
-    /// </summary>
     [Serializable]
     public class PositionOffset : CameraBehaviour
     {
@@ -890,6 +2683,7 @@ public class UniversalCamera : MonoBehaviour
         [Advanced] public OffsetSpace space = OffsetSpace.Self;
 
         public override bool RequiresTarget => space == OffsetSpace.Target;
+        public override bool IsPositionModifier => true;
 
         public override void Apply(ref CameraFrame frame, in CameraContext ctx)
         {
@@ -912,12 +2706,6 @@ public class UniversalCamera : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Sit a fixed distance from a target -- the third person boom. Put this on
-    /// the camera with the holder as its target and you get a pull-back arm.
-    /// Usually belongs below whatever sets rotation, since the default
-    /// direction is the pose's own backward axis.
-    /// </summary>
     [Serializable]
     public class DistanceFromTarget : CameraBehaviour
     {
@@ -1001,11 +2789,6 @@ public class UniversalCamera : MonoBehaviour
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Rotation behaviours
-    // -----------------------------------------------------------------------
-
-    /// <summary>Aim at a target.</summary>
     [Serializable]
     public class LookAtTarget : CameraBehaviour
     {
@@ -1080,11 +2863,6 @@ public class UniversalCamera : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Mouse / stick look. Split it across two components for a standard rig:
-    /// yaw on the holder, pitch on the camera. The camera's Parent space then
-    /// inherits the holder's yaw automatically.
-    /// </summary>
     [Serializable]
     public class MouseLook : CameraBehaviour
     {
@@ -1133,18 +2911,11 @@ public class UniversalCamera : MonoBehaviour
 
         public override void Initialise(UniversalCamera owner)
         {
-            // Start from the transform's current angles so enabling this does
-            // not yank the view to zero. Which angles depends on the basis the
-            // behaviour composes against.
-            //
-            // Target basis seeds from local angles too: the exact seed matters
-            // less than not jumping, and the target may not exist yet at Awake.
-            Vector3 e = basis == Basis.World
-                ? owner.transform.eulerAngles
-                : owner.transform.localEulerAngles;
-            _pitch = Mathf.DeltaAngle(0f, e.x);
-            _yaw = Mathf.DeltaAngle(0f, e.y);
-            _initialised = true;
+            // Target / Parent / TargetUp basis is only fully known in Apply.
+            // Defer seeding so entering a mode starts from the EXACT incoming
+            // stack rotation instead of reconstructing from unrelated Euler
+            // angles and snapping toward a default orientation.
+            _initialised = false;
             _upBasisSeeded = false;
             _lastMouseInputFrame = -1;
         }
@@ -1174,50 +2945,238 @@ public class UniversalCamera : MonoBehaviour
             return _upBasis;
         }
 
-        public override void Apply(ref CameraFrame frame, in CameraContext ctx)
+        Quaternion BasisRotation(
+            in CameraContext ctx)
         {
-            if (!_initialised) Initialise(ctx.Owner);
-
-            if (!requireCursorLock || Cursor.lockState == CursorLockMode.Locked)
+            switch (basis)
             {
-                Vector2 delta = ReadLookDelta(ctx.DeltaTime, stickSpeed, ref _lastMouseInputFrame);
-                if (yaw) _yaw += delta.x * sensitivity.x;
-                if (pitch) _pitch += (invertY ? delta.y : -delta.y) * sensitivity.y;
+                case Basis.Parent:
+                    return ctx.Self.parent
+                        ? ctx.Self.parent.rotation
+                        : Quaternion.identity;
+
+                case Basis.Target:
+                    return ctx.Target
+                        ? ctx.Target.rotation
+                        : Quaternion.identity;
+
+                case Basis.TargetUp:
+                    return ctx.Target
+                        ? UpBasis(ctx.Target.up)
+                        : Quaternion.identity;
+
+                default:
+                    return Quaternion.identity;
+            }
+        }
+
+        void SeedFromIncomingFrame(
+            Quaternion basisRotation,
+            Quaternion incomingRotation)
+        {
+            // MouseLook owns a LOOK DIRECTION plus a basis-up reference.
+            // Preserve the incoming forward direction, not arbitrary incoming
+            // roll. Preserving roll is what allowed TargetUp to enter a mode
+            // with a horizon tilted away from the target's surface-up.
+            Quaternion invBasis =
+                Quaternion.Inverse(
+                    basisRotation);
+
+            Vector3 localForward =
+                invBasis *
+                (incomingRotation *
+                 Vector3.forward);
+
+            if (localForward.sqrMagnitude <
+                0.000001f)
+            {
+                localForward =
+                    Vector3.forward;
             }
 
-            _yaw = Mathf.Repeat(_yaw, 360f);
-            if (pitch) _pitch = Mathf.Clamp(_pitch, pitchClamp.x, pitchClamp.y);
+            localForward.Normalize();
 
-            Quaternion basisRotation = Quaternion.identity;
+            float horizontal =
+                Mathf.Sqrt(
+                    localForward.x *
+                    localForward.x +
+                    localForward.z *
+                    localForward.z);
 
-            if (basis == Basis.Parent && ctx.Self.parent)
-                basisRotation = ctx.Self.parent.rotation;
-            else if (basis == Basis.Target && ctx.Target)
-                basisRotation = ctx.Target.rotation;
-            else if (basis == Basis.TargetUp && ctx.Target)
-                basisRotation = UpBasis(ctx.Target.up);
+            if (horizontal >
+                0.00001f)
+            {
+                _yaw =
+                    Mathf.Atan2(
+                        localForward.x,
+                        localForward.z) *
+                    Mathf.Rad2Deg;
+            }
+            else
+            {
+                // Looking almost exactly along the up axis makes forward alone
+                // unable to define yaw. Use incoming right so mode entry still
+                // preserves heading instead of defaulting to zero.
+                Vector3 localRight =
+                    invBasis *
+                    (incomingRotation *
+                     Vector3.right);
 
-            Quaternion desired = basisRotation *
-                                 Quaternion.Euler(pitch ? _pitch : 0f, yaw ? _yaw : 0f, 0f);
+                _yaw =
+                    Mathf.Atan2(
+                        -localRight.z,
+                        localRight.x) *
+                    Mathf.Rad2Deg;
+            }
 
-            frame.rotation = Quaternion.Slerp(frame.rotation, desired,
-                                              Damp(smoothTime, ctx.DeltaTime, ctx.Snap));
+            _pitch =
+                Mathf.Atan2(
+                    -localForward.y,
+                    Mathf.Max(
+                        horizontal,
+                        0.00001f)) *
+                Mathf.Rad2Deg;
+
+            if (pitch)
+            {
+                _pitch =
+                    Mathf.Clamp(
+                        _pitch,
+                        pitchClamp.x,
+                        pitchClamp.y);
+            }
+
+            _initialised = true;
+        }
+
+        public override void Apply(
+            ref CameraFrame frame,
+            in CameraContext ctx)
+        {
+            Quaternion basisRotation =
+                BasisRotation(
+                    in ctx);
+
+            if (!_initialised)
+            {
+                // Seed from the rotation produced by behaviours ABOVE us.
+                SeedFromIncomingFrame(
+                    basisRotation,
+                    frame.rotation);
+            }
+
+            if (!requireCursorLock ||
+                Cursor.lockState ==
+                CursorLockMode.Locked)
+            {
+                Vector2 delta =
+                    ReadLookDelta(
+                        ctx.DeltaTime,
+                        stickSpeed,
+                        ref _lastMouseInputFrame);
+
+                if (yaw)
+                    _yaw +=
+                        delta.x *
+                        sensitivity.x;
+
+                if (pitch)
+                    _pitch +=
+                        (invertY
+                            ? delta.y
+                            : -delta.y) *
+                        sensitivity.y;
+            }
+
+            _yaw =
+                Mathf.Repeat(
+                    _yaw,
+                    360f);
+
+            if (pitch)
+            {
+                _pitch =
+                    Mathf.Clamp(
+                        _pitch,
+                        pitchClamp.x,
+                        pitchClamp.y);
+            }
+
+            // Disabled axes preserve their seeded yaw/pitch instead of being
+            // silently forced to zero on mode entry.
+            Quaternion relativeLook =
+                Quaternion.Euler(
+                    _pitch,
+                    _yaw,
+                    0f);
+
+            Quaternion desired;
+
+            if (basis == Basis.TargetUp &&
+                ctx.Target)
+            {
+                // TargetUp is a HORIZON/UP-reference contract. Keep the chosen
+                // forward direction, but remove roll around it and rebuild the
+                // camera orientation against the target's current up vector.
+                //
+                // Camera.up cannot literally equal Target.up while looking
+                // upward/downward because up must stay perpendicular to forward;
+                // LookRotation gives the roll-free orientation whose up is as
+                // aligned with Target.up as geometry permits.
+                Vector3 forward =
+                    basisRotation *
+                    (relativeLook *
+                     Vector3.forward);
+
+                Vector3 upReference =
+                    ctx.Target.up;
+
+                if (forward.sqrMagnitude <
+                    0.000001f)
+                {
+                    desired =
+                        basisRotation *
+                        relativeLook;
+                }
+                else
+                {
+                    forward.Normalize();
+
+                    // Exact parallel/antiparallel is degenerate for LookRotation.
+                    // The basis-composed form is continuous at the pole.
+                    float parallel =
+                        Mathf.Abs(
+                            Vector3.Dot(
+                                forward,
+                                upReference.normalized));
+
+                    desired =
+                        parallel > 0.9999f
+                            ? basisRotation *
+                              relativeLook
+                            : Quaternion.LookRotation(
+                                forward,
+                                upReference);
+                }
+            }
+            else
+            {
+                desired =
+                    basisRotation *
+                    relativeLook;
+            }
+
+            frame.rotation =
+                Quaternion.Slerp(
+                    frame.rotation,
+                    desired,
+                    Damp(
+                        smoothTime,
+                        ctx.DeltaTime,
+                        ctx.Snap));
         }
     }
 
-    /// <summary>
-    /// Unclamped look that turns about its own axes. Pitch up, then yaw, and
-    /// the yaw happens around the up vector that pitch just produced -- so you
-    /// can walk the view through every orientation instead of stopping at the
-    /// poles.
-    ///
-    /// It accumulates a quaternion rather than euler angles, which is what
-    /// removes the clamp: there is no pitch number to pin at 90 degrees and no
-    /// gimbal lock to fall into. Roll accumulates naturally as a consequence of
-    /// combining pitch and yaw, exactly as it does when you turn your head.
-    /// Use MouseLook instead when you want a level horizon.
-    /// </summary>
-    [Serializable]
     public class FreeLook : CameraBehaviour
     {
         public Vector2 sensitivity = new Vector2(0.12f, 0.12f);
@@ -1241,14 +3200,21 @@ public class UniversalCamera : MonoBehaviour
 
         public override void Initialise(UniversalCamera owner)
         {
-            _rotation = owner.transform.rotation;
-            _initialised = true;
+            // Defer until Apply so ordering above FreeLook is respected.
+            _initialised = false;
             _lastMouseInputFrame = -1;
         }
 
         public override void Apply(ref CameraFrame frame, in CameraContext ctx)
         {
-            if (!_initialised) Initialise(ctx.Owner);
+            if (!_initialised)
+            {
+                _rotation =
+                    frame.rotation;
+
+                _initialised =
+                    true;
+            }
 
             Vector2 delta = Vector2.zero;
             if (!requireCursorLock || Cursor.lockState == CursorLockMode.Locked)
@@ -1273,16 +3239,6 @@ public class UniversalCamera : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Selects the Camera projection for this mode.
-    ///
-    /// In Perspective mode this behaviour writes an exact base field of view.
-    /// A SpeedFieldOfView placed BELOW it in the behaviour list can then add
-    /// speed-based FOV on top.
-    ///
-    /// In Orthographic mode it controls orthographicSize. Projection itself
-    /// switches immediately, while size may optionally smooth.
-    /// </summary>
     [Serializable]
     public class CameraProjection : CameraBehaviour
     {
@@ -1336,11 +3292,6 @@ public class UniversalCamera : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Widens field of view from authoritative movement speed. VirusMovement is
-    /// preferred when available, then Rigidbody velocity, with Transform delta
-    /// retained only as a generic fallback for animated/kinematic targets.
-    /// </summary>
     [Serializable]
     public class SpeedFieldOfView : CameraBehaviour
     {
@@ -1451,7 +3402,6 @@ public class UniversalCamera : MonoBehaviour
         }
     }
 
-    /// <summary>Spin at a constant rate. Handy for idle orbits and menu cameras.</summary>
     [Serializable]
     public class ConstantRotate : CameraBehaviour
     {
@@ -1462,7 +3412,10 @@ public class UniversalCamera : MonoBehaviour
 
         [NonSerialized] Vector3 _accumulated;
 
-        public override void Initialise(UniversalCamera owner) => _accumulated = Vector3.zero;
+        public override bool IsRotationModifier => true;
+
+        public override void Initialise(UniversalCamera owner) =>
+            _accumulated = Vector3.zero;
 
         public override void Apply(ref CameraFrame frame, in CameraContext ctx)
         {
@@ -1480,43 +3433,53 @@ public class UniversalCamera : MonoBehaviour
     // Input
     // -----------------------------------------------------------------------
 
-    /// <summary>
-    /// Look delta with mouse and stick treated according to how each device is
-    /// actually sampled. Mouse movement is an accumulated rendered-frame delta,
-    /// while a stick is a held value integrated over time.
-    ///
-    /// The per-behaviour lastMouseInputFrame guard is important for FixedUpdate:
-    /// Unity may execute several physics ticks during one rendered frame. Reading
-    /// the same mouse delta on every one of those ticks multiplies rotation and
-    /// makes FixedUpdate sensitivity disagree with Update/LateUpdate. Each look
-    /// behaviour therefore consumes mouse movement at most once per rendered
-    /// frame, while gamepad look continues to integrate every tick using dt.
-    /// </summary>
-    static Vector2 ReadLookDelta(float deltaTime, float stickSpeed, ref int lastMouseInputFrame)
+    static Vector2 ReadLookDelta(
+        float deltaTime,
+        float stickSpeed,
+        ref int lastMouseInputFrame)
     {
-        Vector2 delta = Vector2.zero;
+        Vector2 delta =
+            Vector2.zero;
 
 #if ENABLE_INPUT_SYSTEM
-        int frame = Time.frameCount;
-        if (lastMouseInputFrame != frame)
+        int frame =
+            Time.frameCount;
+
+        if (lastMouseInputFrame !=
+            frame)
         {
             if (Mouse.current != null)
-                delta += Mouse.current.delta.ReadValue();
+            {
+                delta +=
+                    Mouse.current.delta.ReadValue();
+            }
 
-            lastMouseInputFrame = frame;
+            lastMouseInputFrame =
+                frame;
         }
 
         if (Gamepad.current != null)
-            delta += Gamepad.current.rightStick.ReadValue() * stickSpeed * deltaTime;
+        {
+            delta +=
+                Gamepad.current.rightStick.ReadValue() *
+                stickSpeed *
+                deltaTime;
+        }
 
 #elif ENABLE_LEGACY_INPUT_MANAGER
-        // Legacy mouse axes are also rendered-frame values. Gate them exactly
-        // the same way so multiple FixedUpdate calls cannot reuse one delta.
-        int frame = Time.frameCount;
-        if (lastMouseInputFrame != frame)
+        int frame =
+            Time.frameCount;
+
+        if (lastMouseInputFrame !=
+            frame)
         {
-            delta = new Vector2(Input.GetAxisRaw("Mouse X"), Input.GetAxisRaw("Mouse Y"));
-            lastMouseInputFrame = frame;
+            delta =
+                new Vector2(
+                    Input.GetAxisRaw("Mouse X"),
+                    Input.GetAxisRaw("Mouse Y"));
+
+            lastMouseInputFrame =
+                frame;
         }
 #endif
 

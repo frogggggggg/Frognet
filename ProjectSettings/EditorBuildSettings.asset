@@ -5,15 +5,18 @@ EditorBuildSettings:
   m_ObjectHideFlags: 0
   serializedVersion: 2
   m_Scenes:
-  - enabled: 1
+  - enabled: 0
     path: Assets/FrogNetPackage/Scenes/StartMenu.unity
     guid: a0c117bcb66c7664c9de7e235b1546ef
   - enabled: 0
     path: Assets/FrogNetPackage/Scenes/NetworkLoad.unity
     guid: 8be6e83f9c5d2734fa914be282308ddb
-  - enabled: 1
+  - enabled: 0
     path: Assets/FrogNetPackage/Scenes/Main.unity
     guid: 99c9720ab356a0642a771bea13969a05
+  - enabled: 1
+    path: Assets/Viral/Viral.unity
+    guid: 24822c9a6c93eee4996f227fd6ff3632
   m_configObjects:
     com.unity.input.settings: {fileID: 11400000, guid: 45327b2371dcf7f44a2ca23045c0049a, type: 2}
     com.unity.input.settings.actions: {fileID: -944628639613478452, guid: d0705e9f14b5b784388e6d73fa2ebf8b, type: 3}

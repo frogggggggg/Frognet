@@ -3,14 +3,13 @@ using UnityEngine;
 /// <summary>
 /// Feeds impact ripples to a cell's material.
 ///
-/// The ripple itself lives in the shader, which displaces geometry and
-/// perturbs the normal from an expanding wave packet. This only records where
-/// and when something hit, and how hard.
+/// The shader owns the complete ripple lifetime and decay. This component only
+/// records where an impact happened, when it happened, and how strong it was.
+/// Impact positions are stored in renderer-local space so existing ripples move
+/// rigidly with a translating or rotating cell.
 ///
-/// Values go through a MaterialPropertyBlock rather than the material, so no
-/// material instance is leaked and cells sharing one material still ripple
-/// independently. That does drop the renderer out of SRP batching, which is a
-/// fair trade for a handful of cells.
+/// Values go through a MaterialPropertyBlock rather than the shared material,
+/// so cells sharing one material can still ripple independently.
 /// </summary>
 [RequireComponent(typeof(Renderer))]
 public class CellImpactRipples : MonoBehaviour
@@ -18,76 +17,110 @@ public class CellImpactRipples : MonoBehaviour
     /// <summary>Must match RIPPLE_COUNT in the shader.</summary>
     public const int MaxRipples = 4;
 
-    [Tooltip("Impact speed, in units per second, that counts as a full " +
-             "strength hit. Anything faster is clamped to 1.")]
+    [Tooltip("Impact speed, in units per second, that produces strength 1. " +
+             "Faster impacts are NOT clamped; for example, twice this speed " +
+             "produces strength 2.")]
     public float referenceSpeed = 8f;
 
-    [Tooltip("Seconds before a ripple is considered spent and its slot can be " +
-             "reused. Should outlast what Ripple Decay leaves visible.")]
-    public float lifetime = 3f;
+    static readonly int PointsId =
+        Shader.PropertyToID("_RipplePoints");
 
-    static readonly int PointsId = Shader.PropertyToID("_RipplePoints");
-    static readonly int ValuesId = Shader.PropertyToID("_RippleValues");
+    static readonly int ValuesId =
+        Shader.PropertyToID("_RippleValues");
 
-    readonly Vector4[] _points = new Vector4[MaxRipples];
-    readonly Vector4[] _values = new Vector4[MaxRipples];
+    readonly Vector4[] _points =
+        new Vector4[MaxRipples];
+
+    readonly Vector4[] _values =
+        new Vector4[MaxRipples];
 
     Renderer _renderer;
     MaterialPropertyBlock _block;
     int _next;
-    bool _dirty;
 
     void Awake()
     {
-        _renderer = GetComponent<Renderer>();
-        _block = new MaterialPropertyBlock();
-        _dirty = true;
+        _renderer =
+            GetComponent<Renderer>();
+
+        _block =
+            new MaterialPropertyBlock();
+
+        PushToRenderer();
     }
 
     /// <summary>
-    /// Start a ripple. Strength is normalised against referenceSpeed, so a
-    /// gentle touchdown barely registers and a fast one reads as a slap.
+    /// Starts a ripple.
+    ///
+    /// referenceSpeed is only a scale. Strength is deliberately NOT clamped:
+    /// impactSpeed == referenceSpeed gives strength 1,
+    /// impactSpeed == referenceSpeed * 2 gives strength 2, etc.
+    ///
+    /// The shader decides how long the ripple remains visible through
+    /// _RippleDecay. Slots are simply overwritten round-robin by later impacts.
     /// </summary>
-    public void AddImpact(Vector3 worldPoint, float impactSpeed)
+    public void AddImpact(
+        Vector3 worldPoint,
+        float impactSpeed)
     {
-        float strength = referenceSpeed > 0f
-            ? Mathf.Clamp01(impactSpeed / referenceSpeed)
-            : 1f;
+        float strength =
+            referenceSpeed > 0f
+                ? impactSpeed / referenceSpeed
+                : impactSpeed;
 
-        if (strength <= 0.001f) return;
+        if (strength <= 0f)
+            return;
 
-        // Round robin. Oldest slot is the one about to be overwritten anyway,
-        // so there is no need to search for a free one.
-        _points[_next] = new Vector4(worldPoint.x, worldPoint.y, worldPoint.z, Time.time);
-        _values[_next] = new Vector4(strength, 0f, 0f, 0f);
+        // Store the impact in the RENDERER'S local frame, not world space.
+        // From this point on the ripple belongs to the surface and follows any
+        // translation/rotation/Rigidbody motion of the cell automatically.
+        Transform surfaceTransform =
+            _renderer
+                ? _renderer.transform
+                : transform;
 
-        _next = (_next + 1) % MaxRipples;
-        _dirty = true;
+        Vector3 localPoint =
+            surfaceTransform.InverseTransformPoint(
+                worldPoint);
+
+        _points[_next] =
+            new Vector4(
+                localPoint.x,
+                localPoint.y,
+                localPoint.z,
+                Time.time);
+
+        _values[_next] =
+            new Vector4(
+                strength,
+                0f,
+                0f,
+                0f);
+
+        _next =
+            (_next + 1) %
+            MaxRipples;
+
+        PushToRenderer();
     }
 
-    void LateUpdate()
+    void PushToRenderer()
     {
-        // Retire spent ripples so their slots stop costing shader work, and so
-        // a stale one cannot reappear if _Time wraps on a long session.
-        for (int i = 0; i < MaxRipples; i++)
-        {
-            if (_values[i].x <= 0f) continue;
+        if (!_renderer)
+            return;
 
-            if (Time.time - _points[i].w > lifetime)
-            {
-                _values[i] = Vector4.zero;
-                _dirty = true;
-            }
-        }
+        _renderer.GetPropertyBlock(
+            _block);
 
-        if (!_dirty) return;
-        _dirty = false;
+        _block.SetVectorArray(
+            PointsId,
+            _points);
 
-        // Read, modify, write: clobbering the block would wipe anything else
-        // set on this renderer.
-        _renderer.GetPropertyBlock(_block);
-        _block.SetVectorArray(PointsId, _points);
-        _block.SetVectorArray(ValuesId, _values);
-        _renderer.SetPropertyBlock(_block);
+        _block.SetVectorArray(
+            ValuesId,
+            _values);
+
+        _renderer.SetPropertyBlock(
+            _block);
     }
 }

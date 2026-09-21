@@ -127,13 +127,19 @@ Material:
     - _ClearCoatMask: 0
     - _ClearCoatSmoothness: 0
     - _ColorSteps: 1
-    - _Cull: 1
+    - _Cull: 2
     - _Cutoff: 0.5
     - _Detail: 0.55
     - _DetailAlbedoMapScale: 1
+    - _DetailFadeEnd: 40
+    - _DetailFadeStart: 12
     - _DetailNormalMapScale: 1
     - _DetailStrength: 0
     - _Displace: 0.05
+    - _DistantBumpMultiplier: 0.18
+    - _DistantDetail: 0
+    - _DistantDisplacementMultiplier: 0.3
+    - _DistantTextureDetailMultiplier: 0.15
     - _DstBlend: 0
     - _DstBlendAlpha: 0
     - _EmissionIntensity: 1
@@ -171,6 +177,7 @@ Material:
     - _RimSteps: 2
     - _RippleAmplitude: 0.12
     - _RippleDecay: 1.5
+    - _RippleInitialRadius: 0.12
     - _RippleSpeed: 2.5
     - _RippleWavelength: 0.7
     - _RippleWidth: 0.9

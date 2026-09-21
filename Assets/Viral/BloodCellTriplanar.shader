@@ -24,6 +24,17 @@ Shader "Custom/BloodCellTriplanar"
         _TessMax ("Max Subdivision", Range(1,64)) = 24
         _PhongStrength ("Phong Smoothing", Range(0,1)) = 0.6
 
+        [Header(Distance_Stability)]
+        _DetailFadeStart ("Fine Detail Fade Start", Float) = 12
+        _DetailFadeEnd ("Fine Detail Fade End", Float) = 40
+        _DistantDetail ("Distant Fine Detail", Range(0,1)) = 0.0
+        _DistantBumpMultiplier ("Distant Bump Multiplier", Range(0,1)) = 0.18
+        _DistantDisplacementMultiplier ("Distant Displacement Multiplier", Range(0,1)) = 0.30
+        _DistantTextureDetailMultiplier ("Distant Texture Detail Multiplier", Range(0,1)) = 0.15
+
+        [Header(Rendering_Stability)]
+        [Enum(UnityEngine.Rendering.CullMode)] _Cull ("Cull Mode", Float) = 2
+
         [Header(Wetness)]
         _Glossiness ("Smoothness", Range(0,1)) = 0.70
         _GlossVariation ("Smoothness Variation", Range(0,0.5)) = 0.12
@@ -45,9 +56,10 @@ Shader "Custom/BloodCellTriplanar"
         _SpecThreshold ("Specular Cutoff", Range(0,1)) = 0.55
 
         [Header(Impact Ripple)]
-        _RippleAmplitude ("Ripple Amplitude", Range(0,1)) = 0.12
+        _RippleAmplitude ("Ripple Amplitude", Float) = 0.12
         _RippleWavelength ("Ripple Wavelength", Float) = 0.7
         _RippleSpeed ("Ripple Speed", Float) = 2.5
+        _RippleInitialRadius ("Initial Impact Radius", Float) = 0.12
         _RippleWidth ("Ripple Width", Float) = 0.9
         _RippleDecay ("Ripple Decay", Float) = 1.5
 
@@ -96,6 +108,12 @@ Shader "Custom/BloodCellTriplanar"
             float  _TessDensity;
             float  _TessMax;
             float  _PhongStrength;
+            float  _DetailFadeStart;
+            float  _DetailFadeEnd;
+            float  _DistantDetail;
+            float  _DistantBumpMultiplier;
+            float  _DistantDisplacementMultiplier;
+            float  _DistantTextureDetailMultiplier;
             float  _Glossiness;
             float  _GlossVariation;
             float  _OcclusionStrength;
@@ -114,6 +132,7 @@ Shader "Custom/BloodCellTriplanar"
             float  _RippleAmplitude;
             float  _RippleWavelength;
             float  _RippleSpeed;
+            float  _RippleInitialRadius;
             float  _RippleWidth;
             float  _RippleDecay;
         CBUFFER_END
@@ -123,7 +142,7 @@ Shader "Custom/BloodCellTriplanar"
         // Properties block does not declare drops the shader out of SRP
         // batching. These are written per renderer from a MaterialPropertyBlock.
         #define RIPPLE_COUNT 4
-        float4 _RipplePoints[RIPPLE_COUNT];   // xyz world point, w start time
+        float4 _RipplePoints[RIPPLE_COUNT];   // xyz object-local impact point, w start time
         float4 _RippleValues[RIPPLE_COUNT];   // x strength
 
         TEXTURE2D(_MainTex);
@@ -154,12 +173,20 @@ Shader "Custom/BloodCellTriplanar"
         // The phase is driven by the height itself, so neighbouring lumps fall
         // out of sync. At variation 0 the whole surface breathes as one, which
         // reads as the object scaling rather than as a living membrane.
-        float4 HeightD(float3 p)
+        float4 HeightDWithDetail(float3 p, float detailAmount)
         {
-            float4 n  = FBM3D(p * _NoiseScale, _Gain, _Lacunarity, _Detail);
-            float4 hd = float4(n.x, n.yzw * _NoiseScale);   // chain rule
+            float4 n  = FBM3D(
+                p * _NoiseScale,
+                _Gain,
+                _Lacunarity,
+                saturate(detailAmount));
 
-            if (_PulseAmount <= 0.0) return hd;
+            float4 hd = float4(
+                n.x,
+                n.yzw * _NoiseScale);   // chain rule
+
+            if (_PulseAmount <= 0.0)
+                return hd;
 
             float h        = hd.x;
             float centered = h - 0.5;
@@ -167,15 +194,83 @@ Shader "Custom/BloodCellTriplanar"
             float k        = 1.0 + _PulseAmount * sin(phase);
             float dkdh     = _PulseAmount * cos(phase) * TWO_PI * _PulseVariation;
 
-            // d/dp of (0.5 + centered * k(h)) is (k + centered * dk/dh) * dh/dp.
-            // The phase depends only on h, so the whole thing stays a scalar
-            // multiple of the base gradient -- exact, and no extra noise taps.
-            return float4(0.5 + centered * k, hd.yzw * (k + centered * dkdh));
+            return float4(
+                0.5 + centered * k,
+                hd.yzw * (k + centered * dkdh));
+        }
+
+        float4 HeightD(float3 p)
+        {
+            return HeightDWithDetail(
+                p,
+                _Detail);
         }
 
         float Height(float3 p)
         {
             return HeightD(p).x;
+        }
+
+        // 1 close to the camera, 0 after Detail Fade End.
+        // This is deliberately world-distance based so it works in vertex,
+        // domain and fragment stages alike; screen derivatives are unavailable
+        // in the tessellation domain shader.
+        float SurfaceDetailFade(float3 positionWS)
+        {
+            float startDistance =
+                max(0.0, _DetailFadeStart);
+
+            float endDistance =
+                max(
+                    startDistance + 0.001,
+                    _DetailFadeEnd);
+
+            float distanceToCamera =
+                distance(
+                    positionWS,
+                    GetCameraPositionWS());
+
+            return 1.0 -
+                smoothstep(
+                    startDistance,
+                    endDistance,
+                    distanceToCamera);
+        }
+
+        float SurfaceDetailAmount(float3 positionWS)
+        {
+            float fade =
+                SurfaceDetailFade(
+                    positionWS);
+
+            return lerp(
+                _DistantDetail,
+                _Detail,
+                fade);
+        }
+
+        float SurfaceBumpMultiplier(float3 positionWS)
+        {
+            return lerp(
+                _DistantBumpMultiplier,
+                1.0,
+                SurfaceDetailFade(positionWS));
+        }
+
+        float SurfaceDisplacementMultiplier(float3 positionWS)
+        {
+            return lerp(
+                _DistantDisplacementMultiplier,
+                1.0,
+                SurfaceDetailFade(positionWS));
+        }
+
+        float SurfaceTextureDetailMultiplier(float3 positionWS)
+        {
+            return lerp(
+                _DistantTextureDetailMultiplier,
+                1.0,
+                SurfaceDetailFade(positionWS));
         }
 
         // ---------------------------------------------------------------
@@ -218,31 +313,39 @@ Shader "Custom/BloodCellTriplanar"
         #endif
         }
 
-        // Impact points arrive in world space so the C# side does not need to
-        // know which mapping mode the material is in.
-        float3 WorldToMapPoint(float3 worldPos)
+        // Impact points are captured ONCE in the renderer's object-local space.
+        // That makes the ripple physically belong to the cell: translating or
+        // rotating the cell later carries the old impact with it exactly like a
+        // mark painted on the mesh.
+        //
+        // Object mapping uses the same scale-corrected local coordinates as the
+        // surface noise. World mapping converts the stored LOCAL point through
+        // the object's CURRENT transform, so even world-mapped materials keep
+        // the impact attached to a moving cell.
+        float3 RipplePointToMap(float3 localImpactPoint)
         {
         #ifdef _SPACE_WORLD
-            return worldPos;
+            return TransformObjectToWorld(localImpactPoint);
         #else
-            float3 objectPos = mul(unity_WorldToObject, float4(worldPos, 1.0)).xyz;
-            return objectPos * ObjectScale();
+            return localImpactPoint * ObjectScale();
         #endif
         }
 
-        // Expanding ring from each impact, in world height units, with its
-        // exact gradient so the lighting shows the ripple and not just the
-        // silhouette.
+        // Causal expanding impact wave.
         //
-        // The wave is a packet rather than an endless sine: amplitude peaks at
-        // the wavefront and falls away either side of it, so what travels
-        // outward is a ring rather than the whole surface oscillating at once.
+        // Nothing outside the current wavefront is allowed to move. The old
+        // Gaussian packet had a non-zero tail in front of the ring, so a large
+        // Ripple Width could make the whole cell react immediately.
+        //
+        // "behind" is zero at the travelling front and positive only after the
+        // wave has physically reached a point.
         float Ripple(float3 mapPos, out float3 gradient)
         {
             float total = 0.0;
             gradient = float3(0.0, 0.0, 0.0);
 
-            float k = TWO_PI / max(_RippleWavelength, 1e-3);
+            float wavelength = max(_RippleWavelength, 1e-3);
+            float k = TWO_PI / wavelength;
             float widthSq = max(_RippleWidth * _RippleWidth, 1e-4);
 
             [unroll]
@@ -250,28 +353,85 @@ Shader "Custom/BloodCellTriplanar"
             {
                 float strength = _RippleValues[i].x;
                 float age = _Time.y - _RipplePoints[i].w;
-                if (strength <= 0.0 || age < 0.0) continue;
 
-                float3 offset = mapPos - WorldToMapPoint(_RipplePoints[i].xyz);
-                float dist = max(length(offset), 1e-4);
+                if (strength <= 0.0 || age < 0.0)
+                    continue;
 
-                // Distance behind the wavefront; zero at the ring itself.
-                float x = dist - age * _RippleSpeed;
+                float3 offset =
+                    mapPos -
+                    RipplePointToMap(_RipplePoints[i].xyz);
 
-                float envelope = exp(-(x * x) / widthSq);
-                float amplitude = strength * _RippleAmplitude * exp(-age * _RippleDecay);
+                float rawDist = length(offset);
+                float dist = max(rawDist, 1e-4);
 
-                float sine = sin(k * x);
-                float cosine = cos(k * x);
+                // Start with a small visible contact patch rather than a
+                // mathematically zero-radius ring. On a tessellated surface this
+                // avoids waiting for the travelling front to reach the nearest
+                // generated vertex before anything can be seen.
+                float frontRadius =
+                    max(0.0, _RippleInitialRadius) +
+                    age *
+                    _RippleSpeed;
 
-                total += amplitude * sine * envelope;
+                // Positive only where the travelling wave has already arrived.
+                float behind =
+                    frontRadius -
+                    rawDist;
 
-                // d/dx of sin(kx) * exp(-x^2/w^2), chained onto d(dist)/dp,
-                // which is simply the unit vector pointing away from the impact.
-                float slope = k * cosine * envelope
-                            - sine * envelope * (2.0 * x / widthSq);
+                // Strict causal boundary is still preserved beyond the small
+                // initial contact radius.
+                if (behind < 0.0)
+                    continue;
 
-                gradient += amplitude * slope * (offset / dist);
+                float envelope =
+                    exp(
+                        -(behind * behind) /
+                        widthSq);
+
+                float amplitude =
+                    strength *
+                    _RippleAmplitude *
+                    exp(
+                        -age *
+                        _RippleDecay);
+
+                float phase =
+                    k *
+                    behind;
+
+                float cosine =
+                    cos(phase);
+
+                float sine =
+                    sin(phase);
+
+                // A cosine starts with a crest at the impact/wavefront instead
+                // of requiring half a cycle before anything visibly happens.
+                float wave =
+                    cosine *
+                    envelope;
+
+                total +=
+                    amplitude *
+                    wave;
+
+                // wave(b) = cos(kb) * exp(-b^2/w^2)
+                // b = frontRadius - distance
+                //
+                // d(b)/d(position) = -offset / distance. Combining that with
+                // d(wave)/db gives the outward gradient below.
+                float slope =
+                    (
+                        k * sine +
+                        cosine *
+                        (2.0 * behind / widthSq)
+                    ) *
+                    envelope;
+
+                gradient +=
+                    amplitude *
+                    slope *
+                    (offset / dist);
             }
 
             return total;
@@ -294,13 +454,36 @@ Shader "Custom/BloodCellTriplanar"
         // scale, where an object-space normal is not perpendicular.
         float3 DisplaceWS(float3 positionWS, float3 normalWS, float3 mapPos)
         {
-            // No early-out on _Displace any more: a ripple has to show even on
-            // a material with no surface relief at all.
-            float3 rippleGradient;
-            float offset = (Height(mapPos) - 0.5) * _Displace
-                         + Ripple(mapPos, rippleGradient);
+            // Fine procedural relief becomes sub-pixel at distance. Continuing
+            // to displace full-strength there makes tessellated vertices crawl
+            // as the camera moves, so progressively simplify the base relief.
+            float4 hd =
+                HeightDWithDetail(
+                    mapPos,
+                    SurfaceDetailAmount(positionWS));
 
-            return positionWS + normalWS * offset;
+            float displacementMultiplier =
+                SurfaceDisplacementMultiplier(
+                    positionWS);
+
+            // Ripples stay full-strength. They are gameplay feedback rather
+            // than static micro-detail and should remain readable.
+            float3 rippleGradient;
+            float ripple =
+                Ripple(
+                    mapPos,
+                    rippleGradient);
+
+            float offset =
+                (hd.x - 0.5) *
+                _Displace *
+                displacementMultiplier +
+                ripple;
+
+            return
+                positionWS +
+                normalWS *
+                offset;
         }
 
         // ---------------------------------------------------------------
@@ -344,14 +527,13 @@ Shader "Custom/BloodCellTriplanar"
             return clamp(_TessDensity * len / max(dist, 0.001), 1.0, _TessMax);
         }
 
-        bool PointOutOfFrustum(float4 positionCS, float bias)
-        {
-            float3 c = positionCS.xyz;
-            float  w = positionCS.w;
-            return any(c < float3(-w - bias, -w - bias,
-                                  -w * UNITY_RAW_FAR_CLIP_VALUE - bias))
-                || any(c > float3( w + bias,  w + bias,  w + bias));
-        }
+        // Do NOT manually cull tessellation patches here.
+        //
+        // The old code rejected a patch when all three vertices were outside
+        // *some* frustum plane, even when they were outside different planes.
+        // A triangle spanning the visible frustum could therefore disappear at
+        // certain view angles. Displacement/ripples also make source-triangle
+        // clip tests unsafe. Let normal GPU clipping handle visibility.
 
         TessFactors PatchConstant(InputPatch<TessControlPoint, 3> patch)
         {
@@ -360,18 +542,6 @@ Shader "Custom/BloodCellTriplanar"
             float3 p2 = TransformObjectToWorld(patch[2].positionOS.xyz);
 
             TessFactors f;
-
-            // Displacement pushes geometry outside the source triangle, so the
-            // cull bias must cover it or lumps pop in at the screen edges.
-            float bias = _Displace + 0.01;
-            if (PointOutOfFrustum(TransformWorldToHClip(p0), bias) &&
-                PointOutOfFrustum(TransformWorldToHClip(p1), bias) &&
-                PointOutOfFrustum(TransformWorldToHClip(p2), bias))
-            {
-                f.edge[0] = f.edge[1] = f.edge[2] = 0;
-                f.inside = 0;
-                return f;
-            }
 
             // Each edge factor is shared with the neighbouring triangle, so
             // both sides must compute the same value or cracks open along it.
@@ -433,7 +603,7 @@ Shader "Custom/BloodCellTriplanar"
             // copies depth after the opaque pass.
             ZWrite On
             ZTest LEqual
-            Cull Back
+            Cull [_Cull]
 
             HLSLPROGRAM
             #pragma vertex vert
@@ -550,10 +720,21 @@ Shader "Custom/BloodCellTriplanar"
                 float3 p         = input.mapPos;
                 float3 geoNormal = normalize(input.normalWS);
 
-                // One fBm evaluation returns both height and exact gradient,
-                // replacing the four taps a finite difference needed.
-                float4 hd = HeightD(p);
-                float  h  = hd.x;
+                float detailFade =
+                    SurfaceDetailFade(
+                        input.positionWS);
+
+                // Fade high-frequency fBm before it becomes smaller than a
+                // pixel. This removes distant crawling/shimmer while preserving
+                // the broad cell shape.
+                float4 hd =
+                    HeightDWithDetail(
+                        p,
+                        SurfaceDetailAmount(
+                            input.positionWS));
+
+                float h =
+                    hd.x;
 
                 // Ripple gradient is already in world height per unit, so it
                 // is added at full weight rather than through _BumpStrength --
@@ -564,7 +745,12 @@ Shader "Custom/BloodCellTriplanar"
 
                 // Project onto the tangent plane so the bump slides the normal
                 // sideways instead of inflating it.
-                float3 gradWS = MapDirToWorld(hd.yzw * _BumpStrength + rippleGradient);
+                float3 gradWS =
+                    MapDirToWorld(
+                        hd.yzw *
+                        _BumpStrength *
+                        SurfaceBumpMultiplier(input.positionWS) +
+                        rippleGradient);
                 float3 tangentialGrad = gradWS - geoNormal * dot(gradWS, geoNormal);
                 float3 normalWS = normalize(geoNormal - tangentialGrad);
 
@@ -585,7 +771,16 @@ Shader "Custom/BloodCellTriplanar"
                     half3 detail = TriplanarSample(
                         TEXTURE2D_ARGS(_MainTex, sampler_MainTex),
                         p, WorldDirToMap(geoNormal), _BlendSharpness).rgb;
-                    albedo *= lerp(half3(1,1,1), detail, _DetailStrength);
+                    float visibleDetailStrength =
+                        _DetailStrength *
+                        SurfaceTextureDetailMultiplier(
+                            input.positionWS);
+
+                    albedo *=
+                        lerp(
+                            half3(1,1,1),
+                            detail,
+                            visibleDetailStrength);
                 }
 
                 // Cheap subsurface: rim-weighted glow, strongest where thin.
@@ -641,7 +836,7 @@ Shader "Custom/BloodCellTriplanar"
             ZWrite On
             ZTest LEqual
             ColorMask 0
-            Cull Back
+            Cull [_Cull]
 
             HLSLPROGRAM
             #pragma vertex vert
@@ -721,7 +916,7 @@ Shader "Custom/BloodCellTriplanar"
 
             ZWrite On
             ColorMask R
-            Cull Back
+            Cull [_Cull]
 
             HLSLPROGRAM
             #pragma vertex vert
@@ -785,7 +980,7 @@ Shader "Custom/BloodCellTriplanar"
 
             ZWrite On
             ZTest LEqual
-            Cull Back
+            Cull [_Cull]
 
             HLSLPROGRAM
             #pragma vertex vert
@@ -830,12 +1025,18 @@ Shader "Custom/BloodCellTriplanar"
                 float3 positionWS = DisplaceWS(basePositionWS, geoNormalWS, mapPos);
 
                 // Also match the procedural surface normal used by ForwardLit.
-                float4 hd = HeightD(mapPos);
+                float4 hd =
+                    HeightDWithDetail(
+                        mapPos,
+                        SurfaceDetailAmount(positionWS));
                 float3 rippleGradient;
                 Ripple(mapPos, rippleGradient);
 
                 float3 gradWS = MapDirToWorld(
-                    hd.yzw * _BumpStrength + rippleGradient);
+                    hd.yzw *
+                    _BumpStrength *
+                    SurfaceBumpMultiplier(positionWS) +
+                    rippleGradient);
 
                 float3 tangentialGrad =
                     gradWS - geoNormalWS * dot(gradWS, geoNormalWS);
@@ -875,7 +1076,7 @@ Shader "Custom/BloodCellTriplanar"
 
             ZWrite On
             ZTest LEqual
-            Cull Back
+            Cull [_Cull]
 
             HLSLPROGRAM
             #pragma vertex vert
@@ -918,12 +1119,18 @@ Shader "Custom/BloodCellTriplanar"
 
                 float3 positionWS = DisplaceWS(basePositionWS, geoNormalWS, mapPos);
 
-                float4 hd = HeightD(mapPos);
+                float4 hd =
+                    HeightDWithDetail(
+                        mapPos,
+                        SurfaceDetailAmount(positionWS));
                 float3 rippleGradient;
                 Ripple(mapPos, rippleGradient);
 
                 float3 gradWS = MapDirToWorld(
-                    hd.yzw * _BumpStrength + rippleGradient);
+                    hd.yzw *
+                    _BumpStrength *
+                    SurfaceBumpMultiplier(positionWS) +
+                    rippleGradient);
 
                 float3 tangentialGrad =
                     gradWS - geoNormalWS * dot(gradWS, geoNormalWS);

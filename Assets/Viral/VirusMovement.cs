@@ -139,6 +139,15 @@ public class VirusMovement : MonoBehaviour
     public float walkSpeed = 4f;
     public float jumpForce = 8f;
 
+    [Header("Flight Boost")]
+    [Tooltip("Hold Space while Flying to thrust straight forward at this multiple of Fly Speed.")]
+    [Min(1f)]
+    public float flightBoostSpeedMultiplier = 1.75f;
+
+    [Tooltip("Acceleration multiplier while Space boost is held.")]
+    [Min(0f)]
+    public float flightBoostAccelerationMultiplier = 2f;
+
     [Header("Ground Walk Accel / Decel")]
     [Tooltip("When off, grounded movement uses Walk Speed immediately like before. When on, grounded speed ramps using the AnimationCurve graphs below.")]
     public bool useWalkSpeedCurves = false;
@@ -220,7 +229,18 @@ public class VirusMovement : MonoBehaviour
     {
         get
         {
-            if (state == State.Flying) return Mathf.Max(flySpeed, 0f);
+            if (state == State.Flying)
+            {
+                float multiplier =
+                    _flightBoostActive
+                        ? Mathf.Max(1f, flightBoostSpeedMultiplier)
+                        : 1f;
+
+                return Mathf.Max(
+                    flySpeed * multiplier,
+                    0f);
+            }
+
             if (state == State.Grounded) return Mathf.Max(walkSpeed, 0f);
             return 0f;
         }
@@ -233,6 +253,16 @@ public class VirusMovement : MonoBehaviour
 
     /// <summary>True while player locomotion/input is locked in Focus Mode.</summary>
     public bool IsFocusMode => state == State.FocusMode;
+
+    /// <summary>
+    /// True whenever the virus is physically attached to the current surface.
+    /// Focus Mode deliberately keeps the Grounded attachment model; it only
+    /// removes player locomotion/input.
+    /// </summary>
+    public bool IsSurfaceAttached =>
+        state == State.Grounded ||
+        state == State.FocusMode ||
+        _focusEntryPending;
 
     /// <summary>Outward normal of the graph triangle under the virus.</summary>
     public Vector3 surfaceNormal { get; private set; } = Vector3.up;
@@ -270,6 +300,7 @@ public class VirusMovement : MonoBehaviour
     // as the projection settled with no input at all.
     Vector3 _graphPosition;
     Vector3 _graphForward = Vector3.forward;
+    GraphNode _groundNode;
     GraphMask _graphMask = GraphMask.everything;
 
     Rigidbody _rb;
@@ -279,6 +310,15 @@ public class VirusMovement : MonoBehaviour
     float _landingLockedUntil;
     float _moveLockedUntil;
     float _groundedSpeed;
+    bool _flightBoostActive;
+
+    // Rope/tether systems can temporarily let Rigidbody torque own flight
+    // rotation. Normal VirusMovement steering resumes cleanly afterward.
+    bool _externalFlightRotationControl;
+    RigidbodyConstraints _constraintsBeforeExternalFlightRotation;
+
+    public bool ExternalFlightRotationControl =>
+        _externalFlightRotationControl;
 
     // Desired crawl speed, separate from _groundedSpeed which measures the
     // actual movement achieved across the graph.
@@ -351,11 +391,32 @@ public class VirusMovement : MonoBehaviour
 
     void LateUpdate()
     {
+        // A moving/interpolated planet may receive its final render-frame pose
+        // after Update. Rebuild our surface-attached position again here so
+        // Grounded and FocusMode behave like children of the cell rather than
+        // trailing it by one rendered frame.
+        if (IsSurfaceAttached)
+        {
+            RefreshSurfaceAttachmentPose();
+
+            // Focus has no steering transition to preserve, so match the
+            // surface-relative orientation exactly. This prevents visible lag
+            // when a planet rotates beneath a focused virus.
+            if (state == State.FocusMode ||
+                _focusEntryPending)
+            {
+                SnapToSurfaceRotation();
+            }
+        }
+
         UpdateFocusBodyAnimation(Time.deltaTime);
     }
 
     void Update()
     {
+        if (state != State.Flying)
+            _flightBoostActive = false;
+
         if (!_camera && Camera.main) _camera = Camera.main.transform;
 
         // Keep the prompt tied to locomotion state even if another system
@@ -377,20 +438,29 @@ public class VirusMovement : MonoBehaviour
                 _rb.angularVelocity = Vector3.zero;
             }
 
+            // Focus entry is still physically Grounded. Keep rebuilding the
+            // world pose from graph-local coordinates while input is locked.
+            RefreshSurfaceAttachmentPose();
+            ApplyRotation(Time.deltaTime);
+
             if (Time.time >= _focusEntryCompleteAt)
                 CompleteFocusModeEntry();
 
             return;
         }
 
-        // Focus Mode owns the player completely. No movement input is read, no
-        // jump can queue, GroundedStep does not run, and rotation is left alone.
-        // Escape is the only locomotion-script input still listened for.
+        // Focus Mode keeps the Grounded attachment model but strips away player
+        // movement, jumping and steering input. The planet is still allowed to
+        // translate/rotate underneath us and carries the virus with it.
         if (state == State.FocusMode)
         {
             _move = Vector2.zero;
             _jumpQueued = false;
             _groundedSpeed = 0f;
+            ResetGroundWalkSpeedProfile();
+
+            RefreshSurfaceAttachmentPose();
+            ApplyRotation(Time.deltaTime);
 
             if (ReadFocusExitPressed())
                 ExitFocusMode();
@@ -433,16 +503,47 @@ public class VirusMovement : MonoBehaviour
 
     void FlyStep(float dt)
     {
-        Vector3 forward = _camera ? _camera.forward : Vector3.forward;
+        Vector3 forward =
+            _camera
+                ? _camera.forward
+                : Vector3.forward;
 
-        // Forward thrust only: no strafe, no reverse, no vertical. Steering is
-        // done by aiming the camera. Releasing the key leaves a zero target,
-        // which the coast rate eases toward, so no separate brake is needed.
-        Vector3 wish = forward * Mathf.Max(0f, _move.y);
+        _flightBoostActive =
+            ReadBoostHeld();
 
-        Vector3 velocity = _rb.linearVelocity;
-        Vector3 target = wish * flySpeed;
-        Vector3 delta = target - velocity;
+        // W/stick still provides normal forward thrust. Space is an explicit
+        // forward boost while Flying, so it also supplies full forward thrust
+        // even if W is not currently held.
+        float forwardInput =
+            Mathf.Max(
+                0f,
+                _move.y);
+
+        if (_flightBoostActive)
+            forwardInput = 1f;
+
+        Vector3 wish =
+            forward *
+            forwardInput;
+
+        float targetSpeed =
+            flySpeed *
+            (_flightBoostActive
+                ? Mathf.Max(
+                    1f,
+                    flightBoostSpeedMultiplier)
+                : 1f);
+
+        Vector3 velocity =
+            _rb.linearVelocity;
+
+        Vector3 target =
+            wish *
+            targetSpeed;
+
+        Vector3 delta =
+            target -
+            velocity;
 
         // How much the change being asked for fights the motion already there:
         // 0 when the two agree, 1 when it is straight against it.
@@ -469,7 +570,20 @@ public class VirusMovement : MonoBehaviour
             ? flyAcceleration * (1f + opposition * boost)
             : coastDeceleration;
 
-        _rb.linearVelocity = Vector3.MoveTowards(velocity, target, acceleration * dt);
+        if (_flightBoostActive &&
+            thrusting)
+        {
+            acceleration *=
+                Mathf.Max(
+                    0f,
+                    flightBoostAccelerationMultiplier);
+        }
+
+        _rb.linearVelocity =
+            Vector3.MoveTowards(
+                velocity,
+                target,
+                acceleration * dt);
 
         // Aim only while actually thrusting. Following velocity instead meant
         // the virus kept slewing around as it coasted to a stop, and velocity
@@ -479,10 +593,15 @@ public class VirusMovement : MonoBehaviour
         // the degenerate case: heading is the camera's forward, which is always
         // perpendicular to the camera's up, so the roll reference never goes
         // parallel to it and the orientation never snaps.
-        if (_move.y > 0.01f)
+        if (!_externalFlightRotationControl &&
+            _move.y > 0.01f)
         {
-            _targetRotation = LeadAxisRotation(forward.normalized,
-                                               _camera ? _camera.up : Vector3.up);
+            _targetRotation =
+                LeadAxisRotation(
+                    forward.normalized,
+                    _camera
+                        ? _camera.up
+                        : Vector3.up);
         }
 
         // With no body child the root transform is the visual, and the root is
@@ -490,10 +609,14 @@ public class VirusMovement : MonoBehaviour
         // from Update as well makes the two fight, which is the flying jitter.
         // MoveRotation feeds the rotation through physics instead, so
         // interpolation smooths it between steps rather than undoing it.
-        if (!body)
+        if (!body &&
+            !_externalFlightRotationControl)
         {
-            _rb.MoveRotation(Quaternion.Slerp(_rb.rotation, _targetRotation,
-                                              RotationWeight(dt)));
+            _rb.MoveRotation(
+                Quaternion.Slerp(
+                    _rb.rotation,
+                    _targetRotation,
+                    RotationWeight(dt)));
         }
     }
 
@@ -659,9 +782,10 @@ public class VirusMovement : MonoBehaviour
 
         Vector3 previousGraphPosition = _graphPosition;
         _graphPosition = nearest.position;
+        _groundNode = nearest.node;
 
-        Vector3 smoothedPosition = SmoothSurface(cellSpace, nearest.node,
-                                                 nearest.position, up,
+        Vector3 smoothedPosition = SmoothSurface(cellSpace, _groundNode,
+                                                 _graphPosition, up,
                                                  out Vector3 smoothedNormal);
         surfaceNormal = smoothedNormal;
 
@@ -699,6 +823,81 @@ public class VirusMovement : MonoBehaviour
         _targetRotation = Quaternion.LookRotation(heading, surfaceNormal);
 
         transform.position = GraphToWorld(smoothedPosition) + surfaceNormal * hoverHeight;
+    }
+
+    /// <summary>
+    /// Rebuild the current surface pose from the authoritative graph-local
+    /// position and forward direction without accepting ANY locomotion input.
+    ///
+    /// This is the part of Grounded that FocusMode still needs. Because the
+    /// graph coordinates are local to a moving cell, converting them through
+    /// cellSpace's CURRENT transform makes the virus ride translation and
+    /// rotation exactly with that surface.
+    /// </summary>
+    void RefreshSurfaceAttachmentPose()
+    {
+        if (_groundNode == null)
+            return;
+
+        Vector3 smoothedPosition =
+            SmoothSurface(
+                cellSpace,
+                _groundNode,
+                _graphPosition,
+                surfaceNormal,
+                out Vector3 attachedNormal);
+
+        surfaceNormal =
+            attachedNormal;
+
+        Vector3 heading =
+            Vector3.ProjectOnPlane(
+                GraphDirToWorld(
+                    _graphForward),
+                surfaceNormal);
+
+        if (heading.sqrMagnitude < 1e-4f)
+            heading =
+                Vector3.ProjectOnPlane(
+                    transform.forward,
+                    surfaceNormal);
+
+        if (heading.sqrMagnitude < 1e-4f)
+            heading =
+                AnyPerpendicular(
+                    surfaceNormal);
+
+        heading.Normalize();
+
+        // Keep forward stored in graph/local space so it rotates WITH the cell.
+        _graphForward =
+            WorldDirToGraph(
+                heading);
+
+        _targetRotation =
+            Quaternion.LookRotation(
+                heading,
+                surfaceNormal);
+
+        transform.position =
+            GraphToWorld(
+                smoothedPosition) +
+            surfaceNormal *
+                hoverHeight;
+    }
+
+    void SnapToSurfaceRotation()
+    {
+        if (body)
+        {
+            body.rotation =
+                _targetRotation;
+        }
+        else
+        {
+            transform.rotation =
+                _targetRotation;
+        }
     }
 
     /// <summary>
@@ -996,6 +1195,65 @@ public class VirusMovement : MonoBehaviour
             EnterFocusMode();
     }
 
+    /// <summary>
+    /// Temporarily gives an external physics system (for example a rope) control
+    /// of the player's flight rotation.
+    ///
+    /// While enabled:
+    /// - Rigidbody rotational constraints are released.
+    /// - normal flight MoveRotation steering is suspended.
+    /// - child visual rotation steering is suspended.
+    ///
+    /// When released, the current physical orientation becomes the new normal
+    /// steering orientation, so control returns without snapping.
+    /// </summary>
+    public void SetExternalFlightRotationControl(
+        bool enabled)
+    {
+        if (!_rb)
+            return;
+
+        if (enabled)
+        {
+            if (_externalFlightRotationControl)
+                return;
+
+            if (state != State.Flying)
+                return;
+
+            _constraintsBeforeExternalFlightRotation =
+                _rb.constraints;
+
+            _rb.constraints =
+                _rb.constraints &
+                ~RigidbodyConstraints.FreezeRotation;
+
+            _externalFlightRotationControl =
+                true;
+
+            return;
+        }
+
+        if (!_externalFlightRotationControl)
+            return;
+
+        _externalFlightRotationControl =
+            false;
+
+        // Preserve whatever physical orientation the rope produced as the
+        // starting point for ordinary flight steering.
+        _targetRotation =
+            body
+                ? body.rotation
+                : _rb.rotation;
+
+        _rb.angularVelocity =
+            Vector3.zero;
+
+        _rb.constraints =
+            _constraintsBeforeExternalFlightRotation;
+    }
+
     // -----------------------------------------------------------------------
     // State changes
     // -----------------------------------------------------------------------
@@ -1018,10 +1276,12 @@ public class VirusMovement : MonoBehaviour
         // stale binding would convert the next query through the wrong cell.
         cell = null;
         cellSpace = null;
+        _groundNode = null;
         _graphMask = GraphMask.everything;
 
         // Reassert ALL physics invariants required for flight. Focus visuals
         // are completely separate from this Transform/Rigidbody.
+        _externalFlightRotationControl = false;
         _rb.isKinematic = false;
         _rb.useGravity = false;
         _rb.constraints = RigidbodyConstraints.FreezeRotation;
@@ -1086,9 +1346,10 @@ public class VirusMovement : MonoBehaviour
         // Seed the normal from the contact so NodeNormal has a correct side to
         // agree with; after this it carries itself from triangle to triangle.
         _graphPosition = nearest.position;
+        _groundNode = nearest.node;
 
-        Vector3 landedPosition = SmoothSurface(space, nearest.node,
-                                               nearest.position, up,
+        Vector3 landedPosition = SmoothSurface(space, _groundNode,
+                                               _graphPosition, up,
                                                out Vector3 landedNormal);
         surfaceNormal = landedNormal;
 
@@ -1156,6 +1417,12 @@ public class VirusMovement : MonoBehaviour
     /// </summary>
     void ApplyRotation(float dt)
     {
+        if (_externalFlightRotationControl &&
+            state == State.Flying)
+        {
+            return;
+        }
+
         float t = RotationWeight(dt);
 
         if (body)
@@ -1166,9 +1433,10 @@ public class VirusMovement : MonoBehaviour
             return;
         }
 
-        if (state == State.Grounded)
+        if (IsSurfaceAttached)
         {
-            // Kinematic while crawling, so nothing else writes the transform.
+            // Kinematic while surface-attached, so nothing in physics owns this
+            // rotation. FocusMode remains Grounded in this physical sense.
             transform.rotation = Quaternion.Slerp(transform.rotation, _targetRotation, t);
         }
 
@@ -1522,6 +1790,22 @@ public class VirusMovement : MonoBehaviour
         return Vector2.ClampMagnitude(value, 1f);
 #else
         return new Vector2(Input.GetAxisRaw("Horizontal"), Input.GetAxisRaw("Vertical"));
+#endif
+    }
+
+    static bool ReadBoostHeld()
+    {
+#if ENABLE_INPUT_SYSTEM
+        if (Keyboard.current != null &&
+            Keyboard.current.spaceKey.isPressed)
+            return true;
+
+        return Gamepad.current != null &&
+               Gamepad.current.buttonSouth.isPressed;
+#elif ENABLE_LEGACY_INPUT_MANAGER
+        return Input.GetKey(KeyCode.Space);
+#else
+        return false;
 #endif
     }
 

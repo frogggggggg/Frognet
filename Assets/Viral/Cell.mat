@@ -35,7 +35,7 @@ Material:
   stringTagMap: {}
   disabledShaderPasses:
   - MOTIONVECTORS
-  m_LockedProperties: _Color _LightBands _RimPower _Shading _SpecTint
+  m_LockedProperties: _Color _DetailFadeEnd _LightBands _RimPower _Shading _SpecTint
   m_SavedProperties:
     serializedVersion: 3
     m_TexEnvs:
@@ -131,9 +131,15 @@ Material:
     - _Cutoff: 0.5
     - _Detail: 1
     - _DetailAlbedoMapScale: 1
+    - _DetailFadeEnd: 100
+    - _DetailFadeStart: 20
     - _DetailNormalMapScale: 1
     - _DetailStrength: 0
-    - _Displace: 0
+    - _Displace: 0.234
+    - _DistantBumpMultiplier: 0.237
+    - _DistantDetail: 0.319
+    - _DistantDisplacementMultiplier: 0.3
+    - _DistantTextureDetailMultiplier: 0.15
     - _DstBlend: 0
     - _DstBlendAlpha: 0
     - _EmissionIntensity: 1
@@ -169,11 +175,12 @@ Material:
     - _RimOutput: 0.3
     - _RimPower: 2.6
     - _RimSteps: 1
-    - _RippleAmplitude: 1
-    - _RippleDecay: 5
-    - _RippleSpeed: 2.5
-    - _RippleWavelength: 2.63
-    - _RippleWidth: 3
+    - _RippleAmplitude: 2
+    - _RippleDecay: 1
+    - _RippleInitialRadius: 1
+    - _RippleSpeed: 10
+    - _RippleWavelength: 5
+    - _RippleWidth: 5
     - _Scale: 0.69
     - _Shades: 5
     - _Shading: 1
@@ -201,7 +208,7 @@ Material:
     - _BaseColor: {r: 1, g: 1, b: 1, a: 1}
     - _Clamp: {r: 0.7, g: 1, b: 0, a: 0}
     - _Color: {r: 1, g: 0.3238992, b: 0.3238992, a: 1}
-    - _DeepColor: {r: 0, g: 0, b: 0, a: 1}
+    - _DeepColor: {r: 0.3018868, g: 0.08401567, b: 0.08401567, a: 1}
     - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}
     - _Offset: {r: 0, g: 0, b: 0, a: 0}
     - _RimColor: {r: 0, g: 0, b: 0, a: 1}
