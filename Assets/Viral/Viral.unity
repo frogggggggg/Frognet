@@ -1118,10 +1118,35 @@ MonoBehaviour:
   focusHoldCancelReturnSpeed: 10
   groundedWorldButton: {fileID: 754764950}
   flySpeed: 30
-  walkSpeed: 4
+  walkSpeed: 8
   jumpForce: 30
-  flightBoostSpeedMultiplier: 1
-  flightBoostAccelerationMultiplier: 1
+  chargeSpeedMultiplier: 1
+  chargeDuration: 0.35
+  chargeCooldown: 0.6
+  chargeCurve:
+    serializedVersion: 2
+    m_Curve:
+    - serializedVersion: 3
+      time: 0
+      value: 1
+      inSlope: 0
+      outSlope: 0
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0
+      outWeight: 0
+    - serializedVersion: 3
+      time: 1
+      value: 0
+      inSlope: 0
+      outSlope: 0
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0
+      outWeight: 0
+    m_PreInfinity: 2
+    m_PostInfinity: 2
+    m_RotationOrder: 4
   useWalkSpeedCurves: 0
   walkAccelerationTime: 0.28
   walkAccelerationCurve:
@@ -2134,105 +2159,28 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   body: {fileID: 2438656852921375391}
   movement: {fileID: 756698482}
-  legParent: {fileID: 2438656852921375391}
+  legMaterial: {fileID: 2100000, guid: 8ab3ec51151b404479277b1a99875028, type: 2}
+  castShadows: 1
   legCount: 6
   legRootRadius: 0
-  legRootHeight: 0
-  legRootAngleOffset: 0
-  orientRootsOutward: 1
-  legMaterial: {fileID: 2100000, guid: 8ab3ec51151b404479277b1a99875028, type: 2}
+  footDistance: 1.5
+  baseRadius: 0.15
+  tipRadius: 0.05
+  curveHeight: 1
   lengthSegments: 12
   radialSegments: 8
-  baseRadius: 0.1
-  tipRadius: 0.03
-  curveHeight: 0.77
-  curveBias: 0.605
-  fluidWobble: 0
-  fluidWobbleSpeed: 3.5
-  stretchThicknessResponse: 0.165
-  footDistance: 1.34
-  footDistanceVariation: 0.08
   groundMask:
     serializedVersion: 2
     m_Bits: 4294967295
-  probeHeight: 1
-  probeDistance: 5
-  footSurfaceOffset: 0
-  keepTubeAboveGround: 1
-  tubeGroundClearance: 0.015
-  tubeGroundSampleStride: 2
-  stepDistance: 0.55
-  stepDuration: 0.14
-  stepHeight: 0.22
-  velocityLeadTime: 0.1
-  dragPrevention: 0
-  retargetSwingFeet: 1
-  swingRetargetSharpness: 14
-  plantedFootFollow: 0.28
-  groundFrameFollowSharpness: 2
-  groundTurnScramble: 0.72
-  groundTurnAngleRange: 38
-  groundTurnRadiusRange: 0.16
-  groundFullTurnRate: 140
-  groundTurnResponse: 7
-  groundTurnSettleSpeed: 3
-  scaleGroundMotionWithSpeed: 1
-  gaitReferenceGroundSpeed: 4
-  minimumGroundGaitRate: 0.35
-  maximumGroundGaitRate: 3
-  stepHeightSpeedInfluence: 0.18
-  chaos: 0.58
-  timingVariation: 0.28
-  heightVariation: 0.24
-  targetWander: 0.1
-  wanderSpeed: 1.35
-  maxSimultaneousSteps: 2
-  minimumAirborneLegSpacing: 2
-  minimumStepStartInterval: 0.055
-  minimumLegRestTime: 0.06
-  avoidSameSideAirborne: 1
-  looseTripodBias: 1
-  animateWhileFlying: 1
-  flyingSpinMin: 120
-  flyingSpinMax: 850
-  flyingReachMultiplier: 0.85
-  flyingWobble: 0.1
-  spinAroundTravelDirection: 1
-  flyingSpinAxisLocal: {x: 0, y: 0, z: 1}
-  flyingAxisFollowSharpness: 10
-  flyingDirectionHoldSpeed: 0.18
-  flyingDirectionFollowSharpness: 9
-  stopSpinWhenIdle: 1
-  flyingSpinActivationSpeed: 1
-  takeoffLegBlendDuration: 0.24
-  maneuverChaos: 1
-  maneuverAngleRange: 80
-  maneuverRadiusRange: 0.22
-  maneuverAxialRange: 3
-  maneuverTubeWave: 0.18
-  maneuverTubeWaveSpeed: 6.5
-  maneuverResponse: 5
-  maneuverSettleSpeed: 2.5
-  maneuverFullTurnRate: 150
-  landingPrepareDistance: 20
-  landingPredictionTime: 0.5
-  landingProbeRadius: 0.25
-  landingSpinMultiplier: 0.06
-  landingReachMultiplier: 1.2
-  landingPrepareSharpness: 10
-  landingFootCaptureDistance: 3
-  preserveAirPoseOnLanding: 1
-  recalculateNormals: 1
-  castShadows: 1
-  receiveShadows: 1
-  preventEndpointTeleports: 1
-  endpointJumpGuardDistance: 0
-  endpointJumpConfirmationFrames: 3
-  drawDebug: 0
-  debugLargestGroundFootError: 0
-  debugRejectedEndpointJumps: 0
-  debugLastRejectedEndpointJump: 0
-  debugRejectedLandingHits: 0
+  stepDistance: 0.4
+  stepDuration: 0.2
+  stepHeight: 0.4
+  walkSpeed: 8
+  organic: 1
+  airSpin: 300
+  airSweep: 1
+  airFlow: 0.4
+  landingDistance: 10
 --- !u!1 &1289685933
 GameObject:
   m_ObjectHideFlags: 0
@@ -2291,7 +2239,7 @@ MonoBehaviour:
   elasticity: 1
   surfaceGrip: 0.15
   smoothness: 1
-  breakForce: 800
+  breakForce: 160
   objectForce: 0.55
   playerTug: 1
   maxRopeLength: 400

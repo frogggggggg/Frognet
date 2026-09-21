@@ -137,10 +137,10 @@ Shader "Custom/BloodCellTriplanar"
             float  _RippleDecay;
         CBUFFER_END
 
-        // Deliberately outside UnityPerMaterial. Arrays cannot be declared in
-        // a ShaderLab Properties block, and anything in that buffer which the
-        // Properties block does not declare drops the shader out of SRP
-        // batching. These are written per renderer from a MaterialPropertyBlock.
+        // Deliberately outside UnityPerMaterial: arrays cannot be declared in a
+        // Properties block. Written per renderer from a MaterialPropertyBlock.
+        // Start time (w) must be in the same clock as _Time.y, which is
+        // Time.timeSinceLevelLoad -- NOT Time.time.
         #define RIPPLE_COUNT 4
         float4 _RipplePoints[RIPPLE_COUNT];   // xyz object-local impact point, w start time
         float4 _RippleValues[RIPPLE_COUNT];   // x strength
@@ -150,127 +150,65 @@ Shader "Custom/BloodCellTriplanar"
 
         #define BARY3(a, b, c, w) ((a) * (w).x + (b) * (w).y + (c) * (w).z)
 
-        // Flatten a 0..1 ramp into discrete steps. The transition sits at the
-        // band boundary and is widened by fwidth, so the edge antialiases
-        // instead of crawling as the surface moves.
-        float QuantizeBand(float x, float bands, float softness)
+        // ---------------------------------------------------------------
+        // Banding
+        // ---------------------------------------------------------------
+
+        // Flatten a 0..1 ramp into discrete steps. aa widens the edge so it
+        // antialiases; pass 0 where derivatives are unavailable or undefined.
+        float QuantizeBandW(float x, float bands, float softness, float aa)
         {
             float s = saturate(x) * bands;
             float i = floor(s);
-            float f = s - i;
-            float w = clamp(max(softness * bands, fwidth(s)), 1e-4, 0.5);
-            return (i + smoothstep(1.0 - w, 1.0, f)) / bands;
+            float w = clamp(max(softness * bands, aa), 1e-4, 0.5);
+            return (i + smoothstep(1.0 - w, 1.0, s - i)) / bands;
         }
 
-        // One noise evaluation yields height and its exact gradient. Height()
-        // alone lets the compiler strip the derivative math it does not use.
-        //
-        // Fluctuation scales the height field about its midpoint rather than
-        // sliding the noise coordinate. Offsetting the coordinate can only
-        // translate the pattern -- lumps swell and subside where they already
-        // are instead of travelling across the surface.
-        //
-        // The phase is driven by the height itself, so neighbouring lumps fall
-        // out of sync. At variation 0 the whole surface breathes as one, which
-        // reads as the object scaling rather than as a living membrane.
-        float4 HeightDWithDetail(float3 p, float detailAmount)
+        // Fragment-only, and only in uniform control flow (fwidth).
+        float QuantizeBand(float x, float bands, float softness)
         {
-            float4 n  = FBM3D(
-                p * _NoiseScale,
-                _Gain,
-                _Lacunarity,
-                saturate(detailAmount));
+            return QuantizeBandW(x, bands, softness, fwidth(saturate(x) * bands));
+        }
 
-            float4 hd = float4(
-                n.x,
-                n.yzw * _NoiseScale);   // chain rule
+        // ---------------------------------------------------------------
+        // Distance fade -- computed once per invocation, then reused.
+        // World-distance based so it works in domain and fragment alike.
+        // ---------------------------------------------------------------
+
+        float DetailFade(float3 positionWS)
+        {
+            float s = max(0.0, _DetailFadeStart);
+            float e = max(s + 0.001, _DetailFadeEnd);
+            return 1.0 - smoothstep(s, e, distance(positionWS, GetCameraPositionWS()));
+        }
+
+        // ---------------------------------------------------------------
+        // Height field
+        // ---------------------------------------------------------------
+
+        // One noise evaluation yields height and its exact gradient; callers
+        // that only read .x let the compiler strip the derivative math.
+        //
+        // Fluctuation scales the field about its midpoint (lumps swell in
+        // place instead of sliding), with phase driven by the height itself so
+        // neighbouring lumps fall out of sync.
+        float4 SurfaceHeight(float3 p, float fade)
+        {
+            float detail = saturate(lerp(_DistantDetail, _Detail, fade));
+            float4 n  = FBM3D(p * _NoiseScale, _Gain, _Lacunarity, detail);
+            float4 hd = float4(n.x, n.yzw * _NoiseScale);   // chain rule
 
             if (_PulseAmount <= 0.0)
                 return hd;
 
-            float h        = hd.x;
-            float centered = h - 0.5;
-            float phase    = _Time.y * _PulseSpeed + h * TWO_PI * _PulseVariation;
-            float k        = 1.0 + _PulseAmount * sin(phase);
-            float dkdh     = _PulseAmount * cos(phase) * TWO_PI * _PulseVariation;
+            float centered = hd.x - 0.5;
+            float phaseMul = TWO_PI * _PulseVariation;
+            float s, c;
+            sincos(_Time.y * _PulseSpeed + hd.x * phaseMul, s, c);
+            float k    = 1.0 + _PulseAmount * s;
+            float dkdh = _PulseAmount * c * phaseMul;
 
-            return float4(
-                0.5 + centered * k,
-                hd.yzw * (k + centered * dkdh));
-        }
-
-        float4 HeightD(float3 p)
-        {
-            return HeightDWithDetail(
-                p,
-                _Detail);
-        }
-
-        float Height(float3 p)
-        {
-            return HeightD(p).x;
-        }
-
-        // 1 close to the camera, 0 after Detail Fade End.
-        // This is deliberately world-distance based so it works in vertex,
-        // domain and fragment stages alike; screen derivatives are unavailable
-        // in the tessellation domain shader.
-        float SurfaceDetailFade(float3 positionWS)
-        {
-            float startDistance =
-                max(0.0, _DetailFadeStart);
-
-            float endDistance =
-                max(
-                    startDistance + 0.001,
-                    _DetailFadeEnd);
-
-            float distanceToCamera =
-                distance(
-                    positionWS,
-                    GetCameraPositionWS());
-
-            return 1.0 -
-                smoothstep(
-                    startDistance,
-                    endDistance,
-                    distanceToCamera);
-        }
-
-        float SurfaceDetailAmount(float3 positionWS)
-        {
-            float fade =
-                SurfaceDetailFade(
-                    positionWS);
-
-            return lerp(
-                _DistantDetail,
-                _Detail,
-                fade);
-        }
-
-        float SurfaceBumpMultiplier(float3 positionWS)
-        {
-            return lerp(
-                _DistantBumpMultiplier,
-                1.0,
-                SurfaceDetailFade(positionWS));
-        }
-
-        float SurfaceDisplacementMultiplier(float3 positionWS)
-        {
-            return lerp(
-                _DistantDisplacementMultiplier,
-                1.0,
-                SurfaceDetailFade(positionWS));
-        }
-
-        float SurfaceTextureDetailMultiplier(float3 positionWS)
-        {
-            return lerp(
-                _DistantTextureDetailMultiplier,
-                1.0,
-                SurfaceDetailFade(positionWS));
+            return float4(0.5 + centered * k, hd.yzw * (k + centered * dkdh));
         }
 
         // ---------------------------------------------------------------
@@ -284,8 +222,7 @@ Shader "Custom/BloodCellTriplanar"
                           length(unity_ObjectToWorld._m02_m12_m22));
         }
 
-        // With scale divided out, object->world is a pure rotation -- which is
-        // all that separates map space from world space.
+        // With scale divided out, object->world is a pure rotation.
         float3x3 MapToWorldRotation()
         {
             float3 s = max(ObjectScale(), 1e-5);
@@ -308,138 +245,11 @@ Shader "Custom/BloodCellTriplanar"
         #ifdef _SPACE_WORLD
             return v;
         #else
-            // A rotation's inverse is its transpose: mul(v, R) == mul(R^T, v).
-            return mul(v, MapToWorldRotation());
+            return mul(v, MapToWorldRotation());   // R^-1 == R^T
         #endif
         }
 
-        // Impact points are captured ONCE in the renderer's object-local space.
-        // That makes the ripple physically belong to the cell: translating or
-        // rotating the cell later carries the old impact with it exactly like a
-        // mark painted on the mesh.
-        //
-        // Object mapping uses the same scale-corrected local coordinates as the
-        // surface noise. World mapping converts the stored LOCAL point through
-        // the object's CURRENT transform, so even world-mapped materials keep
-        // the impact attached to a moving cell.
-        float3 RipplePointToMap(float3 localImpactPoint)
-        {
-        #ifdef _SPACE_WORLD
-            return TransformObjectToWorld(localImpactPoint);
-        #else
-            return localImpactPoint * ObjectScale();
-        #endif
-        }
-
-        // Causal expanding impact wave.
-        //
-        // Nothing outside the current wavefront is allowed to move. The old
-        // Gaussian packet had a non-zero tail in front of the ring, so a large
-        // Ripple Width could make the whole cell react immediately.
-        //
-        // "behind" is zero at the travelling front and positive only after the
-        // wave has physically reached a point.
-        float Ripple(float3 mapPos, out float3 gradient)
-        {
-            float total = 0.0;
-            gradient = float3(0.0, 0.0, 0.0);
-
-            float wavelength = max(_RippleWavelength, 1e-3);
-            float k = TWO_PI / wavelength;
-            float widthSq = max(_RippleWidth * _RippleWidth, 1e-4);
-
-            [unroll]
-            for (int i = 0; i < RIPPLE_COUNT; i++)
-            {
-                float strength = _RippleValues[i].x;
-                float age = _Time.y - _RipplePoints[i].w;
-
-                if (strength <= 0.0 || age < 0.0)
-                    continue;
-
-                float3 offset =
-                    mapPos -
-                    RipplePointToMap(_RipplePoints[i].xyz);
-
-                float rawDist = length(offset);
-                float dist = max(rawDist, 1e-4);
-
-                // Start with a small visible contact patch rather than a
-                // mathematically zero-radius ring. On a tessellated surface this
-                // avoids waiting for the travelling front to reach the nearest
-                // generated vertex before anything can be seen.
-                float frontRadius =
-                    max(0.0, _RippleInitialRadius) +
-                    age *
-                    _RippleSpeed;
-
-                // Positive only where the travelling wave has already arrived.
-                float behind =
-                    frontRadius -
-                    rawDist;
-
-                // Strict causal boundary is still preserved beyond the small
-                // initial contact radius.
-                if (behind < 0.0)
-                    continue;
-
-                float envelope =
-                    exp(
-                        -(behind * behind) /
-                        widthSq);
-
-                float amplitude =
-                    strength *
-                    _RippleAmplitude *
-                    exp(
-                        -age *
-                        _RippleDecay);
-
-                float phase =
-                    k *
-                    behind;
-
-                float cosine =
-                    cos(phase);
-
-                float sine =
-                    sin(phase);
-
-                // A cosine starts with a crest at the impact/wavefront instead
-                // of requiring half a cycle before anything visibly happens.
-                float wave =
-                    cosine *
-                    envelope;
-
-                total +=
-                    amplitude *
-                    wave;
-
-                // wave(b) = cos(kb) * exp(-b^2/w^2)
-                // b = frontRadius - distance
-                //
-                // d(b)/d(position) = -offset / distance. Combining that with
-                // d(wave)/db gives the outward gradient below.
-                float slope =
-                    (
-                        k * sine +
-                        cosine *
-                        (2.0 * behind / widthSq)
-                    ) *
-                    envelope;
-
-                gradient +=
-                    amplitude *
-                    slope *
-                    (offset / dist);
-            }
-
-            return total;
-        }
-
-        // Noise coordinate. Object mode multiplies by scale so lump size is
-        // measured in world units: scaling the mesh yields more lumps rather
-        // than bigger ones, matching what world mode already did.
+        // Object mode multiplies by scale so lump size is in world units.
         float3 MapPosition(float3 positionOS, float3 positionWS)
         {
         #ifdef _SPACE_WORLD
@@ -449,46 +259,85 @@ Shader "Custom/BloodCellTriplanar"
         #endif
         }
 
-        // Displacement runs in world space along the true surface normal, so
-        // _Displace is in world units and stays correct under non-uniform
-        // scale, where an object-space normal is not perpendicular.
-        float3 DisplaceWS(float3 positionWS, float3 normalWS, float3 mapPos)
+        // Impacts are stored object-local, so they ride along with the cell.
+        float3 RipplePointToMap(float3 localImpactPoint)
         {
-            // Fine procedural relief becomes sub-pixel at distance. Continuing
-            // to displace full-strength there makes tessellated vertices crawl
-            // as the camera moves, so progressively simplify the base relief.
-            float4 hd =
-                HeightDWithDetail(
-                    mapPos,
-                    SurfaceDetailAmount(positionWS));
-
-            float displacementMultiplier =
-                SurfaceDisplacementMultiplier(
-                    positionWS);
-
-            // Ripples stay full-strength. They are gameplay feedback rather
-            // than static micro-detail and should remain readable.
-            float3 rippleGradient;
-            float ripple =
-                Ripple(
-                    mapPos,
-                    rippleGradient);
-
-            float offset =
-                (hd.x - 0.5) *
-                _Displace *
-                displacementMultiplier +
-                ripple;
-
-            return
-                positionWS +
-                normalWS *
-                offset;
+        #ifdef _SPACE_WORLD
+            return TransformObjectToWorld(localImpactPoint);
+        #else
+            return localImpactPoint * ObjectScale();
+        #endif
         }
 
         // ---------------------------------------------------------------
-        // Tessellation
+        // Impact ripple. Returns (height, map-space gradient).
+        //
+        // Causal: nothing ahead of the wavefront moves. The wave is
+        //   w(b) = cos(kb) * exp(-b^2/W^2) * ramp(b),   b = front - dist
+        // The ramp (smoothstep over a quarter wavelength) makes the front
+        // continuous; without it the front was a full-amplitude step that
+        // tore a visible travelling seam into both geometry and shading.
         // ---------------------------------------------------------------
+        float4 Ripple(float3 mapPos)
+        {
+            float4 result  = 0.0;
+            float  wl      = max(_RippleWavelength, 1e-3);
+            float  k       = TWO_PI / wl;
+            float  invW2   = 1.0 / max(_RippleWidth * _RippleWidth, 1e-4);
+            float  rampLen = wl * 0.25;
+            float  radius0 = max(0.0, _RippleInitialRadius);
+
+            [unroll]
+            for (int i = 0; i < RIPPLE_COUNT; i++)
+            {
+                float strength = _RippleValues[i].x;
+                float age      = _Time.y - _RipplePoints[i].w;
+                if (strength <= 0.0 || age < 0.0)
+                    continue;
+
+                float3 offset = mapPos - RipplePointToMap(_RipplePoints[i].xyz);
+                float  dist   = length(offset);
+                float  behind = radius0 + age * _RippleSpeed - dist;
+                if (behind <= 0.0)
+                    continue;
+
+                float amp   = strength * _RippleAmplitude * exp(-age * _RippleDecay);
+                float env   = exp(-behind * behind * invW2);
+                float t     = saturate(behind / rampLen);
+                float ramp  = t * t * (3.0 - 2.0 * t);
+                float dramp = 6.0 * t * (1.0 - t) / rampLen;
+                float s, c;
+                sincos(k * behind, s, c);
+
+                result.x += amp * c * env * ramp;
+
+                // dw/db, then chain through db/dp = -offset/dist.
+                float dw = env * ((-k * s - 2.0 * behind * invW2 * c) * ramp + c * dramp);
+                result.yzw -= amp * dw * offset / max(dist, 1e-4);
+            }
+            return result;
+        }
+
+        // Bump the geometric normal by the combined height gradient, projected
+        // onto the tangent plane so it tilts rather than inflates. Ripple
+        // gradient is already in world height per unit, so it bypasses
+        // _BumpStrength and matches the geometry it displaced.
+        float3 BumpNormal(float3 geoNormalWS, float4 hd, float4 ripple, float fade)
+        {
+            float  bump   = _BumpStrength * lerp(_DistantBumpMultiplier, 1.0, fade);
+            float3 gradWS = MapDirToWorld(hd.yzw * bump + ripple.yzw);
+            return normalize(geoNormalWS - (gradWS - geoNormalWS * dot(gradWS, geoNormalWS)));
+        }
+
+        // ---------------------------------------------------------------
+        // Tessellation (shared by every pass)
+        // ---------------------------------------------------------------
+
+        struct TessAttributes
+        {
+            float4 positionOS : POSITION;
+            float3 normalOS   : NORMAL;
+        };
 
         struct TessControlPoint
         {
@@ -502,21 +351,12 @@ Shader "Custom/BloodCellTriplanar"
             float inside  : SV_InsideTessFactor;
         };
 
-        // Phong tessellation: pull each generated vertex toward the tangent
-        // planes of the three control points. Without this, subdividing a
-        // low-poly sphere just puts more vertices on the same flat facets.
-        float3 PhongProject(float3 p, float3 controlPoint, float3 n)
+        TessControlPoint TessVertex(TessAttributes input)
         {
-            return p - dot(p - controlPoint, n) * n;
-        }
-
-        float3 PhongTessellate(float3 p, float3 p0, float3 p1, float3 p2,
-                               float3 n0, float3 n1, float3 n2, float3 bary)
-        {
-            float3 projected = BARY3(PhongProject(p, p0, n0),
-                                     PhongProject(p, p1, n1),
-                                     PhongProject(p, p2, n2), bary);
-            return lerp(p, projected, _PhongStrength);
+            TessControlPoint cp;
+            cp.positionOS = input.positionOS;
+            cp.normalOS   = input.normalOS;
+            return cp;
         }
 
         // Screen-relative density: long edges near the camera subdivide most.
@@ -527,28 +367,21 @@ Shader "Custom/BloodCellTriplanar"
             return clamp(_TessDensity * len / max(dist, 0.001), 1.0, _TessMax);
         }
 
-        // Do NOT manually cull tessellation patches here.
-        //
-        // The old code rejected a patch when all three vertices were outside
-        // *some* frustum plane, even when they were outside different planes.
-        // A triangle spanning the visible frustum could therefore disappear at
-        // certain view angles. Displacement/ripples also make source-triangle
-        // clip tests unsafe. Let normal GPU clipping handle visibility.
-
+        // No manual patch culling: displacement makes source-triangle tests
+        // unsafe, and the shadow pass would cull with the wrong frustum.
         TessFactors PatchConstant(InputPatch<TessControlPoint, 3> patch)
         {
             float3 p0 = TransformObjectToWorld(patch[0].positionOS.xyz);
             float3 p1 = TransformObjectToWorld(patch[1].positionOS.xyz);
             float3 p2 = TransformObjectToWorld(patch[2].positionOS.xyz);
 
+            // Edge factors depend only on the edge's two vertices, so
+            // neighbouring triangles agree and no cracks open.
             TessFactors f;
-
-            // Each edge factor is shared with the neighbouring triangle, so
-            // both sides must compute the same value or cracks open along it.
             f.edge[0] = EdgeFactor(p1, p2);
             f.edge[1] = EdgeFactor(p2, p0);
             f.edge[2] = EdgeFactor(p0, p1);
-            f.inside  = (f.edge[0] + f.edge[1] + f.edge[2]) / 3.0;
+            f.inside  = (f.edge[0] + f.edge[1] + f.edge[2]) * (1.0 / 3.0);
             return f;
         }
 
@@ -563,31 +396,110 @@ Shader "Custom/BloodCellTriplanar"
             return patch[id];
         }
 
-        // Interpolate a patch down to one smoothed object-space vertex. Not
-        // displaced yet: each pass maps the noise from this base position, so
-        // shading samples the same coordinate the geometry was pushed from.
-        void ResolvePatch(const OutputPatch<TessControlPoint, 3> patch, float3 bary,
-                          out float3 positionOS, out float3 normalOS)
+        // Phong tessellation: pull generated vertices toward the control
+        // points' tangent planes so a low-poly sphere actually rounds out.
+        float3 PhongProject(float3 p, float3 cp, float3 n)
         {
-            float3 p0 = patch[0].positionOS.xyz;
-            float3 p1 = patch[1].positionOS.xyz;
-            float3 p2 = patch[2].positionOS.xyz;
-            float3 n0 = patch[0].normalOS;
-            float3 n1 = patch[1].normalOS;
-            float3 n2 = patch[2].normalOS;
-
-            normalOS   = normalize(BARY3(n0, n1, n2, bary));
-            positionOS = PhongTessellate(BARY3(p0, p1, p2, bary),
-                                         p0, p1, p2, n0, n1, n2, bary);
+            return p - dot(p - cp, n) * n;
         }
 
-        // The vertex stage is now a pass-through; real work happens in domain.
-        TessControlPoint TessVert(float4 positionOS, float3 normalOS)
+        struct CellSample
         {
-            TessControlPoint cp;
-            cp.positionOS = positionOS;
-            cp.normalOS   = normalOS;
-            return cp;
+            float3 positionWS;   // displaced
+            float3 normalWS;     // geometric, undisplaced
+            float3 mapPos;       // noise coordinate of the undisplaced base
+            float  fade;
+        };
+
+        // Everything every pass needs from the domain stage: resolve the patch,
+        // then displace along the true world normal (so _Displace is in world
+        // units and survives non-uniform scale).
+        CellSample EvaluateCell(const OutputPatch<TessControlPoint, 3> patch, float3 bary)
+        {
+            float3 p0 = patch[0].positionOS.xyz, n0 = patch[0].normalOS;
+            float3 p1 = patch[1].positionOS.xyz, n1 = patch[1].normalOS;
+            float3 p2 = patch[2].positionOS.xyz, n2 = patch[2].normalOS;
+
+            float3 flat      = BARY3(p0, p1, p2, bary);
+            float3 projected = BARY3(PhongProject(flat, p0, n0),
+                                     PhongProject(flat, p1, n1),
+                                     PhongProject(flat, p2, n2), bary);
+            float3 positionOS = lerp(flat, projected, _PhongStrength);
+            float3 normalOS   = BARY3(n0, n1, n2, bary);
+
+            CellSample c;
+            float3 baseWS = TransformObjectToWorld(positionOS);
+            c.normalWS    = normalize(TransformObjectToWorldNormal(normalOS));
+            c.mapPos      = MapPosition(positionOS, baseWS);
+            c.fade        = DetailFade(baseWS);
+
+            // Distant relief is simplified so tessellated vertices don't crawl.
+            // Ripples stay full strength: they're gameplay feedback.
+            float h      = SurfaceHeight(c.mapPos, c.fade).x;
+            float offset = (h - 0.5) * _Displace
+                         * lerp(_DistantDisplacementMultiplier, 1.0, c.fade)
+                         + Ripple(c.mapPos).x;
+
+            c.positionWS = baseWS + c.normalWS * offset;
+            return c;
+        }
+
+        // ---------------------------------------------------------------
+        // Shared depth / depth-normals stages
+        // ---------------------------------------------------------------
+
+        struct DepthVaryings
+        {
+            float4 positionHCS : SV_POSITION;
+        };
+
+        [domain("tri")]
+        DepthVaryings DepthDomain(TessFactors factors,
+                                  const OutputPatch<TessControlPoint, 3> patch,
+                                  float3 bary : SV_DomainLocation)
+        {
+            DepthVaryings o;
+            o.positionHCS = TransformWorldToHClip(EvaluateCell(patch, bary).positionWS);
+            return o;
+        }
+
+        // Matches URP's DepthOnly: some platforms copy depth through the R
+        // channel, so this must write depth, not 0.
+        half4 DepthFrag(DepthVaryings input) : SV_Target
+        {
+            return input.positionHCS.z;
+        }
+
+        struct NormalVaryings
+        {
+            float4 positionHCS : SV_POSITION;
+            float3 normalWS    : TEXCOORD0;
+        };
+
+        // Per-vertex bumped normal: close enough for SSAO etc. on a densely
+        // tessellated surface, at a fraction of per-pixel fBm cost.
+        [domain("tri")]
+        NormalVaryings DepthNormalsDomain(TessFactors factors,
+                                          const OutputPatch<TessControlPoint, 3> patch,
+                                          float3 bary : SV_DomainLocation)
+        {
+            CellSample c = EvaluateCell(patch, bary);
+            NormalVaryings o;
+            o.positionHCS = TransformWorldToHClip(c.positionWS);
+            o.normalWS    = BumpNormal(c.normalWS, SurfaceHeight(c.mapPos, c.fade),
+                                       Ripple(c.mapPos), c.fade);
+            return o;
+        }
+
+        half4 DepthNormalsFrag(NormalVaryings input) : SV_Target
+        {
+            float3 n = normalize(input.normalWS);
+        #if defined(_GBUFFER_NORMALS_OCT)
+            float2 oct = saturate(PackNormalOctQuadEncode(n) * 0.5 + 0.5);
+            return half4(PackFloat2To888(oct), 0.0);
+        #else
+            return half4(n, 0.0);
+        #endif
         }
 
         ENDHLSL
@@ -598,15 +510,12 @@ Shader "Custom/BloodCellTriplanar"
             Name "ForwardLit"
             Tags { "LightMode"="UniversalForward" }
 
-            // Explicit rather than relying on ShaderLab defaults. This keeps the
-            // tessellated/displaced cell in the camera depth buffer when URP
-            // copies depth after the opaque pass.
             ZWrite On
             ZTest LEqual
             Cull [_Cull]
 
             HLSLPROGRAM
-            #pragma vertex vert
+            #pragma vertex TessVertex
             #pragma hull hull
             #pragma domain domain
             #pragma fragment frag
@@ -615,20 +524,15 @@ Shader "Custom/BloodCellTriplanar"
 
             #pragma multi_compile _ _MAIN_LIGHT_SHADOWS _MAIN_LIGHT_SHADOWS_CASCADE _MAIN_LIGHT_SHADOWS_SCREEN
             #pragma multi_compile _ _ADDITIONAL_LIGHTS_VERTEX _ADDITIONAL_LIGHTS
+            #pragma multi_compile _ _FORWARD_PLUS
             #pragma multi_compile_fragment _ _ADDITIONAL_LIGHT_SHADOWS
             #pragma multi_compile_fragment _ _SHADOWS_SOFT
             #pragma multi_compile_fragment _ _SCREEN_SPACE_OCCLUSION
             #pragma multi_compile_fog
-            #pragma multi_compile_local _SPACE_OBJECT _SPACE_WORLD
+            #pragma shader_feature_local _SPACE_OBJECT _SPACE_WORLD
             #pragma shader_feature_local_fragment _SHADING_SMOOTH _SHADING_CEL
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
-
-            struct Attributes
-            {
-                float4 positionOS : POSITION;
-                float3 normalOS   : NORMAL;
-            };
 
             struct Varyings
             {
@@ -639,127 +543,89 @@ Shader "Custom/BloodCellTriplanar"
                 float  fogCoord    : TEXCOORD3;
             };
 
-            TessControlPoint vert(Attributes input)
-            {
-                return TessVert(input.positionOS, input.normalOS);
-            }
-
-            Varyings BuildVaryings(float3 basePositionOS, float3 normalOS)
-            {
-                Varyings output = (Varyings)0;
-
-                float3 basePositionWS = TransformObjectToWorld(basePositionOS);
-                output.normalWS = normalize(TransformObjectToWorldNormal(normalOS));
-
-                // Noise coordinate comes from the undisplaced base position.
-                output.mapPos = MapPosition(basePositionOS, basePositionWS);
-
-                output.positionWS  = DisplaceWS(basePositionWS, output.normalWS,
-                                                output.mapPos);
-                output.positionHCS = TransformWorldToHClip(output.positionWS);
-                output.fogCoord    = ComputeFogFactor(output.positionHCS.z);
-                return output;
-            }
-
             [domain("tri")]
             Varyings domain(TessFactors factors,
                             const OutputPatch<TessControlPoint, 3> patch,
                             float3 bary : SV_DomainLocation)
             {
-                float3 positionOS, normalOS;
-                ResolvePatch(patch, bary, positionOS, normalOS);
-                return BuildVaryings(positionOS, normalOS);
+                CellSample c = EvaluateCell(patch, bary);
+                Varyings o;
+                o.positionWS  = c.positionWS;
+                o.normalWS    = c.normalWS;
+                o.mapPos      = c.mapPos;
+                o.positionHCS = TransformWorldToHClip(c.positionWS);
+                o.fogCoord    = ComputeFogFactor(o.positionHCS.z);
+                return o;
             }
 
-            // Toon lighting: the same lights PBR would use, but N.L quantized
-            // into flat bands instead of a continuous ramp.
+            // Additional lights: no fwidth here. In Forward+ the loop count
+            // varies per pixel, and derivatives inside divergent flow are
+            // undefined (and a compile error on some platforms).
+            half3 CelAdditional(Light light, float3 N, half3 albedo)
+            {
+                float l = saturate(dot(N, light.direction))
+                        * light.distanceAttenuation * light.shadowAttenuation;
+                return albedo * light.color * QuantizeBandW(l, _LightBands, _BandSoftness, 0.0);
+            }
+
+            // Toon lighting: the same lights PBR would use, N.L quantized.
             half3 CelShade(InputData inputData, SurfaceData surfaceData)
             {
                 float3 N = inputData.normalWS;
                 float3 V = inputData.viewDirectionWS;
                 half3  albedo = surfaceData.albedo;
 
-                float specPower = exp2(surfaceData.smoothness * 11.0) + 2.0;
-                half3 accum = half3(0, 0, 0);
-
                 Light mainLight = GetMainLight(inputData.shadowCoord);
-                float lit  = saturate(dot(N, mainLight.direction))
-                           * mainLight.shadowAttenuation;
+                float lit  = saturate(dot(N, mainLight.direction)) * mainLight.shadowAttenuation;
                 float band = QuantizeBand(lit, _LightBands, _BandSoftness);
-                accum += albedo * mainLight.color * band;
+                half3 accum = albedo * mainLight.color * band;
 
-                // Hard-edged highlight, gated by the lit band so it can never
-                // show up on a face turned away from the light.
-                float3 H    = normalize(mainLight.direction + V);
-                float  spec = pow(saturate(dot(N, H)), specPower);
-                float  sw   = clamp(max(_BandSoftness, fwidth(spec)), 1e-4, 0.5);
+                // Hard-edged highlight, gated by the lit band.
+                float specPower = exp2(surfaceData.smoothness * 11.0) + 2.0;
+                float spec = pow(saturate(dot(N, normalize(mainLight.direction + V))), specPower);
+                float sw   = clamp(max(_BandSoftness, fwidth(spec)), 1e-4, 0.5);
                 accum += mainLight.color * surfaceData.specular
                        * smoothstep(_SpecThreshold - sw, _SpecThreshold + sw, spec)
                        * step(0.001, band);
 
             #ifdef _ADDITIONAL_LIGHTS
+                #if USE_FORWARD_PLUS
+                // Forward+ keeps extra directional lights outside the cluster loop.
+                [loop] for (uint dirIndex = 0; dirIndex < min(URP_FP_DIRECTIONAL_LIGHTS_COUNT, MAX_VISIBLE_LIGHTS); dirIndex++)
+                    accum += CelAdditional(GetAdditionalLight(dirIndex, inputData.positionWS,
+                                                              inputData.shadowMask), N, albedo);
+                #endif
+
                 uint lightCount = GetAdditionalLightsCount();
                 LIGHT_LOOP_BEGIN(lightCount)
-                    Light light = GetAdditionalLight(lightIndex, inputData.positionWS,
-                                                     inputData.shadowMask);
-                    float l = saturate(dot(N, light.direction))
-                            * light.distanceAttenuation * light.shadowAttenuation;
-                    accum += albedo * light.color
-                           * QuantizeBand(l, _LightBands, _BandSoftness);
+                    accum += CelAdditional(GetAdditionalLight(lightIndex, inputData.positionWS,
+                                                              inputData.shadowMask), N, albedo);
                 LIGHT_LOOP_END
             #endif
 
-                // Ambient stays flat. Running GI through the bands would
-                // reintroduce the smooth falloff the bands exist to remove.
-                accum += albedo * inputData.bakedGI * surfaceData.occlusion;
+                // Ambient and vertex lights stay flat; banding GI would bring
+                // back the smooth falloff the bands exist to remove.
+                accum += albedo * (inputData.bakedGI * surfaceData.occlusion + inputData.vertexLighting);
                 return accum + surfaceData.emission;
             }
 
-            half4 frag(Varyings input) : SV_Target
+            half4 frag(Varyings input, FRONT_FACE_TYPE face : FRONT_FACE_SEMANTIC) : SV_Target
             {
-                float3 p         = input.mapPos;
-                float3 geoNormal = normalize(input.normalWS);
+                float3 p = input.mapPos;
 
-                float detailFade =
-                    SurfaceDetailFade(
-                        input.positionWS);
+                // Flip for back faces so Cull Off / Front light correctly.
+                float3 geoNormal = normalize(input.normalWS) * IS_FRONT_VFACE(face, 1.0, -1.0);
 
-                // Fade high-frequency fBm before it becomes smaller than a
-                // pixel. This removes distant crawling/shimmer while preserving
-                // the broad cell shape.
-                float4 hd =
-                    HeightDWithDetail(
-                        p,
-                        SurfaceDetailAmount(
-                            input.positionWS));
+                float  fade   = DetailFade(input.positionWS);
+                float4 hd     = SurfaceHeight(p, fade);
+                float4 ripple = Ripple(p);
+                float  h      = hd.x;
 
-                float h =
-                    hd.x;
-
-                // Ripple gradient is already in world height per unit, so it
-                // is added at full weight rather than through _BumpStrength --
-                // that way the shading matches the geometry the ripple
-                // actually displaced.
-                float3 rippleGradient;
-                Ripple(p, rippleGradient);
-
-                // Project onto the tangent plane so the bump slides the normal
-                // sideways instead of inflating it.
-                float3 gradWS =
-                    MapDirToWorld(
-                        hd.yzw *
-                        _BumpStrength *
-                        SurfaceBumpMultiplier(input.positionWS) +
-                        rippleGradient);
-                float3 tangentialGrad = gradWS - geoNormal * dot(gradWS, geoNormal);
-                float3 normalWS = normalize(geoNormal - tangentialGrad);
-
-                float3 viewWS = GetWorldSpaceNormalizeViewDir(input.positionWS);
+                float3 normalWS = BumpNormal(geoNormal, hd, ripple, fade);
+                float3 viewWS   = GetWorldSpaceNormalizeViewDir(input.positionWS);
 
                 // Ridges read as thicker haemoglobin, valleys as thinner.
-                // Quantizing this ramp gives flat colour divisions on the
-                // surface itself, separately from how it is lit -- so it works
-                // in either shading mode. A uniform branch, so 1 costs nothing.
+                // Uniform branch, so ColorSteps = 1 costs nothing.
                 float hAlbedo = h;
                 if (_ColorSteps > 1.0)
                     hAlbedo = QuantizeBand(h, _ColorSteps, _BandSoftness);
@@ -771,21 +637,13 @@ Shader "Custom/BloodCellTriplanar"
                     half3 detail = TriplanarSample(
                         TEXTURE2D_ARGS(_MainTex, sampler_MainTex),
                         p, WorldDirToMap(geoNormal), _BlendSharpness).rgb;
-                    float visibleDetailStrength =
-                        _DetailStrength *
-                        SurfaceTextureDetailMultiplier(
-                            input.positionWS);
-
-                    albedo *=
-                        lerp(
-                            half3(1,1,1),
-                            detail,
-                            visibleDetailStrength);
+                    float strength = _DetailStrength
+                                   * lerp(_DistantTextureDetailMultiplier, 1.0, fade);
+                    albedo *= lerp(half3(1, 1, 1), detail, strength);
                 }
 
                 // Cheap subsurface: rim-weighted glow, strongest where thin.
-                // Not real transmission -- it does not know the light
-                // direction, so it will not go dark when backlit from behind.
+                // Not real transmission -- it ignores light direction.
                 float fres = pow(1.0 - saturate(dot(normalWS, viewWS)), _RimPower);
             #ifdef _SHADING_CEL
                 fres = QuantizeBand(fres, _RimSteps, _BandSoftness);
@@ -795,7 +653,6 @@ Shader "Custom/BloodCellTriplanar"
                 SurfaceData surfaceData = (SurfaceData)0;
                 surfaceData.albedo     = albedo;
                 surfaceData.specular   = _SpecTint.rgb;
-                surfaceData.metallic   = 0.0;
                 surfaceData.smoothness = saturate(_Glossiness + (h - 0.5) * _GlossVariation);
                 surfaceData.occlusion  = lerp(1.0, saturate(h + 0.35), _OcclusionStrength);
                 surfaceData.emission   = _SubsurfaceColor.rgb * _SubsurfaceStrength * fres * thin;
@@ -807,12 +664,15 @@ Shader "Custom/BloodCellTriplanar"
                 inputData.viewDirectionWS = viewWS;
                 inputData.shadowCoord     = TransformWorldToShadowCoord(input.positionWS);
                 inputData.fogCoord        = input.fogCoord;
-                // Probe-based GI only. Correct for a moving cell; a lightmapped
-                // static one would need the LIGHTMAP_ON path instead.
+                // Probe GI only: right for a moving cell, not for a lightmapped one.
                 inputData.bakedGI         = SampleSH(normalWS);
-                inputData.normalizedScreenSpaceUV =
-                    GetNormalizedScreenSpaceUV(input.positionHCS);
-                inputData.shadowMask      = half4(1,1,1,1);
+                inputData.normalizedScreenSpaceUV = GetNormalizedScreenSpaceUV(input.positionHCS);
+                inputData.shadowMask      = half4(1, 1, 1, 1);
+            #ifdef _ADDITIONAL_LIGHTS_VERTEX
+                // Per-vertex lights evaluated per pixel: there's no plain vertex
+                // stage to do it in, and leaving it zero dropped them entirely.
+                inputData.vertexLighting  = VertexLighting(input.positionWS, normalWS);
+            #endif
 
             #ifdef _SHADING_CEL
                 half3 rgb = CelShade(inputData, surfaceData);
@@ -820,8 +680,7 @@ Shader "Custom/BloodCellTriplanar"
                 half3 rgb = UniversalFragmentPBR(inputData, surfaceData).rgb;
             #endif
 
-                rgb = MixFog(rgb, inputData.fogCoord);
-                return half4(rgb, 1.0);
+                return half4(MixFog(rgb, inputData.fogCoord), 1.0);
             }
             ENDHLSL
         }
@@ -839,57 +698,35 @@ Shader "Custom/BloodCellTriplanar"
             Cull [_Cull]
 
             HLSLPROGRAM
-            #pragma vertex vert
+            #pragma vertex TessVertex
             #pragma hull hull
             #pragma domain domain
-            #pragma fragment frag
+            #pragma fragment DepthFrag
             #pragma target 4.6
             #pragma require tessellation
             #pragma multi_compile_vertex _ _CASTING_PUNCTUAL_LIGHT_SHADOW
-            #pragma multi_compile_local _SPACE_OBJECT _SPACE_WORLD
+            #pragma shader_feature_local _SPACE_OBJECT _SPACE_WORLD
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Shadows.hlsl"
 
             float3 _LightDirection;
             float3 _LightPosition;
 
-            struct Attributes
-            {
-                float4 positionOS : POSITION;
-                float3 normalOS   : NORMAL;
-            };
-
-            struct Varyings
-            {
-                float4 positionHCS : SV_POSITION;
-            };
-
-            TessControlPoint vert(Attributes input)
-            {
-                return TessVert(input.positionOS, input.normalOS);
-            }
-
             [domain("tri")]
-            Varyings domain(TessFactors factors,
-                            const OutputPatch<TessControlPoint, 3> patch,
-                            float3 bary : SV_DomainLocation)
+            DepthVaryings domain(TessFactors factors,
+                                 const OutputPatch<TessControlPoint, 3> patch,
+                                 float3 bary : SV_DomainLocation)
             {
-                float3 basePositionOS, normalOS;
-                ResolvePatch(patch, bary, basePositionOS, normalOS);
-
-                float3 basePositionWS = TransformObjectToWorld(basePositionOS);
-                float3 normalWS   = normalize(TransformObjectToWorldNormal(normalOS));
-                float3 mapPos     = MapPosition(basePositionOS, basePositionWS);
-                float3 positionWS = DisplaceWS(basePositionWS, normalWS, mapPos);
+                CellSample c = EvaluateCell(patch, bary);
 
             #if _CASTING_PUNCTUAL_LIGHT_SHADOW
-                float3 lightDirectionWS = normalize(_LightPosition - positionWS);
+                float3 lightDirectionWS = normalize(_LightPosition - c.positionWS);
             #else
                 float3 lightDirectionWS = _LightDirection;
             #endif
 
                 float4 positionCS = TransformWorldToHClip(
-                    ApplyShadowBias(positionWS, normalWS, lightDirectionWS));
+                    ApplyShadowBias(c.positionWS, c.normalWS, lightDirectionWS));
 
             #if UNITY_REVERSED_Z
                 positionCS.z = min(positionCS.z, positionCS.w * UNITY_NEAR_CLIP_VALUE);
@@ -897,82 +734,38 @@ Shader "Custom/BloodCellTriplanar"
                 positionCS.z = max(positionCS.z, positionCS.w * UNITY_NEAR_CLIP_VALUE);
             #endif
 
-                Varyings output;
-                output.positionHCS = positionCS;
-                return output;
+                DepthVaryings o;
+                o.positionHCS = positionCS;
+                return o;
             }
-
-            half4 frag(Varyings input) : SV_Target { return 0; }
             ENDHLSL
         }
 
         // -------------------------------------------------------------------
-        // Keeps the displaced silhouette correct in a depth prepass -- this
-        // project already runs one for the player stencil.
         Pass
         {
             Name "DepthOnly"
             Tags { "LightMode"="DepthOnly" }
 
             ZWrite On
+            ZTest LEqual
             ColorMask R
             Cull [_Cull]
 
             HLSLPROGRAM
-            #pragma vertex vert
+            #pragma vertex TessVertex
             #pragma hull hull
-            #pragma domain domain
-            #pragma fragment frag
+            #pragma domain DepthDomain
+            #pragma fragment DepthFrag
             #pragma target 4.6
             #pragma require tessellation
-            #pragma multi_compile_local _SPACE_OBJECT _SPACE_WORLD
-
-            struct Attributes
-            {
-                float4 positionOS : POSITION;
-                float3 normalOS   : NORMAL;
-            };
-
-            struct Varyings
-            {
-                float4 positionHCS : SV_POSITION;
-            };
-
-            TessControlPoint vert(Attributes input)
-            {
-                return TessVert(input.positionOS, input.normalOS);
-            }
-
-            [domain("tri")]
-            Varyings domain(TessFactors factors,
-                            const OutputPatch<TessControlPoint, 3> patch,
-                            float3 bary : SV_DomainLocation)
-            {
-                float3 basePositionOS, normalOS;
-                ResolvePatch(patch, bary, basePositionOS, normalOS);
-
-                float3 basePositionWS = TransformObjectToWorld(basePositionOS);
-                float3 normalWS = normalize(TransformObjectToWorldNormal(normalOS));
-                float3 mapPos   = MapPosition(basePositionOS, basePositionWS);
-
-                Varyings output;
-                output.positionHCS = TransformWorldToHClip(
-                    DisplaceWS(basePositionWS, normalWS, mapPos));
-                return output;
-            }
-
-            half4 frag(Varyings input) : SV_Target { return 0; }
+            #pragma shader_feature_local _SPACE_OBJECT _SPACE_WORLD
             ENDHLSL
         }
+
         // -------------------------------------------------------------------
-        // URP may generate _CameraDepthTexture as part of a depth+normals
-        // prepass rather than a plain DepthOnly prepass. Built-in URP shaders
-        // provide this pass; without it this material can disappear from the
-        // camera depth texture even though its ForwardLit and DepthOnly passes
-        // are otherwise correct.
-        //
-        // This pass repeats the SAME tessellation + displacement used by the
-        // visible surface, so screen-space effects see the real displaced cell.
+        // URP may build _CameraDepthTexture from a depth+normals prepass.
+        // Same tessellation + displacement as the visible surface.
         Pass
         {
             Name "DepthNormals"
@@ -983,92 +776,18 @@ Shader "Custom/BloodCellTriplanar"
             Cull [_Cull]
 
             HLSLPROGRAM
-            #pragma vertex vert
+            #pragma vertex TessVertex
             #pragma hull hull
-            #pragma domain domain
-            #pragma fragment frag
+            #pragma domain DepthNormalsDomain
+            #pragma fragment DepthNormalsFrag
             #pragma target 4.6
             #pragma require tessellation
-            #pragma multi_compile_local _SPACE_OBJECT _SPACE_WORLD
+            #pragma shader_feature_local _SPACE_OBJECT _SPACE_WORLD
             #pragma multi_compile_fragment _ _GBUFFER_NORMALS_OCT
-
-            struct Attributes
-            {
-                float4 positionOS : POSITION;
-                float3 normalOS   : NORMAL;
-            };
-
-            struct Varyings
-            {
-                float4 positionHCS : SV_POSITION;
-                float3 normalWS    : TEXCOORD0;
-            };
-
-            TessControlPoint vert(Attributes input)
-            {
-                return TessVert(input.positionOS, input.normalOS);
-            }
-
-            [domain("tri")]
-            Varyings domain(TessFactors factors,
-                            const OutputPatch<TessControlPoint, 3> patch,
-                            float3 bary : SV_DomainLocation)
-            {
-                float3 basePositionOS, normalOS;
-                ResolvePatch(patch, bary, basePositionOS, normalOS);
-
-                float3 basePositionWS = TransformObjectToWorld(basePositionOS);
-                float3 geoNormalWS = normalize(TransformObjectToWorldNormal(normalOS));
-                float3 mapPos = MapPosition(basePositionOS, basePositionWS);
-
-                // Same displaced position as ForwardLit / DepthOnly.
-                float3 positionWS = DisplaceWS(basePositionWS, geoNormalWS, mapPos);
-
-                // Also match the procedural surface normal used by ForwardLit.
-                float4 hd =
-                    HeightDWithDetail(
-                        mapPos,
-                        SurfaceDetailAmount(positionWS));
-                float3 rippleGradient;
-                Ripple(mapPos, rippleGradient);
-
-                float3 gradWS = MapDirToWorld(
-                    hd.yzw *
-                    _BumpStrength *
-                    SurfaceBumpMultiplier(positionWS) +
-                    rippleGradient);
-
-                float3 tangentialGrad =
-                    gradWS - geoNormalWS * dot(gradWS, geoNormalWS);
-
-                Varyings output;
-                output.positionHCS = TransformWorldToHClip(positionWS);
-                output.normalWS = normalize(geoNormalWS - tangentialGrad);
-                return output;
-            }
-
-            half4 frag(Varyings input) : SV_Target
-            {
-                float3 normalWS = normalize(input.normalWS);
-
-            #if defined(_GBUFFER_NORMALS_OCT)
-                float2 octNormalWS = PackNormalOctQuadEncode(normalWS);
-                float2 remappedOctNormalWS =
-                    saturate(octNormalWS * 0.5 + 0.5);
-                half3 packedNormalWS =
-                    PackFloat2To888(remappedOctNormalWS);
-                return half4(packedNormalWS, 0.0);
-            #else
-                return half4(normalWS, 0.0);
-            #endif
-            }
             ENDHLSL
         }
 
-        // Some URP versions/features request DepthNormalsOnly instead of
-        // DepthNormals. Keeping the alias makes this shader work with either
-        // prepass path. Only the matching LightMode is selected, so the object
-        // is not rendered twice.
+        // Alias for URP versions/features that request DepthNormalsOnly.
         Pass
         {
             Name "DepthNormalsOnly"
@@ -1079,86 +798,16 @@ Shader "Custom/BloodCellTriplanar"
             Cull [_Cull]
 
             HLSLPROGRAM
-            #pragma vertex vert
+            #pragma vertex TessVertex
             #pragma hull hull
-            #pragma domain domain
-            #pragma fragment frag
+            #pragma domain DepthNormalsDomain
+            #pragma fragment DepthNormalsFrag
             #pragma target 4.6
             #pragma require tessellation
-            #pragma multi_compile_local _SPACE_OBJECT _SPACE_WORLD
+            #pragma shader_feature_local _SPACE_OBJECT _SPACE_WORLD
             #pragma multi_compile_fragment _ _GBUFFER_NORMALS_OCT
-
-            struct Attributes
-            {
-                float4 positionOS : POSITION;
-                float3 normalOS   : NORMAL;
-            };
-
-            struct Varyings
-            {
-                float4 positionHCS : SV_POSITION;
-                float3 normalWS    : TEXCOORD0;
-            };
-
-            TessControlPoint vert(Attributes input)
-            {
-                return TessVert(input.positionOS, input.normalOS);
-            }
-
-            [domain("tri")]
-            Varyings domain(TessFactors factors,
-                            const OutputPatch<TessControlPoint, 3> patch,
-                            float3 bary : SV_DomainLocation)
-            {
-                float3 basePositionOS, normalOS;
-                ResolvePatch(patch, bary, basePositionOS, normalOS);
-
-                float3 basePositionWS = TransformObjectToWorld(basePositionOS);
-                float3 geoNormalWS = normalize(TransformObjectToWorldNormal(normalOS));
-                float3 mapPos = MapPosition(basePositionOS, basePositionWS);
-
-                float3 positionWS = DisplaceWS(basePositionWS, geoNormalWS, mapPos);
-
-                float4 hd =
-                    HeightDWithDetail(
-                        mapPos,
-                        SurfaceDetailAmount(positionWS));
-                float3 rippleGradient;
-                Ripple(mapPos, rippleGradient);
-
-                float3 gradWS = MapDirToWorld(
-                    hd.yzw *
-                    _BumpStrength *
-                    SurfaceBumpMultiplier(positionWS) +
-                    rippleGradient);
-
-                float3 tangentialGrad =
-                    gradWS - geoNormalWS * dot(gradWS, geoNormalWS);
-
-                Varyings output;
-                output.positionHCS = TransformWorldToHClip(positionWS);
-                output.normalWS = normalize(geoNormalWS - tangentialGrad);
-                return output;
-            }
-
-            half4 frag(Varyings input) : SV_Target
-            {
-                float3 normalWS = normalize(input.normalWS);
-
-            #if defined(_GBUFFER_NORMALS_OCT)
-                float2 octNormalWS = PackNormalOctQuadEncode(normalWS);
-                float2 remappedOctNormalWS =
-                    saturate(octNormalWS * 0.5 + 0.5);
-                half3 packedNormalWS =
-                    PackFloat2To888(remappedOctNormalWS);
-                return half4(packedNormalWS, 0.0);
-            #else
-                return half4(normalWS, 0.0);
-            #endif
-            }
             ENDHLSL
         }
-
     }
 
     FallBack "Universal Render Pipeline/Lit"

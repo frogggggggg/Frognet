@@ -123,7 +123,7 @@ Material:
     - _BlendSharpness: 6
     - _Brightness: 0.68
     - _BumpScale: 1
-    - _BumpStrength: 1.45
+    - _BumpStrength: 2
     - _ClearCoatMask: 0
     - _ClearCoatSmoothness: 0
     - _ColorSteps: 1
@@ -135,7 +135,7 @@ Material:
     - _DetailFadeStart: 20
     - _DetailNormalMapScale: 1
     - _DetailStrength: 0
-    - _Displace: 0.234
+    - _Displace: 0.5
     - _DistantBumpMultiplier: 0.237
     - _DistantDetail: 0.319
     - _DistantDisplacementMultiplier: 0.3
@@ -158,7 +158,7 @@ Material:
     - _Metallic: 0
     - _Min: 1
     - _MorphSpeed: 0.73
-    - _NoiseScale: 3
+    - _NoiseScale: 1.88
     - _NormalIntensity: 1
     - _Occlusion: 0.45
     - _OcclusionStrength: 1
@@ -175,12 +175,12 @@ Material:
     - _RimOutput: 0.3
     - _RimPower: 2.6
     - _RimSteps: 1
-    - _RippleAmplitude: 2
+    - _RippleAmplitude: 8
     - _RippleDecay: 1
-    - _RippleInitialRadius: 1
+    - _RippleInitialRadius: 0.5
     - _RippleSpeed: 10
-    - _RippleWavelength: 5
-    - _RippleWidth: 5
+    - _RippleWavelength: 10
+    - _RippleWidth: 4
     - _Scale: 0.69
     - _Shades: 5
     - _Shading: 1
@@ -207,7 +207,7 @@ Material:
     m_Colors:
     - _BaseColor: {r: 1, g: 1, b: 1, a: 1}
     - _Clamp: {r: 0.7, g: 1, b: 0, a: 0}
-    - _Color: {r: 1, g: 0.3238992, b: 0.3238992, a: 1}
+    - _Color: {r: 0.9339623, g: 0.20705767, b: 0.20705767, a: 1}
     - _DeepColor: {r: 0.3018868, g: 0.08401567, b: 0.08401567, a: 1}
     - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}
     - _Offset: {r: 0, g: 0, b: 0, a: 0}
