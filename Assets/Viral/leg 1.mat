@@ -27,7 +27,8 @@ Material:
   m_ValidKeywords:
   - _SHADING_CEL
   - _SPACE_OBJECT
-  m_InvalidKeywords: []
+  m_InvalidKeywords:
+  - _FOLLOWRIPPLES_ON
   m_LightmapFlags: 4
   m_EnableInstancingVariants: 0
   m_DoubleSidedGI: 1
@@ -59,6 +60,7 @@ Material:
     - _DistantDetail: 0
     - _DistantDisplacementMultiplier: 0.3
     - _DistantTextureDetailMultiplier: 0.15
+    - _FollowRipples: 1
     - _Gain: 0.5
     - _GlossVariation: 0.12
     - _Glossiness: 0
@@ -83,7 +85,7 @@ Material:
     - _SpecThreshold: 0.55
     - _SubsurfaceStrength: 3
     - _TessDensity: 24
-    - _TessMax: 24
+    - _TessMax: 1
     - _ThinGlow: 0.606
     m_Colors:
     - _Color: {r: 1, g: 1, b: 1, a: 1}

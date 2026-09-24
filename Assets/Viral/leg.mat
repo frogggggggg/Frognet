@@ -27,7 +27,8 @@ Material:
   m_ValidKeywords:
   - _SHADING_CEL
   - _SPACE_OBJECT
-  m_InvalidKeywords: []
+  m_InvalidKeywords:
+  - _FOLLOWRIPPLES_ON
   m_LightmapFlags: 4
   m_EnableInstancingVariants: 0
   m_DoubleSidedGI: 1
@@ -144,6 +145,7 @@ Material:
     - _DstBlendAlpha: 0
     - _EmissionIntensity: 1
     - _EnvironmentReflections: 1
+    - _FollowRipples: 1
     - _Fresnel: 0.5
     - _Gain: 0.5
     - _GlossMapScale: 0
@@ -195,7 +197,7 @@ Material:
     - _SubsurfaceStrength: 0.9
     - _Surface: 0
     - _TessDensity: 24
-    - _TessMax: 24
+    - _TessMax: 1
     - _ThinGlow: 0.6
     - _TileX: 1
     - _TileY: 1

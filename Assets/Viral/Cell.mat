@@ -144,6 +144,7 @@ Material:
     - _DstBlendAlpha: 0
     - _EmissionIntensity: 1
     - _EnvironmentReflections: 1
+    - _FollowRipples: 0
     - _Fresnel: 0.5
     - _Gain: 0.42
     - _GlossMapScale: 0
@@ -177,8 +178,8 @@ Material:
     - _RimSteps: 1
     - _RippleAmplitude: 8
     - _RippleDecay: 1
-    - _RippleInitialRadius: 0.5
-    - _RippleSpeed: 10
+    - _RippleInitialRadius: 2
+    - _RippleSpeed: 7
     - _RippleWavelength: 10
     - _RippleWidth: 4
     - _Scale: 0.69

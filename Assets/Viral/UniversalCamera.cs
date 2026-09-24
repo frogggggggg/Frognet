@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using UnityEngine;
 #if ENABLE_INPUT_SYSTEM
@@ -36,6 +36,29 @@ using UnityEngine.InputSystem;
 /// </summary>
 public class UniversalCamera : MonoBehaviour
 {
+    /// <summary>
+    /// Set while gameplay owns the pointer (e.g. clicking something in the world):
+    /// drag-to-look ignores its drag button so the click doesn't also turn the camera.
+    /// </summary>
+    public static bool PointerCaptured;
+
+    /// <summary>
+    /// Set while gameplay wants the pointer free whatever the mode says (the command mode): the
+    /// cursor is unlocked and shown, so mouse look that needs a locked cursor stops with it.
+    /// </summary>
+    public static bool FreeCursor
+    {
+        get => s_freeCursor;
+        set
+        {
+            if (s_freeCursor == value) return;
+            s_freeCursor = value;
+            foreach (UniversalCamera c in FindObjectsByType<UniversalCamera>(FindObjectsSortMode.None))
+                if (c.isActiveAndEnabled) c.ApplyCursorSettings(c.ActiveMode);
+        }
+    }
+    static bool s_freeCursor;
+
     public enum Phase { LateUpdate, Update, FixedUpdate }
 
     /// <summary>
@@ -150,6 +173,15 @@ public class UniversalCamera : MonoBehaviour
 
         [Tooltip("Shape of the transition. X is normalized time and Y is blend amount.")]
         public AnimationCurve transitionCurve = AnimationCurve.EaseInOut(0f, 0f, 1f, 1f);
+
+        [Tooltip("Carry the camera's motion into the blend: position and rotation keep going the " +
+                 "way they were moving and spring into this mode, instead of easing in from a " +
+                 "standstill. Field of view and projection still follow the curve.")]
+        public bool transitionMomentum = true;
+
+        [Range(0.2f, 1f)]
+        [Tooltip("With momentum: 1 settles without overshooting; lower springs past and back.")]
+        public float transitionDamping = 0.7f;
 
         [Tooltip("Applied literally top to bottom. Each row changes only its own output.")]
         [SerializeReference]
@@ -642,6 +674,18 @@ public class UniversalCamera : MonoBehaviour
     Matrix4x4 _transitionStartProjection = Matrix4x4.identity;
     bool _projectionMatrixOverrideActive;
 
+    // Momentum transitions (inertialization): the gap between the outgoing pose
+    // and the incoming mode decays on a damped spring seeded with the camera's
+    // own velocity, so the camera carries its motion into the new mode.
+    bool _inertiaPending;
+    Vector3 _inertiaPosition, _inertiaPositionVelocity;
+    Vector3 _inertiaRotation, _inertiaRotationVelocity; // rotation vectors (axis * radians)
+
+    // The camera's recent motion, measured from its own output.
+    bool _motionSeeded;
+    Vector3 _motionLastPosition, _motionVelocity, _motionAngularVelocity;
+    Quaternion _motionLastRotation = Quaternion.identity;
+
     // Pose immediately BEFORE the first final modifier of each channel.
     // These are fed into the next tick so a lower behaviour cannot feed its
     // correction backward into behaviours above it.
@@ -683,6 +727,8 @@ public class UniversalCamera : MonoBehaviour
         _transitionElapsed = 0f;
         _positionFeedbackSeeded = false;
         _rotationFeedbackSeeded = false;
+        _motionSeeded = false;
+        _motionVelocity = _motionAngularVelocity = Vector3.zero;
         ClearProjectionMatrixOverride();
         _snapNextTick = true;
     }
@@ -704,6 +750,12 @@ public class UniversalCamera : MonoBehaviour
         _transitionStartPosition = transform.position;
         _transitionStartRotation = transform.rotation;
         _transitionStartFieldOfView = targetCamera ? targetCamera.fieldOfView : _baseFieldOfView;
+
+        // Momentum: the offset itself is taken on the first tick, once the
+        // incoming mode's pose exists; the velocity is the camera's own, now.
+        _inertiaPending = mode.transitionMomentum;
+        _inertiaPositionVelocity = _motionVelocity;
+        _inertiaRotationVelocity = _motionAngularVelocity;
 
         if (targetCamera)
         {
@@ -812,8 +864,9 @@ public class UniversalCamera : MonoBehaviour
     {
         if (mode == null) return;
 
-        Cursor.lockState = mode.lockCursor ? CursorLockMode.Locked : CursorLockMode.None;
-        Cursor.visible = !mode.hideCursor;
+        Cursor.lockState = mode.lockCursor && !s_freeCursor ? CursorLockMode.Locked : CursorLockMode.None;
+        Cursor.visible = !mode.hideCursor || s_freeCursor;
+        if (s_freeCursor) return; // leave the pointer where it is
 
         // CursorLockMode.Locked centres the pointer itself. When the cursor is
         // intentionally left unlocked, the new Input System lets us explicitly
@@ -1031,7 +1084,40 @@ public class UniversalCamera : MonoBehaviour
         Vector3 outputPosition = frame.position;
         Quaternion outputRotation = frame.rotation;
 
-        if (transitionThisTick)
+        if (transitionThisTick && mode.transitionMomentum)
+        {
+            // Offset from the incoming pose, decaying on a spring that starts at
+            // the camera's own velocity. Settles in about transitionDuration.
+            if (_inertiaPending)
+            {
+                _inertiaPending = false;
+                _inertiaPosition = mode.transitionPosition
+                    ? _transitionStartPosition - frame.position
+                    : Vector3.zero;
+                _inertiaRotation = mode.transitionRotation
+                    ? RotationVector(_transitionStartRotation * Quaternion.Inverse(frame.rotation))
+                    : Vector3.zero;
+                if (!mode.transitionPosition) _inertiaPositionVelocity = Vector3.zero;
+                if (!mode.transitionRotation) _inertiaRotationVelocity = Vector3.zero;
+            }
+
+            float zeta = Mathf.Clamp(mode.transitionDamping, 0.2f, 1f);
+            float omega = 4f / (zeta * Mathf.Max(mode.transitionDuration, 0.01f));
+            Spring(ref _inertiaPosition, ref _inertiaPositionVelocity, omega, zeta, deltaTime);
+            Spring(ref _inertiaRotation, ref _inertiaRotationVelocity, omega, zeta, deltaTime);
+
+            outputPosition = frame.position + _inertiaPosition;
+            outputRotation = RotationFromVector(_inertiaRotation) * frame.rotation;
+
+            // Done once the curve (FOV, projection) has finished AND the spring has settled.
+            bool settled = _inertiaPosition.sqrMagnitude < 1e-6f &&
+                           _inertiaPositionVelocity.sqrMagnitude < 1e-4f &&
+                           _inertiaRotation.sqrMagnitude < 1e-8f &&
+                           _inertiaRotationVelocity.sqrMagnitude < 1e-6f;
+            transitionCompletesThisTick &= settled ||
+                                           _transitionElapsed > mode.transitionDuration * 4f;
+        }
+        else if (transitionThisTick)
         {
             if (mode.transitionPosition)
                 outputPosition = Vector3.Lerp(_transitionStartPosition,
@@ -1045,6 +1131,7 @@ public class UniversalCamera : MonoBehaviour
         }
 
         transform.SetPositionAndRotation(outputPosition, outputRotation);
+        TrackMotion(outputPosition, outputRotation, deltaTime, snap);
 
         if (targetCamera && (projectionDrivenThisTick || _projectionWasDriven))
         {
@@ -1182,6 +1269,58 @@ public class UniversalCamera : MonoBehaviour
         }
 
         _snapNextTick = false;
+    }
+
+    // The camera's own velocity, lightly smoothed, for momentum transitions.
+    void TrackMotion(Vector3 position, Quaternion rotation, float deltaTime, bool snap)
+    {
+        if (_motionSeeded && !snap && deltaTime > 0f)
+        {
+            Vector3 velocity = (position - _motionLastPosition) / deltaTime;
+            Vector3 angular = RotationVector(rotation * Quaternion.Inverse(_motionLastRotation)) / deltaTime;
+            float k = 1f - Mathf.Exp(-20f * deltaTime);
+            _motionVelocity = Vector3.Lerp(_motionVelocity, velocity, k);
+            _motionAngularVelocity = Vector3.Lerp(_motionAngularVelocity, angular, k);
+        }
+        else if (snap)
+        {
+            _motionVelocity = _motionAngularVelocity = Vector3.zero;
+        }
+
+        _motionLastPosition = position;
+        _motionLastRotation = rotation;
+        _motionSeeded = true;
+    }
+
+    // Damped spring toward zero, substepped so a long frame can't blow it up.
+    static void Spring(ref Vector3 x, ref Vector3 v, float omega, float zeta, float deltaTime)
+    {
+        if (deltaTime <= 0f) return;
+        int steps = Mathf.Clamp(Mathf.CeilToInt(deltaTime * omega / 0.2f), 1, 32);
+        float h = deltaTime / steps;
+        for (int i = 0; i < steps; i++)
+        {
+            v += (-omega * omega * x - 2f * zeta * omega * v) * h;
+            x += v * h;
+        }
+    }
+
+    // Rotation as axis * radians (shortest way round), and back.
+    static Vector3 RotationVector(Quaternion q)
+    {
+        if (q.w < 0f) q = new Quaternion(-q.x, -q.y, -q.z, -q.w);
+        Vector3 axis = new Vector3(q.x, q.y, q.z);
+        float sin = axis.magnitude;
+        if (sin < 1e-7f) return axis * 2f; // small angle: ~axis * angle
+        return axis / sin * (2f * Mathf.Atan2(sin, q.w));
+    }
+
+    static Quaternion RotationFromVector(Vector3 r)
+    {
+        float angle = r.magnitude;
+        return angle < 1e-7f
+            ? Quaternion.identity
+            : Quaternion.AngleAxis(angle * Mathf.Rad2Deg, r / angle);
     }
 
     void ResolveTargetIfMissing()
@@ -1677,6 +1816,13 @@ public class UniversalCamera : MonoBehaviour
     [Serializable]
     public class MouseRotation : CameraBehaviour
     {
+        public enum DragMouseButton
+        {
+            Left,
+            Middle,
+            Right
+        }
+
         public AxisMask axes =
             AxisMask.All;
 
@@ -1698,6 +1844,17 @@ public class UniversalCamera : MonoBehaviour
         [Tooltip("Seconds to ease toward the mouse-controlled rotation. 0 = raw.")]
         public float smoothTime =
             0f;
+
+        [Tooltip(
+            "When enabled, mouse movement rotates the camera only while the " +
+            "selected Drag Button is held. Gamepad look still works normally. " +
+            "Useful for RTS/free-cursor modes.")]
+        public bool dragToLook =
+            false;
+
+        [Tooltip("Mouse button held to rotate when Drag To Look is enabled.")]
+        public DragMouseButton dragButton =
+            DragMouseButton.Middle;
 
         [Advanced]
         public bool invertY = false;
@@ -1754,6 +1911,43 @@ public class UniversalCamera : MonoBehaviour
             space == ReferenceSpace.TargetUp;
 
         public override bool IsRotationModifier => true;
+
+        bool IsDragButtonHeld()
+        {
+            if (!dragToLook)
+                return true;
+
+            if (PointerCaptured)
+                return false;
+
+#if ENABLE_INPUT_SYSTEM
+            Mouse mouse =
+                Mouse.current;
+
+            if (mouse == null)
+                return false;
+
+            switch (dragButton)
+            {
+                case DragMouseButton.Left:
+                    return mouse.leftButton.isPressed;
+
+                case DragMouseButton.Right:
+                    return mouse.rightButton.isPressed;
+
+                default:
+                    return mouse.middleButton.isPressed;
+            }
+
+#elif ENABLE_LEGACY_INPUT_MANAGER
+            return
+                Input.GetMouseButton(
+                    (int)dragButton);
+
+#else
+            return false;
+#endif
+        }
 
         public override void Initialise(
             UniversalCamera owner)
@@ -1941,15 +2135,20 @@ public class UniversalCamera : MonoBehaviour
             Vector2 delta =
                 Vector2.zero;
 
-            if (!requireCursorLock ||
+            bool cursorAllowsLook =
+                dragToLook ||
+                !requireCursorLock ||
                 Cursor.lockState ==
-                CursorLockMode.Locked)
+                    CursorLockMode.Locked;
+
+            if (cursorAllowsLook)
             {
                 delta =
                     ReadLookDelta(
                         ctx.DeltaTime,
                         stickSpeed,
-                        ref _lastMouseInputFrame);
+                        ref _lastMouseInputFrame,
+                        IsDragButtonHeld());
             }
 
             if (space == ReferenceSpace.Self)
@@ -2333,12 +2532,17 @@ public class UniversalCamera : MonoBehaviour
         [NonSerialized]
         Rigidbody _rigidbody;
 
+        // What full speed means right now (see Apply).
+        [NonSerialized]
+        float _reference;
+
         public override bool RequiresTarget => true;
         public override bool WritesFieldOfView => true;
 
         public override void Initialise(
             UniversalCamera owner)
         {
+            _reference = 0f;
             _seeded = false;
             _cachedTarget = null;
             _movement = null;
@@ -2398,9 +2602,23 @@ public class UniversalCamera : MonoBehaviour
                 speed =
                     _movement.speed;
 
+                // The top speed jumps the moment a boost starts (Burst), well before the body
+                // gets there: measured against it, the FOV dipped and then climbed back. So the
+                // reference only rises as fast as the body really speeds up (or at rest), and
+                // drops straight away when the top speed does.
+                float top =
+                    _movement.totalSpeed;
+
+                if (top <= _reference ||
+                    _reference <= 0f ||
+                    speed < deadZone)
+                    _reference = top;
+                else
+                    _reference = Mathf.Clamp(speed, _reference, top);
+
                 fullSpeed =
                     Mathf.Max(
-                        _movement.totalSpeed,
+                        _reference,
                         deadZone +
                         0.0001f);
 
@@ -2507,6 +2725,108 @@ public class UniversalCamera : MonoBehaviour
                         0.0001f,
                         orthographicSize);
             }
+        }
+    }
+
+    /// <summary>
+    /// Orthographic view of whatever the target stands on (its ISurfaceContact):
+    /// slides the camera across its view so the surface's centre sits in the
+    /// middle of the screen, backs it off far enough not to clip the surface,
+    /// and sizes the view to the surface plus a margin, grown if needed so the
+    /// target stays in frame. Keeps the last surface while the target is airborne;
+    /// with none yet it's a plain orthographic view of Fallback Size.
+    /// </summary>
+    [Serializable]
+    public class FrameSurface : CameraBehaviour
+    {
+        [Tooltip("World units added round the surface.")]
+        public float margin = 4f;
+
+        [Tooltip("The target is kept at least this far inside the frame.")]
+        public float targetMargin = 3f;
+
+        [Min(0.0001f)]
+        [Tooltip("Orthographic size before the target has stood on anything.")]
+        public float fallbackSize = 20f;
+
+        [Min(0f)]
+        [Tooltip("Seconds to ease the size (when the surface changes, or the target wanders off its edge). 0 snaps.")]
+        public float sizeSmoothing = 0.15f;
+
+        [NonSerialized] Transform _contactOf;
+        [NonSerialized] ISurfaceContact _contact;
+        [NonSerialized] Transform _surface;
+        [NonSerialized] Renderer _renderer;
+        [NonSerialized] float _size;
+
+        public override bool RequiresTarget => true;
+        public override bool WritesProjection => true;
+        public override bool IsPositionModifier => true;
+
+        public override void Initialise(UniversalCamera owner)
+        {
+            _contactOf = null;
+            _contact = null;
+            _surface = null;
+            _renderer = null;
+            _size = 0f;
+        }
+
+        public override void Apply(
+            ref CameraFrame frame,
+            in CameraContext ctx)
+        {
+            frame.orthographic = true;
+
+            if (_contactOf != ctx.Target)
+            {
+                _contactOf = ctx.Target;
+                _contact = ctx.Target.GetComponentInParent<ISurfaceContact>();
+            }
+
+            Transform standingOn = _contact?.Surface;
+            if (standingOn && standingOn != _surface)
+            {
+                _surface = standingOn;
+                _renderer = standingOn.GetComponent<Renderer>();
+            }
+
+            float wanted = fallbackSize;
+            if (_renderer)
+            {
+                // Centre and radius from the mesh's own bounds, so a spinning
+                // planet doesn't breathe the way its world AABB would.
+                Transform t = _renderer.transform;
+                Bounds local = _renderer.localBounds;
+                Vector3 centre = t.TransformPoint(local.center);
+                Vector3 scale = t.lossyScale;
+                float radius = Mathf.Max(
+                    Mathf.Abs(local.extents.x * scale.x),
+                    Mathf.Max(Mathf.Abs(local.extents.y * scale.y),
+                              Mathf.Abs(local.extents.z * scale.z)));
+
+                Vector3 forward = frame.Forward;
+                frame.position += Vector3.ProjectOnPlane(centre - frame.position, forward);
+
+                float depth = Vector3.Dot(centre - frame.position, forward);
+                float clearance = radius + margin + 1f;
+                if (depth < clearance)
+                    frame.position -= forward * (clearance - depth);
+
+                Camera cam = ctx.Owner.targetCamera;
+                float aspect = cam ? Mathf.Max(0.01f, cam.aspect) : 16f / 9f;
+                Vector3 toTarget = ctx.Target.position - centre;
+                float across = Mathf.Abs(Vector3.Dot(toTarget, frame.Right)) + targetMargin;
+                float upDown = Mathf.Abs(Vector3.Dot(toTarget, frame.Up)) + targetMargin;
+
+                wanted = Mathf.Max(radius + margin, Mathf.Max(upDown, across / aspect));
+            }
+
+            _size = _size <= 0f
+                ? wanted
+                : Mathf.Lerp(_size, wanted, Damp(sizeSmoothing, ctx.DeltaTime, ctx.Snap));
+
+            frame.orthographicSize = Mathf.Max(0.0001f, _size);
         }
     }
 
@@ -3293,116 +3613,6 @@ public class UniversalCamera : MonoBehaviour
     }
 
     [Serializable]
-    public class SpeedFieldOfView : CameraBehaviour
-    {
-        [Tooltip("Degrees added at full movement speed, on top of the Camera's authored FOV.")]
-        public float extraFieldOfView = 22f;
-
-        [Tooltip("Fallback full-effect speed when the target has no VirusMovement. " +
-                 "When VirusMovement is found, its totalSpeed is used instead.")]
-        public float speedForFullEffect = 14f;
-
-        [Advanced]
-        [Tooltip("Actual movement speed below this value produces no FOV increase.")]
-        public float deadZone = 2f;
-
-        [Advanced]
-        [Tooltip("Prefer VirusMovement.speed / VirusMovement.totalSpeed when that component " +
-                 "exists on the target or one of its parents. This avoids deriving speed " +
-                 "from render-frame position deltas, which can alternate high/low on an " +
-                 "interpolated Rigidbody and make unsmoothed FOV flicker.")]
-        public bool useMovementSpeed = true;
-
-        [NonSerialized] Vector3 _lastPosition;
-        [NonSerialized] bool _seeded;
-        [NonSerialized] Transform _cachedTarget;
-        [NonSerialized] VirusMovement _movement;
-        [NonSerialized] Rigidbody _rigidbody;
-
-        public override bool RequiresTarget => true;
-        public override bool WritesFieldOfView => true;
-
-        public override void Initialise(UniversalCamera owner)
-        {
-            _seeded = false;
-            _cachedTarget = null;
-            _movement = null;
-            _rigidbody = null;
-        }
-
-        void CacheSpeedSource(Transform target)
-        {
-            if (_cachedTarget == target) return;
-
-            _cachedTarget = target;
-            _movement = null;
-            _rigidbody = null;
-
-            if (!target) return;
-
-            if (useMovementSpeed)
-            {
-                _movement = target.GetComponentInParent<VirusMovement>();
-                if (!_movement)
-                    _movement = target.GetComponentInChildren<VirusMovement>();
-            }
-
-            // Rigidbody velocity is a much better fallback than position delta
-            // for a physics-driven target, especially with interpolation on.
-            _rigidbody = target.GetComponentInParent<Rigidbody>();
-            if (!_rigidbody)
-                _rigidbody = target.GetComponentInChildren<Rigidbody>();
-        }
-
-        public override void Apply(ref CameraFrame frame, in CameraContext ctx)
-        {
-            CacheSpeedSource(ctx.Target);
-
-            float speed;
-            float fullSpeed;
-
-            if (_movement)
-            {
-                // VirusMovement owns the authoritative speed. Flying comes from
-                // Rigidbody.linearVelocity; grounded speed comes from the actual
-                // graph-space step. totalSpeed is flySpeed or walkSpeed for the
-                // current state, so the FOV tracks the movement system itself.
-                speed = _movement.speed;
-                fullSpeed = Mathf.Max(_movement.totalSpeed, deadZone + 1e-4f);
-
-                _lastPosition = ctx.Target.position;
-                _seeded = true;
-            }
-            else if (_rigidbody && !_rigidbody.isKinematic)
-            {
-                speed = _rigidbody.linearVelocity.magnitude;
-                fullSpeed = Mathf.Max(speedForFullEffect, deadZone + 1e-4f);
-
-                _lastPosition = ctx.Target.position;
-                _seeded = true;
-            }
-            else
-            {
-                // Generic fallback for animation/kinematic targets.
-                if (!_seeded)
-                {
-                    _lastPosition = ctx.Target.position;
-                    _seeded = true;
-                    return;
-                }
-
-                float dt = Mathf.Max(ctx.DeltaTime, 1e-5f);
-                speed = (ctx.Target.position - _lastPosition).magnitude / dt;
-                fullSpeed = Mathf.Max(speedForFullEffect, deadZone + 1e-4f);
-                _lastPosition = ctx.Target.position;
-            }
-
-            float t = Mathf.InverseLerp(deadZone, fullSpeed, speed);
-            frame.fieldOfView += extraFieldOfView * t;
-        }
-    }
-
-    [Serializable]
     public class ConstantRotate : CameraBehaviour
     {
         public enum Basis { World, Self }
@@ -3438,6 +3648,20 @@ public class UniversalCamera : MonoBehaviour
         float stickSpeed,
         ref int lastMouseInputFrame)
     {
+        return
+            ReadLookDelta(
+                deltaTime,
+                stickSpeed,
+                ref lastMouseInputFrame,
+                true);
+    }
+
+    static Vector2 ReadLookDelta(
+        float deltaTime,
+        float stickSpeed,
+        ref int lastMouseInputFrame,
+        bool allowMouse)
+    {
         Vector2 delta =
             Vector2.zero;
 
@@ -3448,7 +3672,8 @@ public class UniversalCamera : MonoBehaviour
         if (lastMouseInputFrame !=
             frame)
         {
-            if (Mouse.current != null)
+            if (allowMouse &&
+                Mouse.current != null)
             {
                 delta +=
                     Mouse.current.delta.ReadValue();
@@ -3473,10 +3698,13 @@ public class UniversalCamera : MonoBehaviour
         if (lastMouseInputFrame !=
             frame)
         {
-            delta =
-                new Vector2(
-                    Input.GetAxisRaw("Mouse X"),
-                    Input.GetAxisRaw("Mouse Y"));
+            if (allowMouse)
+            {
+                delta =
+                    new Vector2(
+                        Input.GetAxisRaw("Mouse X"),
+                        Input.GetAxisRaw("Mouse Y"));
+            }
 
             lastMouseInputFrame =
                 frame;

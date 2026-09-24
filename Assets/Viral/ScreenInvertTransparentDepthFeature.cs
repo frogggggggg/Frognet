@@ -194,11 +194,12 @@ public class ScreenInvertTransparentDepthFeature : ScriptableRendererFeature
             _overrideMaterial =
                 overrideMaterial;
 
-            // ScreenInvertSweep samples _CameraDepthTexture. In the Editor
-            // some other view/effect may incidentally force depth creation,
-            // while a clean player build may not. Explicitly request it.
+            // ScreenInvertSweep samples _CameraDepthTexture and the scene
+            // normals. In the Editor some other view/effect may incidentally
+            // force them, while a clean player build may not. Request both.
             ConfigureInput(
-                ScriptableRenderPassInput.Depth);
+                ScriptableRenderPassInput.Depth |
+                ScriptableRenderPassInput.Normal);
         }
 
         public void Setup(

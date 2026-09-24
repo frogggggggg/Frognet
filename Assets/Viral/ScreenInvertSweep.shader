@@ -1,8 +1,10 @@
 // Unity ShaderLab - Universal Render Pipeline
 //
 // Screen-space scan expanding from a world point: everything inside the circle
-// is replaced with a flat colour, with white outlines traced around whatever
-// geometry is there, plus a bright ring riding the wavefront.
+// becomes a bio-lab terminal view (matching RopeRadialMenu): navy fill, cyan
+// outlines traced around whatever geometry is there, a faint grid with markers,
+// scanlines, vignette, and a dashed ring riding the wavefront with ripple echoes
+// behind it (ScreenInvertTest starts it from the impact under the virus).
 //
 // Drawn as an overlay quad rather than a renderer feature, so it needs no
 // changes to the URP renderer asset. The vertex stage ignores the transform
@@ -16,9 +18,23 @@ Shader "Custom/ScreenInvertSweep"
         _Progress ("Progress", Range(0,1)) = 0
 
         [Header(Look)]
-        _ScanColor ("Background", Color) = (0.016, 0.055, 0.180, 1)
-        _EdgeColor ("Outline", Color) = (0.85, 0.95, 1.0, 1)
-        _RingColor ("Wavefront", Color) = (0.70, 0.92, 1.0, 1)
+        _ScanColor ("Background", Color) = (0.010, 0.035, 0.120, 1)
+        _FillColor ("Geometry Fill", Color) = (0.016, 0.055, 0.160, 1)
+        _EdgeColor ("Outline", Color) = (0.55, 0.93, 1.0, 1)
+        _RingColor ("Wavefront", Color) = (0.55, 0.93, 1.0, 1)
+        _HighlightColor ("Player Outline", Color) = (0.62, 1.0, 0.45, 1)
+
+        [Header(Terminal)]
+        _GridColor ("Grid", Color) = (0.55, 0.93, 1.0, 0.07)
+        _GridSpacing ("Grid Spacing (px)", Range(8, 256)) = 64
+        _ScanlineStrength ("Scanlines", Range(0, 1)) = 0.3
+        _ScanlineSpacing ("Scanline Spacing (px)", Range(2, 12)) = 3
+        _Vignette ("Vignette", Range(0, 1)) = 0.55
+        _Flicker ("Flicker", Range(0, 0.3)) = 0.04
+        _RingSegments ("Wavefront Segments", Range(0, 128)) = 48
+        _RingEchoes ("Ripple Echoes", Range(0, 5)) = 3
+        _RingEchoSpacing ("Ripple Echo Spacing", Range(0.01, 0.3)) = 0.07
+        [HideInInspector] _HighlightSphere ("Player Sphere (set by ScreenInvertTest)", Vector) = (0,0,0,0)
 
         [Header(Outlines)]
         _EdgeThreshold ("Depth Threshold", Range(0.0005, 0.2)) = 0.012
@@ -71,6 +87,7 @@ Shader "Custom/ScreenInvertSweep"
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareNormalsTexture.hlsl"
 
             CBUFFER_START(UnityPerMaterial)
                 float4 _Center;
@@ -78,6 +95,18 @@ Shader "Custom/ScreenInvertSweep"
                 half4  _ScanColor;
                 half4  _EdgeColor;
                 half4  _RingColor;
+                half4  _HighlightColor;
+                half4  _FillColor;
+                half4  _GridColor;
+                float  _GridSpacing;
+                float  _ScanlineStrength;
+                float  _ScanlineSpacing;
+                float  _Vignette;
+                float  _Flicker;
+                float  _RingSegments;
+                float  _RingEchoes;
+                float  _RingEchoSpacing;
+                float4 _HighlightSphere; // xyz world centre, w radius; 0 = none
                 float  _EdgeThreshold;
                 float  _EdgeThickness;
                 float  _NormalThreshold;
@@ -130,32 +159,67 @@ Shader "Custom/ScreenInvertSweep"
                 return output;
             }
 
+            // Eye depth in metres. Orthographic depth is already linear
+            // (LinearEyeDepth assumes perspective and bends it), and focus mode
+            // is orthographic.
             float LinearDepthAt(float2 uv)
             {
-                return LinearEyeDepth(SampleSceneDepth(uv), _ZBufferParams);
+                float raw = SampleSceneDepth(uv);
+                if (unity_OrthoParams.w > 0.5)
+                {
+                #if UNITY_REVERSED_Z
+                    raw = 1.0 - raw;
+                #endif
+                    return lerp(_ProjectionParams.y, _ProjectionParams.z, raw);
+                }
+                return LinearEyeDepth(raw, _ZBufferParams);
             }
 
-            float3 WorldPosAt(float2 uv)
+            float3 WorldPositionAt(float2 uv)
             {
-                return ComputeWorldSpacePosition(uv, SampleSceneDepth(uv), UNITY_MATRIX_I_VP);
+            #if UNITY_REVERSED_Z
+                float depth = SampleSceneDepth(uv);
+            #else
+                float depth = lerp(UNITY_NEAR_CLIP_VALUE, 1.0, SampleSceneDepth(uv));
+            #endif
+                return ComputeWorldSpacePosition(uv, depth, UNITY_MATRIX_I_VP);
             }
 
-            // Surface normal rebuilt from the depth buffer.
-            //
-            // Sampling _CameraNormalsTexture would be cheaper, but URP only
-            // renders it when a renderer feature asks for normals -- and the
-            // whole point of doing this as an overlay quad is not to touch the
-            // renderer asset. Reconstruction needs nothing but depth.
+            // 1 where an outline belongs to the player: the nearest of the
+            // outline's taps (the object in front, on a silhouette) lies inside
+            // the player's sphere (ScreenInvertTest). Covers the body, legs and
+            // rope root alike, with nothing to set up on them.
+            float HighlightAt(float2 uv)
+            {
+                if (_HighlightSphere.w <= 0.0) return 0.0;
+
+                float2 texel = (_EdgeThickness / _ScreenParams.xy);
+                float2 taps[4] = { float2(-1.0, -1.0), float2(1.0, 1.0), float2(-1.0, 1.0), float2(1.0, -1.0) };
+
+                float2 nearest = uv;
+                float nearestDepth = LinearDepthAt(uv);
+                [unroll] for (int i = 0; i < 4; i++)
+                {
+                    float2 tap = uv + taps[i] * texel;
+                    float d = LinearDepthAt(tap);
+                    if (d < nearestDepth) { nearestDepth = d; nearest = tap; }
+                }
+
+                float r = _HighlightSphere.w;
+                float dist = distance(WorldPositionAt(nearest), _HighlightSphere.xyz);
+                return 1.0 - smoothstep(r * 0.85, r, dist);
+            }
+
+            // The surfaces' own normals (_CameraNormalsTexture: requested by
+            // ScreenInvertTransparentDepthFeature, and by SSAO). Not rebuilt from
+            // depth: that turns every triangle into a facet, so smooth-shaded
+            // surfaces showed their geometry. With the shaded normals, smooth
+            // surfaces outline only at their silhouettes and hard edges only
+            // where they're really hard. (Cells also drop their bump and
+            // displacement inside the sweep, so no texture shows either.)
             float3 NormalAt(float2 uv, float2 texel)
             {
-                float3 here = WorldPosAt(uv);
-                float3 right = WorldPosAt(uv + float2(texel.x, 0.0));
-                float3 up = WorldPosAt(uv + float2(0.0, texel.y));
-
-                float3 normal = cross(up - here, right - here);
-
-                float len = length(normal);
-                return len > 1e-8 ? normal / len : float3(0.0, 0.0, 1.0);
+                return SampleSceneNormals(uv);
             }
 
             // Roberts cross on scene depth. Two diagonal differences rather
@@ -254,11 +318,16 @@ Shader "Custom/ScreenInvertSweep"
                     gradient);
             }
 
-            // Depth alone only ever finds silhouettes and hard steps, so a
-            // smooth sphere comes out as a blank shape with an outline round
-            // it. Comparing reconstructed normals picks up curvature and
-            // creases as well, which is what makes an organic surface read as
-            // contoured rather than empty.
+            // Creases: where the shaded normal turns sharply between neighbouring
+            // pixels. With the surfaces' own normals that's only real hard edges
+            // (a cube's corners); smooth-shaded surfaces stay clean inside their
+            // silhouette.
+            // 0 when a neighbour has no normal (background): that edge is depth's.
+            float NormalDifference(float3 centre, float3 other)
+            {
+                return dot(other, other) < 0.25 ? 0.0 : 1.0 - dot(centre, other);
+            }
+
             float CurvatureOutline(float2 uv)
             {
                 if (_NormalStrength <= 0.001) return 0.0;
@@ -267,11 +336,16 @@ Shader "Custom/ScreenInvertSweep"
 
                 float3 centre = NormalAt(uv, texel);
 
+                // Nothing drawn here (sky/background): the normals texture is
+                // cleared to zero there, which would read as a crease everywhere.
+                // Silhouettes against the background come from depth instead.
+                if (dot(centre, centre) < 0.25) return 0.0;
+
                 float difference = 0.0;
-                difference = max(difference, 1.0 - dot(centre, NormalAt(uv + float2( texel.x, 0.0), texel)));
-                difference = max(difference, 1.0 - dot(centre, NormalAt(uv - float2( texel.x, 0.0), texel)));
-                difference = max(difference, 1.0 - dot(centre, NormalAt(uv + float2(0.0,  texel.y), texel)));
-                difference = max(difference, 1.0 - dot(centre, NormalAt(uv - float2(0.0,  texel.y), texel)));
+                difference = max(difference, NormalDifference(centre, NormalAt(uv + float2( texel.x, 0.0), texel)));
+                difference = max(difference, NormalDifference(centre, NormalAt(uv - float2( texel.x, 0.0), texel)));
+                difference = max(difference, NormalDifference(centre, NormalAt(uv + float2(0.0,  texel.y), texel)));
+                difference = max(difference, NormalDifference(centre, NormalAt(uv - float2(0.0,  texel.y), texel)));
 
                 float edge = smoothstep(_NormalThreshold * 0.5, _NormalThreshold, difference);
                 return edge * _NormalStrength;
@@ -420,15 +494,60 @@ Shader "Custom/ScreenInvertSweep"
                         outline,
                         ContourLines(screenUV));
 
-                half3 colour = lerp(_ScanColor.rgb, _EdgeColor.rgb, outline);
+                // Terminal look, matching the rope menu: things read as navy
+                // panels on a deeper navy, over a faint grid with + markers.
+                float2 pixel = screenUV * _ScreenParams.xy;
+                bool geometry = LinearDepthAt(screenUV) < _ProjectionParams.z * 0.99;
+                half3 colour = geometry ? _FillColor.rgb : _ScanColor.rgb;
 
-                // Bright band riding just behind the wavefront. Suppressed at
+                float2 cell = abs(frac(pixel / _GridSpacing + 0.5) - 0.5) * _GridSpacing; // px to nearest grid line
+                float gridLine = 1.0 - smoothstep(0.0, 1.0, min(cell.x, cell.y));
+                float marker = (1.0 - smoothstep(0.0, 1.0, min(cell.x, cell.y))) * step(max(cell.x, cell.y), 5.0);
+                float grid = saturate(gridLine * _GridColor.a * (geometry ? 0.5 : 1.0) + marker * _GridColor.a * 4.0);
+                colour = lerp(colour, _GridColor.rgb, grid);
+
+                half3 edgeColour = outline > 0.001
+                    ? lerp(_EdgeColor.rgb, _HighlightColor.rgb, HighlightAt(screenUV))
+                    : _EdgeColor.rgb;
+                colour = lerp(colour, edgeColour, outline);
+
+                // Wavefront: a dashed band (like the menu's dial) turning as it
+                // goes, with a thin solid line just inside it. Suppressed at
                 // rest so a progress of 0 or 1 shows no stray ring.
                 float ring = 0.0;
                 if (_RingWidth > 1e-4 && _Progress > 0.001 && _Progress < 0.999)
-                    ring = 1.0 - smoothstep(0.0, _RingWidth, abs(dist - radius));
+                {
+                    float band = 1.0 - smoothstep(0.0, _RingWidth, abs(dist - radius));
+                    if (_RingSegments >= 1.0)
+                    {
+                        float2 d = here - centre;
+                        float turn = atan2(d.y, d.x) / (2.0 * PI) + _Time.y * 0.08;
+                        band *= step(frac(turn * _RingSegments), 0.62);
+                    }
+                    float inner = 1.0 - smoothstep(0.0, 0.004, abs(dist - (radius - _RingWidth * 1.6)));
+                    ring = max(band, inner * 0.8);
 
+                    // Ripples out of the impact: fainter, thinner rings trailing the
+                    // front, spreading apart as they go, like the cell's own ripples.
+                    float spacing = _RingEchoSpacing * (0.5 + saturate(_Progress));
+                    [loop] for (int e = 1; e <= (int)_RingEchoes; e++)
+                    {
+                        float at = radius - _RingWidth * 1.6 - spacing * e;
+                        if (at <= 0.0) break;
+                        float width = 0.006 / (1.0 + e * 0.5);
+                        float echo = 1.0 - smoothstep(0.0, width, abs(dist - at));
+                        ring = max(ring, echo * (0.7 / e));
+                    }
+                }
                 colour = lerp(colour, _RingColor.rgb, ring);
+
+                // Screen: crawling scanlines, vignette, a touch of flicker.
+                float row = frac((pixel.y + _Time.y * 24.0) / _ScanlineSpacing);
+                colour *= 1.0 - _ScanlineStrength * step(row, 1.0 / _ScanlineSpacing);
+                float fromCentre = length((screenUV - 0.5) * float2(aspect, 1.0));
+                colour *= 1.0 - _Vignette * smoothstep(0.35, 1.1, fromCentre);
+                float noise = frac(sin(floor(_Time.y * 30.0) * 12.9898) * 43758.5453);
+                colour *= 1.0 + _Flicker * (noise - 0.5);
 
                 float alpha = max(inside * _ScanColor.a, ring);
                 return half4(colour, alpha);

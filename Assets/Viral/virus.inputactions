@@ -1,0 +1,35 @@
+{
+    "version": 1,
+    "name": "virus",
+    "maps": [
+        {
+            "name": "Player",
+            "id": "ed63f386-9b05-4e3d-9312-0ffb3c00d0a5",
+            "actions": [
+                {
+                    "name": "Inject",
+                    "type": "Button",
+                    "id": "06cdd979-3feb-4ed7-b867-66ba1f745bdd",
+                    "expectedControlType": "",
+                    "processors": "",
+                    "interactions": "",
+                    "initialStateCheck": false
+                }
+            ],
+            "bindings": [
+                {
+                    "name": "",
+                    "id": "309abba7-14d5-4066-ab2d-8f574a55c5d5",
+                    "path": "<Keyboard>/e",
+                    "interactions": "",
+                    "processors": "",
+                    "groups": "",
+                    "action": "Inject",
+                    "isComposite": false,
+                    "isPartOfComposite": false
+                }
+            ]
+        }
+    ],
+    "controlSchemes": []
+}

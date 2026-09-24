@@ -107,7 +107,8 @@ public class UniversalCameraEditor : Editor
         typeof(UniversalCamera.CameraCollision),
         typeof(UniversalCamera.FieldOfView),
         typeof(UniversalCamera.SpeedFOV),
-        typeof(UniversalCamera.Projection)
+        typeof(UniversalCamera.Projection),
+        typeof(UniversalCamera.FrameSurface)
     };
 
     public override void OnInspectorGUI()
@@ -257,6 +258,21 @@ public class UniversalCameraEditor : Editor
             mode,
             "transitionProjection",
             true);
+
+        SetBool(
+            mode,
+            "transitionMomentum",
+            true);
+
+        SerializedProperty damping =
+            mode.FindPropertyRelative(
+                "transitionDamping");
+
+        if (damping != null)
+        {
+            damping.floatValue =
+                0.7f;
+        }
 
         SerializedProperty curve =
             mode.FindPropertyRelative(
@@ -531,6 +547,22 @@ public class UniversalCameraEditor : Editor
             EditorGUILayout.PropertyField(
                 mode.FindPropertyRelative(
                     "transitionCurve"));
+
+            SerializedProperty momentum =
+                mode.FindPropertyRelative(
+                    "transitionMomentum");
+
+            EditorGUILayout.PropertyField(
+                momentum);
+
+            using (new EditorGUI.DisabledScope(
+                momentum == null ||
+                !momentum.boolValue))
+            {
+                EditorGUILayout.PropertyField(
+                    mode.FindPropertyRelative(
+                        "transitionDamping"));
+            }
 
             EditorGUI.indentLevel--;
         }
@@ -922,6 +954,7 @@ public class UniversalCameraEditor : Editor
             case "AddPosition":   return "Position Offset";
             case "SpeedFOV":      return "Speed Field Of View";
             case "Projection":    return "Projection";
+            case "FrameSurface":  return "Frame Surface";
         }
 
         string normal =
@@ -980,7 +1013,8 @@ public class UniversalCameraEditor : Editor
                 UniversalCamera.MouseRotation mouse)
             {
                 requiresLockedCursor |=
-                    mouse.requireCursorLock;
+                    mouse.requireCursorLock &&
+                    !mouse.dragToLook;
             }
             else if (behaviour is
                      UniversalCamera.MouseLook legacyMouse)

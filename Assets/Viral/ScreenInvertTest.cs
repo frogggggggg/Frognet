@@ -1,4 +1,4 @@
-using UnityEngine;
+﻿using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
 
@@ -49,18 +49,22 @@ public class ScreenInvertTest : MonoBehaviour
     [Tooltip("World point the sweep expands from.")]
     public Transform point;
 
+    [Tooltip("Start from the impact on the surface under Point (its ISurfaceContact) instead of " +
+             "Point itself, pinned to that surface as it moves.")]
+    public bool fromImpact = true;
+
+    [Min(0f)]
+    [Tooltip("How far under Point to look for the surface.")]
+    public float impactProbe = 6f;
+
     [Tooltip("Camera to overlay. ASSIGN THIS EXPLICITLY for builds if possible.")]
     public Camera targetCamera;
 
     [Tooltip(
-        "Recommended: assign your existing material that uses " +
-        "Custom/ScreenInvertSweep. The script makes a private runtime copy.")]
+        "Material using Custom/ScreenInvertSweep. Drawn as is (no copy), so " +
+        "editing it changes the sweep live; the per-frame values (centre, " +
+        "progress, player sphere) go through a property block and never touch it.")]
     public Material screenInvertMaterial;
-
-    [Tooltip(
-        "Fallback if no material is assigned. Drag ScreenInvertSweep.shader " +
-        "here so Unity cannot strip it from the build.")]
-    public Shader screenInvertShader;
 
     [Header("Sweep")]
 
@@ -76,9 +80,42 @@ public class ScreenInvertTest : MonoBehaviour
         "InOut does both.")]
     public Easing easing = Easing.QuadraticOut;
 
-    [Range(0f, 0.5f)]
-    [Tooltip("Softness of the expanding edge, as a fraction of screen height.")]
-    public float edgeSoftness = 0.015f;
+    [Header("Player Outline")]
+
+    [Tooltip("Outlines within Highlight Radius of this are drawn in the material's " +
+             "Player Outline colour. Empty: Point.")]
+    public Transform highlight;
+
+    [Tooltip("Radius of the player's sphere, legs included. 0 turns it off.")]
+    [Min(0f)]
+    public float highlightRadius = 2.5f;
+
+    [Header("Backs")]
+
+    [Tooltip(
+        "Inside the sweep, surfaces drawn with these shaders show their backs (their " +
+        "front faces are dropped), so you see into things. Play mode only.")]
+    public bool showBacks = true;
+
+    [Tooltip("Shaders that support it (INVERT_BACKFACES and a _Cull property).")]
+    public Shader[] backShaders;
+
+    [Header("Depth Of Field")]
+
+    [Tooltip(
+        "Fade depth of field out while the sweep covers the screen. The " +
+        "outlines are traced from scene depth before post-processing, so " +
+        "depth of field would blur far ones into a glow.")]
+    public bool fadeDepthOfField = true;
+
+    [Tooltip(
+        "Volume whose depth of field fades. Empty: the first global volume " +
+        "that has depth of field.")]
+    public Volume depthOfFieldVolume;
+
+    [Range(0.05f, 1f)]
+    [Tooltip("Sweep progress at which depth of field is fully gone.")]
+    public float depthOfFieldGoneAt = 0.5f;
 
     [Header("Diagnostics")]
 
@@ -99,8 +136,8 @@ public class ScreenInvertTest : MonoBehaviour
     static readonly int ProgressId =
         Shader.PropertyToID("_Progress");
 
-    static readonly int SoftnessId =
-        Shader.PropertyToID("_SweepSoftness");
+    static readonly int HighlightId =
+        Shader.PropertyToID("_HighlightSphere");
 
     static readonly int DebugViewId =
         Shader.PropertyToID("_DebugView");
@@ -116,6 +153,24 @@ public class ScreenInvertTest : MonoBehaviour
     Mesh _mesh;
     MeshRenderer _renderer;
     Material _material;
+    MaterialPropertyBlock _block;
+
+    const string BacksKeyword = "INVERT_BACKFACES";
+    static readonly int InvertSweepId = Shader.PropertyToID("_InvertSweep");
+    static readonly int CullId = Shader.PropertyToID("_Cull");
+
+    // Materials switched to Cull Off while the sweep shows backs, with their own cull to restore.
+    readonly System.Collections.Generic.Dictionary<Material, float> _backMaterials =
+        new System.Collections.Generic.Dictionary<Material, float>();
+    bool _backsOn;
+
+    // Runtime copy of the volume's depth of field, with its values to restore.
+    DepthOfField _dof;
+    bool _dofSearched;
+    bool _dofActive;
+    float _dofStart;
+    float _dofEnd;
+    float _dofAperture;
 
     void OnEnable()
     {
@@ -125,12 +180,18 @@ public class ScreenInvertTest : MonoBehaviour
     void OnDisable()
     {
         Cleanup();
+        RestoreDepthOfField();
+        SetBacks(false);
     }
 
     void OnDestroy()
     {
         Cleanup();
+        RestoreDepthOfField();
+        SetBacks(false);
     }
+
+    void OnApplicationQuit() => SetBacks(false);
 
     public void Trigger(
         bool on)
@@ -186,52 +247,18 @@ public class ScreenInvertTest : MonoBehaviour
             urp.requiresDepthTexture = true;
         }
 
-        // Prefer a serialized material because it guarantees the shader is a
-        // real project/build dependency and preserves all of your material
-        // colours/outline settings.
-        if (screenInvertMaterial)
+        _material =
+            screenInvertMaterial;
+
+        if (!_material)
         {
-            _material =
-                new Material(
-                    screenInvertMaterial);
+            Debug.LogError(
+                "ScreenInvertTest: assign Screen Invert Material " +
+                "(a material using Custom/ScreenInvertSweep).",
+                this);
+
+            return;
         }
-        else
-        {
-            Shader shader =
-                screenInvertShader;
-
-#if UNITY_EDITOR
-            // Editor convenience only. Do NOT rely on Shader.Find for builds.
-            if (!shader)
-            {
-                shader =
-                    Shader.Find(
-                        "Custom/ScreenInvertSweep");
-            }
-#endif
-
-            if (!shader)
-            {
-                Debug.LogError(
-                    "ScreenInvertTest: assign Screen Invert Material or " +
-                    "Screen Invert Shader in the Inspector. " +
-                    "A runtime-only Shader.Find reference may be stripped " +
-                    "from a standalone build.",
-                    this);
-
-                return;
-            }
-
-            _material =
-                new Material(
-                    shader);
-        }
-
-        _material.name =
-            "__ScreenInvertRuntimeMaterial";
-
-        _material.hideFlags =
-            HideFlags.DontSave;
 
         _quad =
             new GameObject(
@@ -383,11 +410,12 @@ public class ScreenInvertTest : MonoBehaviour
                 ? targetCamera
                 : Camera.main;
 
-        // Rebuild if the actual gameplay camera changes.
+        // Rebuild if the actual gameplay camera or the material changes.
         if (!_quad ||
             !_material ||
             !_renderer ||
-            desiredCamera != _camera)
+            desiredCamera != _camera ||
+            _material != screenInvertMaterial)
         {
             Build();
         }
@@ -405,6 +433,9 @@ public class ScreenInvertTest : MonoBehaviour
                   duration
                 : 1f;
 
+        if (trigger && !_wasTriggered) CaptureImpact(); // each sweep starts where this one hits
+        _wasTriggered = trigger;
+
         _progress =
             Mathf.Clamp01(
                 _progress +
@@ -413,6 +444,8 @@ public class ScreenInvertTest : MonoBehaviour
                     : -step));
 
         UpdateMaterial();
+        UpdateDepthOfField();
+        UpdateBacks();
 
         // Debug modes must draw even when progress is zero.
         _renderer.enabled =
@@ -422,17 +455,29 @@ public class ScreenInvertTest : MonoBehaviour
                 DebugView.Off;
     }
 
+    // Per-frame values only, through a property block: the material asset
+    // keeps the look and stays editable while this runs.
     void UpdateMaterial()
     {
-        if (!_material)
+        if (!_renderer)
             return;
 
-        Vector3 worldPoint =
-            point
-                ? point.position
-                : transform.position;
+        _block ??= new MaterialPropertyBlock(); // plain fields don't survive a play-mode reload
 
-        _material.SetVector(
+        Vector3 worldPoint =
+            SweepCentre();
+
+        Transform player =
+            highlight
+                ? highlight
+                : point;
+
+        Vector3 p =
+            player
+                ? player.position
+                : worldPoint;
+
+        _block.SetVector(
             CentreId,
             new Vector4(
                 worldPoint.x,
@@ -440,23 +485,213 @@ public class ScreenInvertTest : MonoBehaviour
                 worldPoint.z,
                 1f));
 
-        _material.SetFloat(
+        _block.SetFloat(
             ProgressId,
             Evaluate(
                 easing,
                 _progress));
 
-        _material.SetFloat(
-            SoftnessId,
-            edgeSoftness);
+        _block.SetVector(
+            HighlightId,
+            new Vector4(
+                p.x,
+                p.y,
+                p.z,
+                player ? highlightRadius : 0f));
 
-        _material.SetFloat(
+        _block.SetFloat(
             DebugViewId,
             (float)debugView);
 
-        _material.SetFloat(
+        _block.SetFloat(
             DebugRangeId,
             debugRange);
+
+        _renderer.SetPropertyBlock(
+            _block);
+    }
+
+    // ---------------- centre ----------------
+
+    bool _wasTriggered;
+    Transform _impactSurface;
+    Vector3 _impactLocal;
+
+    Vector3 SweepCentre()
+    {
+        if (fromImpact && _impactSurface)
+            return _impactSurface.TransformPoint(_impactLocal);
+        return point ? point.position : transform.position;
+    }
+
+    // The spot on the surface under Point, kept in the surface's own space so the sweep rides it.
+    void CaptureImpact()
+    {
+        _impactSurface = null;
+        if (!fromImpact || !point) return;
+
+        ISurfaceContact contact = point.GetComponentInParent<ISurfaceContact>();
+        Transform surface = contact != null && contact.OnSurface ? contact.Surface : null;
+        if (!surface) return;
+
+        Vector3 down = -contact.SurfaceNormal;
+        Vector3 at = point.position - down * 0.05f;
+        Transform self = point.root;
+        Vector3 hit = point.position + down * 0.5f; // fallback: just under the body
+        float nearest = float.MaxValue;
+        foreach (RaycastHit h in Physics.RaycastAll(at, down, impactProbe, ~0, QueryTriggerInteraction.Ignore))
+        {
+            if (h.transform.IsChildOf(self) || h.distance >= nearest) continue;
+            nearest = h.distance;
+            hit = h.point;
+        }
+
+        _impactSurface = surface;
+        _impactLocal = surface.InverseTransformPoint(hit);
+    }
+
+    // Inside the sweep, surfaces show their backs: their materials go Cull Off and the shader
+    // (INVERT_BACKFACES) drops front faces inside the same circle, in colour and depth, so the
+    // outlines trace the insides. Only while sweeping; the materials' own cull comes back after
+    // (they're shared assets, so it must).
+    void UpdateBacks()
+    {
+        bool on = showBacks && Application.isPlaying && _progress > 0.0001f;
+        SetBacks(on);
+        if (!on) return;
+
+        Vector3 c = SweepCentre();
+        Shader.SetGlobalVector(InvertSweepId, new Vector4(c.x, c.y, c.z, Evaluate(easing, _progress)));
+    }
+
+    void SetBacks(bool on)
+    {
+        if (on == _backsOn) return;
+        _backsOn = on;
+
+        if (on)
+        {
+            Shader fallback = Shader.Find("Custom/BloodCellTriplanar");
+            foreach (Renderer rend in FindObjectsByType<Renderer>(FindObjectsSortMode.None))
+                foreach (Material m in rend.sharedMaterials)
+                {
+                    if (!m || _backMaterials.ContainsKey(m) || !m.HasProperty(CullId)) continue;
+                    bool supported = backShaders != null && backShaders.Length > 0
+                        ? System.Array.IndexOf(backShaders, m.shader) >= 0
+                        : m.shader == fallback;
+                    if (!supported) continue;
+                    _backMaterials[m] = m.GetFloat(CullId);
+                    m.SetFloat(CullId, (float)CullMode.Off);
+                }
+            Shader.EnableKeyword(BacksKeyword);
+        }
+        else
+        {
+            Shader.DisableKeyword(BacksKeyword);
+            Shader.SetGlobalVector(InvertSweepId, Vector4.zero); // nothing reads a stale sweep (drill x-ray)
+            foreach (var pair in _backMaterials)
+                if (pair.Key) pair.Key.SetFloat(CullId, pair.Value);
+            _backMaterials.Clear();
+        }
+    }
+
+    // Pushes the blur away as the sweep covers the screen, rather than switching
+    // it off, so there's no pop: Gaussian start/end recede to infinity, Bokeh
+    // stops down to f/32, then the effect is disabled once gone. Play mode only,
+    // on the volume's runtime profile copy, never the asset.
+    void UpdateDepthOfField()
+    {
+        if (!Application.isPlaying ||
+            !fadeDepthOfField)
+        {
+            RestoreDepthOfField();
+            return;
+        }
+
+        if (_dof == null &&
+            !FindDepthOfField())
+        {
+            return;
+        }
+
+        float k =
+            Mathf.Clamp01(
+                Progress /
+                depthOfFieldGoneAt);
+
+        float keep =
+            Mathf.Max(
+                1f - k,
+                0.001f);
+
+        _dof.active =
+            _dofActive &&
+            k < 0.999f;
+
+        _dof.gaussianStart.value =
+            _dofStart / keep;
+
+        _dof.gaussianEnd.value =
+            _dofEnd / keep;
+
+        _dof.aperture.value =
+            Mathf.Lerp(
+                _dofAperture,
+                32f,
+                k);
+    }
+
+    bool FindDepthOfField()
+    {
+        if (_dofSearched)
+            return false;
+
+        _dofSearched = true;
+
+        Volume volume =
+            depthOfFieldVolume;
+
+        if (!volume)
+        {
+            foreach (Volume v in FindObjectsByType<Volume>(FindObjectsSortMode.None))
+            {
+                if (v.isGlobal &&
+                    v.sharedProfile &&
+                    v.sharedProfile.Has<DepthOfField>())
+                {
+                    volume = v;
+                    break;
+                }
+            }
+        }
+
+        // .profile is this volume's own runtime copy.
+        if (!volume ||
+            !volume.profile.TryGet(out _dof))
+        {
+            _dof = null;
+            return false;
+        }
+
+        _dofActive = _dof.active;
+        _dofStart = _dof.gaussianStart.value;
+        _dofEnd = _dof.gaussianEnd.value;
+        _dofAperture = _dof.aperture.value;
+        return true;
+    }
+
+    void RestoreDepthOfField()
+    {
+        if (_dof != null)
+        {
+            _dof.active = _dofActive;
+            _dof.gaussianStart.value = _dofStart;
+            _dof.gaussianEnd.value = _dofEnd;
+            _dof.aperture.value = _dofAperture;
+        }
+
+        _dof = null;
+        _dofSearched = false;
     }
 
     public static float Evaluate(
@@ -568,14 +803,7 @@ public class ScreenInvertTest : MonoBehaviour
                 DestroyImmediate(_mesh);
         }
 
-        if (_material)
-        {
-            if (Application.isPlaying)
-                Destroy(_material);
-            else
-                DestroyImmediate(_material);
-        }
-
+        // _material is the asset itself: never destroyed here.
         _quad = null;
         _mesh = null;
         _renderer = null;

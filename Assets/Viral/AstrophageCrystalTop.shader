@@ -16,6 +16,7 @@ Shader "Custom/AstrophageCrystalTop"
         [HDR] _BaseColor ("Crystal Color", Color) = (0.08, 0.52, 0.74, 1)
         [HDR] _DeepColor ("Deep Color", Color) = (0.01, 0.08, 0.16, 1)
         _Alpha ("Transparency", Range(0.03, 1)) = 0.46
+        [Toggle] _FollowRipples ("Ride Nearby Cell Ripples", Float) = 1
 
         [Header(Wireframe)]
         [HDR] _WireColor ("Wireframe Color", Color) = (0.50, 1.05, 1.35, 1)
@@ -38,6 +39,8 @@ Shader "Custom/AstrophageCrystalTop"
         _DNARungStrength ("DNA Rung Strength", Range(0, 3)) = 0.22
         _DNAScrollSpeed ("DNA Scroll Speed", Range(-5, 5)) = 0.10
         _DNAChaos ("DNA Squiggle Chaos", Range(0, 3)) = 1.10
+        _DNAFadeStart ("DNA Fade Start (camera distance)", Float) = 6
+        _DNAFadeEnd ("DNA Gone At (camera distance)", Float) = 25
 
         [Header(Rim)]
         [HDR] _RimColor ("Rim Color", Color) = (0.25, 0.85, 1.20, 1)
@@ -83,8 +86,10 @@ Shader "Custom/AstrophageCrystalTop"
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
+            #include "RippleField.hlsl"
 
             CBUFFER_START(UnityPerMaterial)
+                float _FollowRipples;
                 half4 _BaseColor;
                 half4 _DeepColor;
                 half  _Alpha;
@@ -108,6 +113,8 @@ Shader "Custom/AstrophageCrystalTop"
                 half  _DNARungStrength;
                 float _DNAScrollSpeed;
                 float _DNAChaos;
+                float _DNAFadeStart;
+                float _DNAFadeEnd;
 
                 half4 _RimColor;
                 float _RimPower;
@@ -151,14 +158,15 @@ Shader "Custom/AstrophageCrystalTop"
             {
                 GeomInput output;
 
-                VertexPositionInputs positionInputs =
-                    GetVertexPositionInputs(input.positionOS.xyz);
+                float3 positionWS = TransformObjectToWorld(input.positionOS.xyz);
+                if (_FollowRipples > 0.5)
+                    positionWS += RippleFieldOffset(positionWS); // ride nearby cell ripples
 
                 VertexNormalInputs normalInputs =
                     GetVertexNormalInputs(input.normalOS);
 
-                output.positionCS = positionInputs.positionCS;
-                output.positionWS = positionInputs.positionWS;
+                output.positionCS = TransformWorldToHClip(positionWS);
+                output.positionWS = positionWS;
                 output.normalWS = normalInputs.normalWS;
                 output.positionOS = input.positionOS.xyz;
                 output.normalOS = input.normalOS;
@@ -252,6 +260,13 @@ Shader "Custom/AstrophageCrystalTop"
             {
                 float3 fw = fwidth(bary);
 
+                // Farther from every edge than the widest a line can get (thickness
+                // variance maxed out): no line here, so skip the six noise lookups.
+                float widest = _WireThickness *
+                    (1.0 + _WireThicknessVariance * _WireJitterStrength) * 2.1;
+                if (all(bary > fw * widest))
+                    return 0.0;
+
                 // Stable edge identities.
                 float edgeId0 = 0.173;
                 float edgeId1 = 0.517;
@@ -325,21 +340,16 @@ Shader "Custom/AstrophageCrystalTop"
                 return 1.0 - smoothstep(width, width * 2.2, d);
             }
 
+            // q: the sample in the cluster's own frame; t: its scrolled position along the axis.
             float FilamentCore(
-                float3 p,
-                float3 axis,
+                float3 q,
+                float t,
                 float2 offset,
                 float phase,
                 float radius,
                 float width,
                 float chaos)
             {
-                float3x3 frame = AxisFrame(axis);
-                float3 q = mul(transpose(frame), p);
-
-                float t =
-                    q.y +
-                    _Time.y * _DNAScrollSpeed;
 
                 float2 center;
                 center.x =
@@ -359,9 +369,11 @@ Shader "Custom/AstrophageCrystalTop"
                 return LineMaskToCenter(slice, center, width);
             }
 
+            // toFrame: transpose(AxisFrame(axis)), built once per pixel by the caller rather
+            // than four times per cluster per march step.
             float DoubleFilamentCluster(
                 float3 p,
-                float3 axis,
+                float3x3 toFrame,
                 float2 offset,
                 float phase,
                 float width,
@@ -372,10 +384,15 @@ Shader "Custom/AstrophageCrystalTop"
                 float radiusA = 0.16 * density;
                 float radiusB = 0.11 * density;
 
+                float3 q = mul(toFrame, p);
+                float tt =
+                    q.y +
+                    _Time.y * _DNAScrollSpeed;
+
                 float a =
                     FilamentCore(
-                        p,
-                        axis,
+                        q,
+                        tt,
                         offset + float2(-0.04, 0.02),
                         phase,
                         radiusA,
@@ -384,8 +401,8 @@ Shader "Custom/AstrophageCrystalTop"
 
                 float b =
                     FilamentCore(
-                        p,
-                        axis,
+                        q,
+                        tt,
                         offset + float2(0.03, -0.03),
                         phase + 1.25,
                         radiusB,
@@ -394,19 +411,13 @@ Shader "Custom/AstrophageCrystalTop"
 
                 float c =
                     FilamentCore(
-                        p,
-                        axis,
+                        q,
+                        tt,
                         offset + float2(0.00, 0.00),
                         phase + 2.10,
                         radiusB * 0.85,
                         width * 0.85,
                         chaos * 0.9);
-
-                float3x3 frame = AxisFrame(axis);
-                float3 q = mul(transpose(frame), p);
-                float tt =
-                    q.y +
-                    _Time.y * _DNAScrollSpeed;
 
                 float rungPhase =
                     abs(frac(tt * 1.9 + phase * 0.11) - 0.5) * 2.0;
@@ -428,8 +439,15 @@ Shader "Custom/AstrophageCrystalTop"
 
             float InternalDNAVolume(
                 float3 surfacePosOS,
-                float3 normalOS)
+                float3 normalOS,
+                int steps)
             {
+                // The four clusters' frames, once per pixel.
+                float3x3 frame0 = transpose(AxisFrame(float3(1.0, 0.35, 0.20)));
+                float3x3 frame1 = transpose(AxisFrame(float3(0.22, 1.0, 0.40)));
+                float3x3 frame2 = transpose(AxisFrame(float3(0.46, 0.28, 1.0)));
+                float3x3 frame3 = transpose(AxisFrame(float3(0.68, 1.0, 0.18)));
+
                 float3 centerDir =
                     normalize(-surfacePosOS + normalOS * 0.02);
 
@@ -445,10 +463,10 @@ Shader "Custom/AstrophageCrystalTop"
                 float accum = 0.0;
                 float transmittance = 1.0;
 
-                [unroll]
-                for (int i = 0; i < 10; i++)
+                [loop]
+                for (int i = 0; i < steps; i++)
                 {
-                    float t = (i + 0.5) / 10.0;
+                    float t = (i + 0.5) / steps;
 
                     float3 p =
                         (surfacePosOS + marchDir * (t * depth)) *
@@ -458,7 +476,7 @@ Shader "Custom/AstrophageCrystalTop"
 
                     sample += DoubleFilamentCluster(
                         p,
-                        normalize(float3(1.0, 0.35, 0.20)),
+                        frame0,
                         float2(-0.08, 0.10),
                         0.25,
                         _DNAWidth,
@@ -468,7 +486,7 @@ Shader "Custom/AstrophageCrystalTop"
 
                     sample += DoubleFilamentCluster(
                         p + float3(0.14, -0.08, 0.18),
-                        normalize(float3(0.22, 1.0, 0.40)),
+                        frame1,
                         float2(0.12, -0.06),
                         1.35,
                         _DNAWidth * 0.92,
@@ -478,7 +496,7 @@ Shader "Custom/AstrophageCrystalTop"
 
                     sample += DoubleFilamentCluster(
                         p + float3(-0.20, 0.14, -0.10),
-                        normalize(float3(0.46, 0.28, 1.0)),
+                        frame2,
                         float2(-0.02, -0.13),
                         2.35,
                         _DNAWidth * 0.88,
@@ -488,7 +506,7 @@ Shader "Custom/AstrophageCrystalTop"
 
                     sample += DoubleFilamentCluster(
                         p + float3(0.08, 0.24, -0.18),
-                        normalize(float3(0.68, 1.0, 0.18)),
+                        frame3,
                         float2(0.05, 0.16),
                         3.40,
                         _DNAWidth * 0.78,
@@ -563,10 +581,25 @@ Shader "Custom/AstrophageCrystalTop"
                     mainLight.color *
                     specular;
 
-                float dnaMask =
-                    InternalDNAVolume(
-                        input.positionOS,
-                        input.normalOS);
+                // Interior detail you can't make out from far away: fewer march steps as it
+                // fades, none at all beyond the end (a branch that's the same across the shell).
+                float3 objectPosWS = GetObjectToWorldMatrix()._m03_m13_m23;
+                float dnaLod =
+                    1.0 - smoothstep(
+                        _DNAFadeStart,
+                        max(_DNAFadeEnd, _DNAFadeStart + 0.01),
+                        distance(objectPosWS, _WorldSpaceCameraPos));
+
+                float dnaMask = 0.0;
+                if (dnaLod > 0.001 && _DNAStrength + _DNAOpacityBoost > 0.0)
+                {
+                    int steps = (int)lerp(4.0, 10.0, dnaLod);
+                    dnaMask =
+                        InternalDNAVolume(
+                            input.positionOS,
+                            input.normalOS,
+                            steps) * dnaLod;
+                }
 
                 color +=
                     _DNAColor.rgb *

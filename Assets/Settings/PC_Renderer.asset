@@ -20,6 +20,8 @@ MonoBehaviour:
     minimumQueue: 2501
     maximumQueue: 3999
     passEvent: 450
+    transparentDepthShader: {fileID: 0}
+    screenInvertSweepShader: {fileID: 0}
 --- !u!114 &-638358480604012935
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -93,7 +95,8 @@ MonoBehaviour:
   - {fileID: -638358480604012935}
   - {fileID: 5304239556937499807}
   - {fileID: -1951618410427278500}
-  m_RendererFeatureMap: ad6b866f10d7b46c0100f444829163450200f44482916345795e3d14581824f79fc4d522c6719c495c9b5e556575eae4
+  - {fileID: 6971555128551412420}
+  m_RendererFeatureMap: ad6b866f10d7b46c0100f444829163450200f44482916345795e3d14581824f79fc4d522c6719c495c9b5e556575eae4c4125cd973f0bf60
   m_UseNativeRenderPass: 1
   xrSystemData: {fileID: 0}
   postProcessData: {fileID: 11400000, guid: 41439944d30ece34e96484bdb6645b55, type: 2}
@@ -245,6 +248,26 @@ MonoBehaviour:
       restoreCamera: 1
       offset: {x: 0, y: 0, z: 0, w: 0}
       cameraFieldOfView: 60
+--- !u!114 &6971555128551412420
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3373790da145a5148b759c96d2bdf05e, type: 3}
+  m_Name: TransparentDepthForPostFeature
+  m_EditorClassIdentifier: 
+  m_Active: 1
+  settings:
+    layerMask:
+      serializedVersion: 2
+      m_Bits: 4294967295
+    alphaCutoff: 0.1
+    shader: {fileID: 4800000, guid: 0d44eba6a365c9141b1954828a42e83f, type: 3}
+    debugShowStamped: 0
 --- !u!114 &7833122117494664109
 MonoBehaviour:
   m_ObjectHideFlags: 0
