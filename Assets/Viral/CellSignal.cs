@@ -43,7 +43,7 @@ public class CellSignal : MonoBehaviour, ICompletable
         if (!t) return null;
         if (s_byTransform.TryGetValue(t, out CellSignal known) && known) return known;
         Surface s = t.GetComponentInParent<Surface>();
-        if (!s) return null;
+        if (!s || !s.isCell) return null;
         CellSignal c = s.GetComponent<CellSignal>();
         if (!c) c = s.gameObject.AddComponent<CellSignal>();
         s_byTransform[t] = c;

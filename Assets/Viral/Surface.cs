@@ -28,6 +28,9 @@ public partial class Surface : MonoBehaviour
     [Range(0f, 180f), Tooltip("Edges sharper than this stay hard (cube); gentler ones are smoothed over (sphere). " +
                               "Shared by every Surface with this mesh: the first one to build it decides.")]
     public float creaseAngle = 60f;
+    [Tooltip("A cell: raises immune signals when walked on, and is a command-mode \"Cell\" target. Off for other " +
+             "walkable things (resource chunks).")]
+    public bool isCell = true;
 
     // Graphs are baked scaled up to this size (world units across the mesh's longest
     // half-axis) because A* stores vertices in millimetres: a cell mesh of radius 0.5
@@ -382,6 +385,7 @@ public partial class Surface : MonoBehaviour
         graph.recalculateNormals = false; // it rewinds triangles to face up: wrong on a closed 3D shape
         astar.Scan(graph);
         CornerData.Remove(graph);
+        SurfaceField.Forget(graph);
         return graph;
     }
 

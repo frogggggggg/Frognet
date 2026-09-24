@@ -44,12 +44,26 @@ public static class TerminalUI
         }
     }
 
+    // Asking the OS for its fonts is slow, and every screen asks when it's first built (focus mode,
+    // the genome, a rope menu...), which showed as a hitch the first time each opened. So the list
+    // is read once, at load, and each font made once and shared (nothing destroys them).
+    static string[] s_installed;
+    static readonly System.Collections.Generic.Dictionary<string, Font> s_fonts =
+        new System.Collections.Generic.Dictionary<string, Font>();
+
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+    static void Prewarm() => Font(DefaultFonts);
+
     public static Font Font(string[] names)
     {
-        string[] installed = UnityEngine.Font.GetOSInstalledFontNames();
+        s_installed ??= UnityEngine.Font.GetOSInstalledFontNames();
         foreach (string name in names)
-            if (System.Array.IndexOf(installed, name) >= 0)
-                return UnityEngine.Font.CreateDynamicFontFromOSFont(name, 32);
+        {
+            if (System.Array.IndexOf(s_installed, name) < 0) continue;
+            if (!s_fonts.TryGetValue(name, out Font font) || !font)
+                s_fonts[name] = font = UnityEngine.Font.CreateDynamicFontFromOSFont(name, 32);
+            return font;
+        }
         return Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
     }
 

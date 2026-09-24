@@ -75,6 +75,22 @@ public class GenomeView : MonoBehaviour
 
     public bool IsOpen => _open;
     public Genome Genome => _genome;
+    /// <summary>How far open, 0..1 (the tube and sphere growing out of the head).</summary>
+    public float Shown => _shown;
+
+    /// <summary>Whether a strand click injects it (down the drill: focus mode) or only loads it (the
+    /// inventory, opened anywhere with E). Set by VirusMovement.</summary>
+    public bool CanInject { get; set; } = true;
+
+    /// <summary>The sphere and the head on this frame's canvas (canvas units from the bottom left, the
+    /// same 1080p-scaled canvas as every TerminalUI screen). False while closed.</summary>
+    public bool Placement(out Vector2 sphere, out float radius, out Vector2 head)
+    {
+        sphere = _sphere;
+        radius = _sphereR;
+        head = _headAt;
+        return _canvas && _canvas.gameObject.activeSelf && _shown > 0f;
+    }
 
     /// <summary>Whether a screen point is on the open sphere (a click there is the view's, not the world's).</summary>
     public bool Covers(Vector2 screen)
@@ -101,6 +117,7 @@ public class GenomeView : MonoBehaviour
     float _shown, _openedAt;
     int _hover = -1;
     Vector2 _sphere;   // sphere centre (canvas units, from the bottom left) this frame, for picking
+    Vector2 _headAt;
     float _sphereR;
     Color _fill, _outline;
     float _goalSide; // which side the sphere settles on, chosen once per opening (0: not yet)
@@ -201,6 +218,7 @@ public class GenomeView : MonoBehaviour
         ToCanvas(cam, head + up * headRadius, out Vector2 top);
         ToCanvas(cam, head + cam.transform.right * headRadius, out Vector2 side);
         float headR = Mathf.Max(4f, Vector2.Distance(headAt, side));
+        _headAt = headAt;
         Vector2 dir = top - headAt;
         dir = dir.sqrMagnitude > 1e-4f ? dir.normalized : Vector2.up;
         float tube = Mathf.Max(3f, headR * neckWidth);
@@ -256,7 +274,11 @@ public class GenomeView : MonoBehaviour
         _hover = _open && u > 0.95f && m != null ? Pick(m.position.ReadValue()) : -1;
         Grow(_genome.genes.Count);
         if (_hover >= 0 && _hover != was) _jiggleAt[_hover] = now; // pointed at: a jiggle
-        if (_hover >= 0 && m.leftButton.wasPressedThisFrame) Inject(_hover, now);
+        if (_hover >= 0 && m.leftButton.wasPressedThisFrame)
+        {
+            if (CanInject) Inject(_hover, now);
+            else Load(_hover, now);
+        }
 
         Refresh();
         foreach (Typed t in _typed) t.Tick(now, typeSpeed);
@@ -334,7 +356,8 @@ public class GenomeView : MonoBehaviour
             _code.Set(g.code + " // " + g.name);
             _code.text.color = g.color;
             bool going = shown == _injecting, loaded = shown == selected;
-            _state.Set(going ? "[>>] INJECTING" : loaded && _hover < 0 ? "[#] INJECTED" : "[>] CLICK TO INJECT");
+            if (CanInject) _state.Set(going ? "[>>] INJECTING" : loaded && _hover < 0 ? "[#] INJECTED" : "[>] CLICK TO INJECT");
+            else _state.Set(loaded ? (_hover < 0 ? "[#] LOADED" : "[>] CLICK TO UNLOAD") : "[>] CLICK TO LOAD");
             _state.text.color = going || loaded ? live : text;
         }
         else
@@ -444,6 +467,14 @@ public class GenomeView : MonoBehaviour
     }
 
     // ---------------- injection (test) ----------------
+
+    // Away from focus mode (no drill out): a click only loads the strand for later (again: unloads).
+    void Load(int gene, float now)
+    {
+        _jiggleAt[gene] = now;
+        if (_injecting >= 0) return;
+        _genome.Select(_genome.Selected == gene ? -1 : gene);
+    }
 
     void Inject(int gene, float now)
     {

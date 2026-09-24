@@ -37,11 +37,21 @@ public class NavSurface
     Quaternion _roll = Quaternion.identity;
     Vector3 _lastTarget; // graph space; zero = none yet
     float _walked;
+    Vector3 _up; // the surface's own normal at the last pose (not rolled), graph space; zero = none yet
 
     public bool Attached => _node != null;
+    /// <summary>Shown normal: the surface's, eased round hard edges (the roll). Heading and moves are tangent to this.</summary>
     public Vector3 Normal { get; private set; } = Vector3.up;
+    /// <summary>The surface's own normal under us, without the roll.</summary>
+    public Vector3 SurfaceNormal => _up != Vector3.zero ? ToWorldDir(_up) : Normal;
     public Surface Surface { get; private set; }
     public Vector3 Heading => Tangent(ToWorldDir(_fwd));
+    /// <summary>The triangle we're on and our raw point on it, in graph space (for SurfaceField).</summary>
+    public TriangleMeshNode Node => _node as TriangleMeshNode;
+    public Vector3 GraphPosition => _pos;
+
+    /// <summary>A direction tangent to the surface itself -> the same way in the shown (rolled) frame.</summary>
+    public Vector3 ToShown(Vector3 surfaceDirection) => Quaternion.FromToRotation(SurfaceNormal, Normal) * surfaceDirection;
 
     public bool Accepts(GameObject go) => (layers.value & (1 << go.layer)) != 0;
 
@@ -57,6 +67,7 @@ public class NavSurface
         Surface = on;
         _pos = hit.position; _node = hit.node;
         Normal = up;
+        _up = ToGraphDir(up);
         // Which side we landed on. From here the mesh's winding says where "out" is, which
         // holds across hard edges (where comparing with the last normal is a coin toss).
         _side = hit.node is TriangleMeshNode tri && Vector3.Dot(FaceNormal(tri), up) < 0f ? -1f : 1f;
@@ -76,7 +87,14 @@ public class NavSurface
         if (!Attached || !Surface || AstarPath.active == null) return false;
 
         NN.graphMask = Surface.Mask;
-        Vector3 from = ToWorld(_pos), ahead = Heading * distance;
+        // The heading is tangent to the shown normal, which lags round a hard edge (the roll). Just past
+        // one it points off the new face, into the air: the step projected back to where we stood, so we
+        // never walked, so the roll never wore off: stuck on every cube edge. Step along the real face.
+        Vector3 up = SurfaceNormal;
+        Vector3 ahead = Vector3.ProjectOnPlane(Quaternion.FromToRotation(Normal, up) * Heading, up);
+        if (ahead.sqrMagnitude < 1e-8f) ahead = Heading;
+        Vector3 from = ToWorld(_pos);
+        ahead = ahead.normalized * distance;
 
         // Straight ahead first: on a flat or round surface it projects back to the same step.
         NNInfo hit = AstarPath.active.GetNearest(ToGraph(from + ahead), NN);
@@ -112,6 +130,7 @@ public class NavSurface
     {
         Vector3 before = Normal, heading = Heading;
         Vector3 p = Smooth(out Vector3 n);
+        _up = ToGraphDir(n);
         n = Roll(n);
         // Turn the heading with the surface, so crossing an edge carries on over it instead
         // of flattening against the new face.

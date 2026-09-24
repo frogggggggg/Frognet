@@ -119,6 +119,13 @@ public class Burst : Effect
     public override void FixedTick(float dt) => O.Rb.linearVelocity = _dir * (speed * curve.Evaluate(S.TimeInState / duration));
 }
 
+/// <summary>An underwater whoosh as the dash starts (CreatureAudio).</summary>
+[Serializable]
+public class BurstSound : Effect
+{
+    public override void Enter() => CreatureAudio.Burst(O.transform.position);
+}
+
 /// <summary>Launch along the organism's up (the last surface normal) on enter.</summary>
 [Serializable]
 public class Launch : Effect
@@ -216,6 +223,17 @@ public class Ripple : Effect
     }
 }
 
+/// <summary>A wet splat where the body touched down, louder the harder it hit (CreatureAudio).</summary>
+[Serializable]
+public class ImpactSound : Effect
+{
+    public override void Enter()
+    {
+        Ground g = S.Find<Ground>();
+        if (g != null) CreatureAudio.Impact(g.HitCollider ? g.HitPoint : O.transform.position, g.HitSpeed);
+    }
+}
+
 /// <summary>Walk the surface along Move, with optional speed curves.</summary>
 [Serializable]
 public class Crawl : Effect
@@ -231,6 +249,8 @@ public class Crawl : Effect
     Ground _surface;
 
     public bool Coasting => _now > 0f;
+    /// <summary>How fast it's crawling right now (m/s), easing included.</summary>
+    public float CurrentSpeed => _now;
     public override float TopSpeed => speed;
     public override void Exit() => OnHalt();
     public override void OnHalt() { _now = _t = _from = 0f; _hadInput = false; }

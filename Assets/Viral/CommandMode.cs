@@ -372,7 +372,7 @@ public class CommandMode : MonoBehaviour
         foreach (VirusAI ai in FindObjectsByType<VirusAI>(FindObjectsSortMode.None))
             if (!ai.GetComponent<Selectable>()) Selectable.Add(ai.gameObject, Selectable.Category.Agent, "Virus");
         foreach (Surface s in FindObjectsByType<Surface>(FindObjectsSortMode.None))
-            if (!s.GetComponent<Selectable>() && !s.GetComponentInParent<VirusMovement>())
+            if (s.isCell && !s.GetComponent<Selectable>() && !s.GetComponentInParent<VirusMovement>())
                 Selectable.Add(s.gameObject, Selectable.Category.Target, "Cell", CommandBoard.Jobs.MoveTo);
     }
 

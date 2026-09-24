@@ -1,0 +1,5 @@
+Exploring.wav: composed for this game (Assets/Viral/Audio/MusicSource~/compose.py), performed with:
+  - Salamander Grand Piano by Alexander Holm, CC-BY 3.0
+  - tonejs-instruments samples by Nicholaus Brosowsky (violin, contrabass, harp from VSCO2 Community), CC-BY 3.0
+    https://github.com/nbrosowsky/tonejs-instruments
+Credit both in the game.

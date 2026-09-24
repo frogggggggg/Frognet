@@ -39,19 +39,21 @@ public class ControlsHint : MonoBehaviour
     {
         new[] { "[W][A][S][D]", "FLY" }, new[] { "[MOUSE]", "LOOK" }, new[] { "[SPACE]", "BURST" },
         new[] { "[LMB]", "PAY OUT ROPE / GRAB END" }, new[] { "HOLD [RMB]", "REEL IN" },
-        new[] { "[RMB]", "CUT ROPE" }, new[] { "[RMB][RMB]", "TUG / SLURP" }, new[] { "[Q]", "COMMAND MODE" },
+        new[] { "[RMB]", "CUT ROPE" }, new[] { "[RMB][RMB]", "TUG / SLURP" }, new[] { "[E]", "INVENTORY" },
+        new[] { "[Q]", "COMMAND MODE" },
     };
     static readonly string[][] Grounded =
     {
         new[] { "[W][A][S][D]", "CRAWL" }, new[] { "[MOUSE]", "LOOK" }, new[] { "[SPACE]", "JUMP" },
         new[] { "TAP [LMB]", "ANCHOR ROPE" }, new[] { "HOLD [LMB]", "PAY OUT ROPE" },
         new[] { "HOLD [RMB]", "REEL IN" }, new[] { "[RMB]", "CUT ROPE" }, new[] { "[RMB][RMB]", "TUG" },
-        new[] { "HOLD [E]", "DRILL IN: FOCUS" }, new[] { "[Q]", "COMMAND MODE" },
+        new[] { "HOLD [E]", "DRILL IN: FOCUS" }, new[] { "TAP [E]", "INVENTORY" }, new[] { "[Q]", "COMMAND MODE" },
     };
     static readonly string[][] Focus =
     {
         new[] { "DRAG [LMB]", "LOOK" }, new[] { "[LMB] BASE", "ROPE MENU" },
-        new[] { "[LMB] VIRUS", "GENOME" }, new[] { "[ESC]", "CLOSE / LEAVE FOCUS" },
+        new[] { "[LMB] VIRUS", "GENOME" }, new[] { "[LMB] CORE", "EXTRACT" }, new[] { "[E]", "INVENTORY" },
+        new[] { "[ESC]", "CLOSE / LEAVE FOCUS" },
         new[] { "[Q]", "COMMAND MODE" },
     };
     static readonly string[][] Command =

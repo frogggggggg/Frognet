@@ -690,6 +690,7 @@ public class SpiderLegWalker : MonoBehaviour
                 l.foot.Set(hit ? foot : end, hit ? hs : l.to.t);
                 l.foot.SetNormal(hn);
                 SetPlanted(ref l);
+                CreatureAudio.Step(l.tip, footDistance, _source); // the player's own; crowds mostly feed a patter bed
                 continue;
             }
 

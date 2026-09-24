@@ -150,6 +150,7 @@ public class FlyMoving : OrganismState
 public class Charging : OrganismState
 {
     public Burst burst = new Burst();
+    public BurstSound sound = new BurstSound();
     public override bool When() => Lasting(burst.duration) || (Pressed(Intent.Charge) && Cooldown(burst.cooldown));
 }
 
@@ -185,6 +186,7 @@ public class Landing : OrganismState
 {
     [Tooltip("Seconds after touchdown before crawling.")] public float duration = 0.25f;
     public Ripple ripple = new Ripple();
+    public ImpactSound sound = new ImpactSound();
     public SnapRotation snap = new SnapRotation();
     public override bool When() => Parent.TimeInState < duration;
 }

@@ -346,8 +346,9 @@ public class HoloMap : MonoBehaviour
 
         // Scene geometry, grouped by mesh. Skipped: other layers, things without a plain mesh,
         // anything huge (a skybox or ground plane would swallow the map) and the viruses
-        // themselves, which are drawn as dots.
-        _geometry.Clear();
+        // themselves, which are drawn as dots. Groups are refilled rather than remade, so a
+        // rescan every second doesn't leave its lists behind as garbage.
+        for (int i = 0; i < _geometry.Count; i++) { _geometry[i].transforms.Clear(); _geometry[i].radii.Clear(); }
         float biggest = range * maxObjectSize;
 
         foreach (MeshRenderer r in FindObjectsByType<MeshRenderer>(FindObjectsSortMode.None))
@@ -371,6 +372,7 @@ public class HoloMap : MonoBehaviour
             group.transforms.Add(r.transform);
             group.radii.Add(radius);
         }
+        _geometry.RemoveAll(g => g.transforms.Count == 0);
 
         _organisms.Clear();
         _organisms.AddRange(FindObjectsByType<Organism>(FindObjectsSortMode.None));

@@ -10,6 +10,20 @@ Gameplay lives in `Assets/Viral` (movement in `Assets/Viral/Movement`). The rest
   (and ideally games), easy to extend.
 - Don't be afraid to restructure or cut overdone code.
 - Quick turnarounds without dropping quality.
+- **Build for huge scale from the start.** Assume thousands of anything (creatures, antibodies, legs,
+  ropes, puffs) and make each system cheap, near-perfect and scalable the first time, not "fine for 90":
+  - Draw: one instanced/indirect draw per mesh+material group from a GraphicsBuffer (LegRenderer,
+    fumes, antibodies), never a renderer + MaterialPropertyBlock per object. Per-instance data
+    (pose, seed, state) goes in the buffer.
+  - Animate on the GPU (vertex stage: wiggle, sway, ripples), shared by every pass so depth/outlines
+    follow. The CPU only eases a few numbers per object.
+  - LOD everything: a lighter mesh past a distance, cull off screen / past a draw distance (the
+    shared `SimulationTicker.OnScreen` / `CameraPosition`, never `Camera.main` per object), and tick
+    far / off-screen things every few frames, staggered, with the skipped time handed back as dt.
+  - Shared, built once: meshes, materials, lookup tables. No per-frame allocations.
+  - Neighbour queries through a spatial hash / grid, never all-vs-all. If something is still
+    O(n x m), say so and note it under Open items.
+  - When adding a system, state its cost per object and what bounds it.
 - After editing, check for compile errors (see **Verifying changes**) and fix them.
 
 ## Verifying changes without Unity
@@ -19,13 +33,29 @@ Unity is usually open on this project, so a second Editor instance can't be laun
 - **C#:** the generated `Assembly-CSharp.csproj` is often stale (missing new files). Copy it,
   replace its `<Compile Include>` list with every `Assets/*.cs` + `Assets/Viral/**/*.cs`
   (excluding `Editor/`), then `dotnet build <copy>.csproj -nologo -v q`. Real references,
-  real errors. Keep the copy out of the repo. **Leave out `Assets/Command.cs`, `Entity.cs` and `Map.cs`**
+  real errors. Keep the copy out of the repo. If `dotnet` has no SDK, use Unity's compiler instead:
+  `<Unity>/Editor/Data/NetCoreRuntime/dotnet.exe <Unity>/Editor/Data/DotNetSdkRoslyn/csc.dll @check.rsp`
+  with the csproj's HintPaths as `-r:`, its DefineConstants, `-nostdlib+ -noconfig -target:library`,
+  and the same file list. **Leave out `Assets/Command.cs`, `Entity.cs` and `Map.cs`**
   (old project, types missing outside Unity): their type-lookup errors stop the compiler before flow
   analysis, which hid a real CS0165 (unassigned variable) in new code. Expect 0 errors.
 - **Shaders:** can't be compiled outside Unity. Unity imports on focus and writes errors to
   `~/AppData/Local/Unity/Editor/Editor.log`; grep it for `Shader error`. That log is also the
   fastest way to find runtime exceptions the user hasn't mentioned.
 - Nothing here has been run in play mode by Claude. Say so when reporting.
+- **Sounds:** synthesized clips can be rendered to WAV outside Unity: compile the scripts as above
+  into a dll, then a tiny console program (Unity's `NetCoreRuntime/dotnet.exe`, a `runtimeconfig.json`
+  for its bundled Microsoft.NETCore.App) that calls the builders by reflection and writes 16-bit WAVs.
+  Hand the user the files to listen to. Piano (Resources samples) only plays inside Unity.
+
+## Sound and music direction
+
+Every sound and all music follow one vibe: **Breath of the Wild meets Spore**. Sparse, airy piano
+(single notes and open arpeggios, lots of space between them, soft felt attack), lydian / pentatonic
+colour, glassy shimmer and soft pads, big gentle reverb; organic sounds are wet, squishy and
+underwater-muffled (this is inside a body). Transitions and UI moments are small musical gestures
+(a rising arpeggio, a falling one back), not generic whooshes or beeps. Nothing harsh or
+aggressive; tension comes from sparseness and dissonant intervals, not loudness.
 
 ## Architecture
 
@@ -85,10 +115,25 @@ right projected on the surface (NOT `Cross(normal, forward)`, which flips on the
 ### VirusAI (`Movement/VirusAI.cs`)
 Autonomous viruses, same intent interface. Chases a target (the player by default):
 flying -> `PathManager` field; target on a cell -> fly at the surface point under it with that
-cell *excluded* from the field (so it lands instead of avoiding), then crawl using the same
-field projected onto the surface; on the wrong cell -> jump off. Separation in air (3D) and on
-the ground (along the surface) via a shared spatial hash; keeps clear of the target. Thinks on
-a staggered timer (`thinkInterval`). Disables a leftover `VirusMovement` on the same object.
+cell *excluded* from the field (so it lands instead of avoiding), then crawl the shortest way round
+the surface via `SurfaceField` (straight at it once in the goal's triangle or the next one); on the
+wrong cell -> jump off. (Crawling no longer uses PathManager: the projected chord got trapped on
+cubes and concave shapes.) Crowds (shared spatial hash; 3D in air, along the surface on a shared
+cell): overlaps are *distances* eased apart over `crowdSettleTime` (each side takes half), not
+full-speed pushes, which overshot on stale positions and made crowds vibrate; a virus touching a
+stopped (`_settled`) one ahead and nearer the goal stops too (queues, so crowds ring the goal
+instead of shoving the front row); `regroupDistance` + a start/stop dead zone are the hysteresis;
+`Move` is eased toward each decision (`steerSmoothing`). Keeps clear of the target. Ground moves are
+in the *shown* frame (tangent to `Organism.up`, see NavSurface's roll). Thinks on a staggered timer
+(`thinkInterval`). Disables a leftover `VirusMovement` on the same object.
+
+### SurfaceField (`Movement/SurfaceField.cs`)
+Shortest way round a Surface to one goal, any shape. Dijkstra over the graph's welded vertices
+(A* welds split mesh vertices, so a cube's faces connect) from the goal triangle, then a per-vertex
+gradient (area-weighted triangle gradients); a crawler blends its triangle's three barycentrically:
+smooth, and no minima but the goal. Cached per (Surface, goal instance id); reflooded only when the
+goal changes triangle, at most every 0.25 s; dropped after 5 s unused. Cost: O(V log V) per chased
+goal per reflood (V = mesh vertices), O(1) per crawler query; topology built once per graph.
 
 ### PathManager (`PathManager.cs`)
 Gridless potential-flow field (sink + doublets), trap-free. `GetField/GetDirection(pos, target,
@@ -212,7 +257,16 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
   steps aimed ahead+down so they wrap convex edges (and up when blocked, to climb walls),
   heading carried across edges, and the walkable side fixed at landing from the mesh's
   winding (graphs are built with `recalculateNormals` off, which would rewind 3D meshes).
-- `SpawnManager.cs` (Assets/): fills a ball around itself with weighted prefabs, no overlaps.
+  `Normal` is the *shown* normal (rolled round hard edges); `SurfaceNormal` the real one. `Crawl`
+  rotates the heading from the shown frame onto the real face before stepping: stepping along the
+  shown tangent just past an edge pointed off the new face, projected back to the same spot, walked
+  0, so the roll never wore off and crawlers stuck on every cube edge. `ToShown` maps a real-face
+  direction into the shown frame (what `Move` should be in).
+- `SpawnManager.cs` (Assets/): fills a ball around itself with weighted prefabs, no overlaps. Sizes vary:
+  `sizeRange` (0.5-2.5x the prefab's scale; replaced `scaleRange`, which the scene had at 1-1) skewed small
+  (`sizeSkew`), Rigidbody mass x size^3 (`massWithSize`).
+- `Surface.isCell` (default on): off = walkable but not a cell (no immune signal via `CellSignal.For`, not a
+  command-mode "Cell", not a spawn anchor). Resource chunks use it.
 - `AmbientParticles.cs`: GPU speck field around the camera, wrapped into a box, smeared by the
   **player's** velocity, only visible above a speed.
 - `InjectionDrill.cs` (on the Virus): procedural fluted drill that screws from under the virus to
@@ -312,8 +366,17 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
   on demand by `CellSignal.For(transform)`) + `Antibody.cs` + `SignalFume.shader`. Ten times a second every
   `Organism.All` on a cell raises that cell's signal (`idleRate` / `walkRate` / `focusRate`, around a moving
   `Hotspot`); signals halve every `halfLife`. `CellSignal.Pull` = a simple gravity field toward loud cells
-  (strength / (1 + (d/falloff)^2)). Antibodies (Y of three built-in capsules, command-mode targets
-  "Antibodies", ticked in one loop by the manager): Drift along the pull + noise -> Patrol (circle over a
+  (strength / (1 + (d/falloff)^2)). Antibodies (command-mode targets "Antibodies", ticked in one loop by the
+  manager, far / off-screen ones every 2..8 frames (`tickDistance`), stuck ones every frame). **Look:**
+  `AntibodyMesh.Build(detail)` (lumpy looped arms = closed tube loops with a hole, stem = two twisted chains,
+  hinge blob; Worley beads displaced along the normal; vertex colours blue / magenta folds / teal patches,
+  alpha = fold occlusion; uv0 = part + hinge-to-tip) at two details (near beaded, far ~500 verts,
+  `lodDistance`). `Custom/Antibody` wiggles it in every pass (arms flap/clap/bend/twist about the hinge,
+  stem sways, a wave crawls along the chains; grip closes the arms) and shades it glassy (wrap diffuse,
+  back-light, rim). Drawn only by `ImmuneSystem.DrawAntibodies`: frustum + `drawDistance` culled, one
+  `RenderMeshPrimitives` per LOD from one buffer (pose + `Antibody.Wiggle` = seed, agitation by state,
+  grip). Each antibody keeps a `forceRenderingOff` MeshRenderer with the far mesh only for Selectable's box.
+  Behaviour: Drift along the pull + noise -> Patrol (circle over a
   loud cell's hotspot) -> Chase a virus they see (`stickChance`, else ignore it a while) -> Stuck (ride at
   a local offset, arms in; `Antibody.StuckOn(organism)` counts them, no effect yet). `ambientCount` wander
   from the start; loud cells call more in from `arriveDistance` (`reinforceRate`, capped). Fumes: CPU
@@ -321,6 +384,163 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
   `Graphics.RenderPrimitives` of billboards. A gene delivered by the head view's injection goes to
   `ImmuneSystem.Deliver(drill.Cell, gene)`: `controlGene` (default INT-5, or the cell's own) converts the
   cell (silent for good), any other gene bursts its signal (`wrongGeneBurst`).
+- **Audio** (`Assets/Viral/Audio`): clips are built once at load into float buffers and shared.
+  - `Synth.cs` = the parts: seeded noise, sweepable biquads, `Swoosh`, `Bubble`, a Freeverb-style
+    `Reverb`, `Normalize`, `Loop` (seamless), and `Clip` (mono for 3D). Build new effects from them.
+  - **Piano = real samples, never synthesized** (no sound effect uses it now; `Piano.cs` and
+    `Resources/Piano` are kept for later, but Resources ship in builds: delete them if unused). Two additive piano models both sounded synthetic.
+    `Piano.Note(buf, start, midiNote, gain, pan, hold)` plays the nearest recorded note from
+    `Resources/Piano`, resampled at most 1.5 semitones, with a damper after `hold`. The samples are
+    Salamander Grand (CC-BY 3.0, Alexander Holm: credit him in the game; `CREDITS.txt`), from
+    tonejs.github.io/audio/salamander/<note>.mp3, named C/Ds/Fs/A + octave. There are A4..A6 so
+    far; download more with the same names to widen the range. `GetData` needs Load Type =
+    Decompress On Load. Each sample is trimmed to its onset at load (MP3s start with uneven
+    silence, which made rhythms land late by different amounts). For other realistic instruments, fetch free recordings the same way.
+  - `FocusSound.cs` (creates itself on play, follows the player's focus events). Entering focus
+    plays a wet, muffled underwater inject; after `transitionDelay` comes the sweep's transition,
+    now **no piano** (the user asked to remove it): a soft underwater bloom = a broad noise wash
+    swelling 300 Hz -> 1.6 kHz, 16 small bubbles rising and thinning, and a faint glassy `Shimmer`
+    (D6 + A6, detuned sine pairs, 0.12 s ease-in, quiet) in a big soft reverb. Leaving focus: the
+    wash falling, a few sinking bubbles, a soft A5 shimmer. Piano history, for reference: a pad +
+    bass + loud swoosh + big reverb was "too synth and epic"; runs were "too much / too positive /
+    too much flourish"; 12 three-note gestures never settled. So: organic, soft, glassy only as a
+    faint colour, never a melody.
+  - If Unity's audio device is stalled (the mixer clock doesn't advance) it is reset once
+    (`CheckDevice`). That was probably why nothing played at first (unconfirmed).
+  - `Sfx.cs`: pool of 24 3D voices for world one-shots from any number of emitters. A call is
+    dropped after one distance check against `SimulationTicker.CameraPosition` when out of range,
+    when over 8 starts this frame, or when every voice is busy with something louder.
+  - `CreatureAudio.cs` (creates itself on play):
+    - Step: "spider on a slime ball" (6 variants, pitched by leg size); `SpiderLegWalker` calls it when a foot plants, passing its
+      owner. Every player step plays, and every step of the `voicedWalkers` (2) nearest other
+      creatures crawling within `nearStepRange`: whole gaits keep their rhythm, while random single
+      legs from many sounded erratic. Everyone else is the **crowd bed**: one smooth 2D loop (a low
+      brown-noise wash + 450 quiet low "bloo"s, too dense to pick out; sparse pitched blips sounded
+      like popcorn). Its level follows *motion*, not step events: a scan of `Organism.All` every
+      `scanInterval` sums crawl pace (`Crawl.CurrentSpeed / speed`, ignoring < 0.15) x distance
+      falloff. Driving it by steps made it trail off after a crowd stopped, because feet keep
+      taking settling steps for a second or two. Cost: O(creatures) per scan. Steps are a soft round
+      "bloo" (`Bloo`: a low tone gliding down into its note, 8 ms onset, a breath of noise, 1.2 kHz
+      low-pass). A bright click, then a thumpy squelch, were both "too sharp and loud".
+    - Impact: a *trampoline* bounce (the `ImpactSound` effect on Landing). A stretchy "sproing"
+      glides up in pitch with a spring wobble, then rebounds come quicker (gap x0.68) and quieter,
+      like a ball settling. It's built at 4 strength tiers picked by `HitSpeed / fullImpactSpeed`:
+      harder = lower, a bigger glide, 2..6 bounces, longer gaps and rings, a membrane thump.
+      Volume also scales. The user wanted it bouncier than a plain jelly "bwoing", and the sound
+      itself (not only its volume) should change with impact strength.
+    - Burst: an underwater whoosh + bubbles (the `BurstSound` effect on Charging).
+    - The player's flight loop is *water, not air*, and must be pleasant to hear for a long time.
+      It's a smooth, deep, slowly swelling rush: brown noise low-passed, plus a broad quiet flow
+      band. Bubbles (shrill) and a resonant gurgle band (unpleasant) were cut: nothing narrow or
+      bright in a loop. It gets louder and a little clearer with speed (low-pass 250..1750 Hz);
+      pitch only moves 0.92..1.08. It must stay in the background (the user: it "took up too much
+      presence"): volume 0.15 x speed^`flightCurve` (1.8, so it's faint at cruising speed), and the
+      rumble under 140 Hz is cut.
+  - `RopeAudio.cs` (creates itself on play when there's a VirusRope) listens to VirusRope's
+    events, so the rope has no audio code: `Anchored(point, normal)` (StartNewRope /
+    FinishActiveRope), `Spooled(metres)` (length change of the held rope per physics step, + out /
+    - in, auto payout included) and `Stowed` (reeled all the way in).
+    - Anchor: a wet, sticky attach (soft slap + suction "plup" gliding up + glue stretch + the cell's
+      jelly wobble). A crisp "ch" "didn't fit attaching a thing to a cell": keep contact sounds organic.
+    - Spool: two *different* loops (the user: "the in like a slurp, the out like a line being
+      cast"). Out (`BuildCast`): a soft mid swish (broad 850 Hz band drifting +-18% twice a loop),
+      a warm 280-1300 Hz body, a faint 2.1 kHz sheen, capped at 2.8 kHz (a bright 2.5 + 4 kHz line
+      hiss was "unpleasant and hissy"). In (`BuildSlurp`): a wet
+      "aw" (650 / 1100 Hz soft formants) in irregular gulps (level = slowed noise squared, ~10-20
+      surges/s), low bubbles on the surges, a little sucked air. Each has its own pitch / low-pass
+      range in Update (cast 1.5..3.5 kHz, slurp 0.9..2.7 kHz). A soft "squeeze" as it starts from
+      rest. History: a clicker + zip was replaced; a low brown-noise loop "sounded like flying";
+      sparse random squelch grains had "too much variation"; an impulse train through vowel
+      resonances "sounded like a lawnmower"; a narrow swept resonance + a falling "plip" per turn
+      "sounds like a lasergun"; one shared recipe (wet noise + bubbles) for both directions wasn't
+      it either. So: nothing tonal, no pulse trains, no fast pitch drops, no narrow filters.
+    - Stow: a wet "plp" when the rope finishes reeling in.
+  - `AmbientMusic.cs` (creates itself on play) loops `Resources/Music/Exploring.wav` (streamed,
+    Vorbis) at `volume` 0.18 with a fade in. It must stay *background* (the user: "more background and
+    less loud"): piano soft and dark (low-pass 2.8 kHz), melody quiet, lots of reverb (mostly room). The track is a real composition, not generated at
+    runtime: `MusicSource~/compose.py` (folder hidden from Unity) renders it offline with numpy
+    from real samples (Salamander piano; tonejs-instruments violin / contrabass / harp, CC-BY:
+    `Resources/Music/CREDITS.txt`), with FFT convolution reverb and the tail wrapped onto the
+    start so it loops seamlessly. Written for the game, not a chord loop: 68 bpm with rubato,
+    ~140 s in four sections. **Drift**: open fifths, a flowing harp figure (Spore's water) fades
+    in, piano fragments hint at the motif. **Theme**: a real piano melody on the focus sound's
+    rising three, dotted rhythms and sighs, a varied left hand, contrabass. **Wonder**: a shift to
+    Bb lydian (discovery), the harp states the motif and the piano answers, a glassy high violin.
+    **Breath**: near silence, glassy high notes, a reversed piano swell back into the loop.
+    Humanized timing and velocity, softer notes darker, rolled dyads, watery wobble on strings.
+    The first version (one broken-chord pattern per chord) was "too simple to be good".
+    To change it: edit PROG / CH / MEL in compose.py, then run it with a Python venv holding
+    `numpy` + `miniaudio`, samples in `samples/<instrument>/` next to it (download commands at the
+    top of the script), and the output path as its argument. The user rejected generated "random
+    sparse" piano phrases over a noise bed: they wanted "an actual good sounding background".
+  - Any clip can be replaced by assigning a recorded one.
+- **Resources + inventory** (`Assets/Viral/Substances`; prefabs `GlucoseChunk`, `ProteinChunk`, `ResourceField`
+  in `Prefabs/`: new objects / enemies / pickups go there as prefabs). `Substance` = name / code / colour (slots
+  match by name; a new substance is just a new chunk prefab). `ResourceChunk` (the prefab is the type: substance,
+  `ChunkMesh.Shape` Lumpy (glucose) / Coil (protein: a globule of beads fused along a folded chain), size
+  range skewed small (`sizeSkew`), yield ~ r^3) is **landable**: a walkable body like a small cell (`Surface` with
+  `isCell` off + a non-convex MeshCollider, both on `ChunkMesh.Walk`: a 1280-triangle hull of the shape with the knobs
+  smoothed off; walking every knob of the drawn mesh flicked the crawler's up and shook the camera). **Kinematic,
+  moved by its own code, not physics:** `ResourceChunk.Step` bobs it round its place (`bob`, `bobPeriod`) and turns it
+  (`spin`), all from a phase that only advances while nobody stands on it (`settleTime` eases it still / awake);
+  a dynamic body bumping it nudges it (`bumpResponse`, capped `maxBump`, damped). Dynamic and feather-light it was
+  shoved by the rider's own collider every physics step and interpolation fought the pose: the old camera jitter.
+  `ResourceField.Update` (order -20, before the ticker poses riders) finds who stands on what (one pass over
+  `Organism.All`) and steps chunks: near / stood on / settling / extracted every frame, others every 4 (8 off
+  screen) frames staggered; a chunk at rest writes nothing. Ripples: impacts on its Surface go to `RippleField`, and
+  `Custom/ResourceChunk` rides it (offset + normal from two extra taps, only while anything ripples); the wave shape
+  is the chunk material's `_Ripple*` values (every chunk's hidden renderer carries `ResourceField.SharedChunkMaterial`
+  so Surface / RippleField read them), strength via `Surface.referenceSpeed = rippleReference / radius` (bigger
+  chunks ripple more). Its MeshRenderer is `forceRenderingOff` (there for Surface and command mode's box, where it's
+  a target named after its substance). The transform's scale *is* the radius; draining shrinks the transform
+  (`Shrink`), so anyone standing on it rides in; poofing detaches them. `ResourceField` spawns the listed prefabs (a
+  share floating 3-16 m off cells, the rest among them, grid-checked for overlaps incl. the bob), draws every chunk
+  from its transform in one buffer, one `RenderMeshPrimitives` per (shape, LOD) (`Custom/ResourceChunk`: faint
+  breathing wobble, and as it drains lumpy deformation + squash pulses, in the vertex stage; no GPU motion, the pose
+  must match what's walked). In editor play with no field in the scene, `Bootstrap` instantiates
+  the prefab (logs it); builds need the prefab in the scene. Focus mode: `VirusMovement.UpdateCores` calls
+  `ShowCores`; chunks within `extractRange` show a core (`Custom/ResourceCore`, Overlay+10, ZTest Always, only
+  inside the sweep like the drill x-ray; hidden behind cells by a CPU raycast per chunk every `sightInterval`);
+  a click toggles extraction into `VirusInventory` (renamed: the old project owns `Inventory`): a dust stream
+  flows in, it shrinks (`CurrentRadius`) and deforms, and past `poofAt` it bursts (`DustClouds.Burst`) and is
+  destroyed. Labels beside hovered / extracting cores. `DustClouds`: generic analytic GPU puffs (burst / stream
+  along a curve), CPU only writes new ones into a ring buffer; Overlay+5 so they show over the focus sweep.
+  `VirusInventory`: `slotCount` slots, each one substance up to `capacity`. **E tap** (released within
+  `clickTime`; held on a surface it still drills) toggles the head view (`GenomeView`) anywhere, and
+  `InventoryView` (slot bars, "05 // STORES") follows it beside the sphere (`GenomeView.Placement`). Out of
+  focus the cursor is freed (`UniversalCamera.FreeCursor`), the rope ignores the mouse, and a strand click only
+  loads the gene (`GenomeView.CanInject`). `ResourceAudio`: start "plup", drain loop, breathy bubbly poof with
+  a faint E6/B6 shimmer.
+- **White blood cells** (`WhiteBloodCell.cs` per cell, `WhiteBloodCells.cs` manager, `WhiteBloodCellMesh.cs`,
+  `Custom/WhiteBloodCell`; prefabs `WhiteBloodCell` (the cell) + `WhiteBloodCells` (manager: count, sizes, shader),
+  editor auto-adds the manager prefab if the scene has none). Phagocytes: they only eat pathogens. A walkable ball
+  (Surface with `isCell` off: no signal, not a "Cell" target; kinematic Rigidbody, sphere collider, never
+  turns so standing viruses don't spin; its MeshRenderer is `forceRenderingOff`, only the walkable mesh + command
+  box "White Cell"). Exactly one absorbing **spot**, the tip of a pseudopod (`Spot`, `Reach`): it swings over the
+  body or out along a stretched arm at `spotSpeed` (pulls the arm in to swing far; won't extend through another
+  cell), and anything the mouth really touches (`Touching`: within `mouthSize` across, up to its size + `touchMargin`
+  in front) is swallowed: flying, on another cell, or on this one (the spot then crawls across the body after you). States: Patrol (crawl to a nearby cell, louder
+  CellSignal = likelier) -> Examine (spot feels over that cell) -> Hunt (a virus within `senseRange` of its
+  surface, + `antibodyRange` per antibody stuck on it (`Antibody.StuckOn`), or touching it) -> Engulf -> Digest.
+  Crawl is amoeboid (surging speed, eased), pushed off other colliders (one overlap per think). Swallowing
+  (`WhiteBloodCells.Capture/Hold/Finish`): the victim is detached, its Organism, VirusAI, legs and colliders
+  switched off, stuck antibodies destroyed (`ImmuneSystem.EatStuck`), settled in the mouth, the lips wrap round it (`Mood.y`, prey radius in `Mood.w`), the arm pulls it back, it
+  sinks in and shrinks; then an AI virus is
+  destroyed and the player respawns at its start after `respawnDelay`. Events `Noticed` / `Engulfing` /
+  `Absorbed` / `Respawned` (`WhiteBloodCellAudio`: a low tritone swell when one starts hunting the player, a wet
+  gulp). **Look:** all in the vertex stage, every pass: the mesh is a unit sphere in the *reach frame* (+Z = the
+  spot, rings packed in the cap `CapAngle` = shader `CAP_ANGLE`); membrane sampled in the *body* frame so it stays
+  put while the spot slides: soft undulation + ruffles (ridged value noise in patches, like the micrograph look;
+  Worley popcorn lumps were rejected as "balls"), fine creases per pixel from the noise's analytic gradient;
+  leading-edge lobes + tapered tail from its velocity. The cap is a surface of revolution: radius = smooth max of
+  the body's section and a round-tipped, irregular, meandering finger's (pinned at both ends so the mouth stays on
+  the spot), so it grows out of the body with a fillet. Mouth: irregular breathing rim, ruffled lip, drifting
+  wisps (hunger); wrapping folds the tip into an outer + inner layer round the prey, lips meeting at uneven pace.
+  Rides `RippleField` (impacts publish there: the cell's hidden renderer gets the material, which carries the
+  `_Ripple*` settings). Normals by finite differences, ripples included.
+  One `RenderMeshPrimitives` per LOD (near ~8.6k verts with ruffles, far ~800 without). Cost per cell: a think
+  every `thinkInterval` = `WhiteBloodCells.Near` (organism grid rebuilt at most once a frame, O(organisms)) +
+  one overlap query; idle far / off-screen cells tick every 2..8 frames.
 - `ControlsHint.cs`: bottom-right terminal panel with the controls for the current mode (flight /
   surface / focus; lists are data at the top: "[RMB][RMB]" = two prompt icons, plain words are tags),
   retyped on change, H folds it. Inputs are game-style prompts (TerminalUI.PillSprite: circle / pill keycaps;
@@ -374,9 +594,16 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
 - **Crowd performance:** after GPU legs + ticker LOD + collider compression, profile again.
   Remaining candidates: PathManager's two-tier grid, agent-vs-agent physics collisions (a layer
   that ignores itself), A* `GetNearest` per crawling agent per physics step.
-- For builds, keep these assigned (Shader.Find only saves the editor): `SpiderLegWalker.legShader`,
+  Antibodies are still O(antibodies x organisms) in `Look` (every ~0.25 s) and O(antibodies x cells) in
+  `Avoid` / `Patrolled` per tick; at thousands they need the spatial hash, and past that a data-only
+  (Burst jobs) simulation instead of a GameObject each.
+- Resources: `ResourceField` draw / reach / step loops are O(chunks) per frame (cheap per chunk, fine into the
+  thousands); past ~10k give them a spatial grid and step them in a TransformAccessArray job. Kinematic chunks don't
+  collide with each other (a bump can push one into another), and a rope-dragged cell stops dead against one.
+  PathManager sizes MeshCollider obstacles by bounds (a bit big for chunks). Its prefab isn't in `Viral.unity` yet (editor auto-adds it).
+- For builds, keep these assigned (Shader.Find only saves the editor): `WhiteBloodCells.shader` (set in its prefab; the prefab must be in the scene), `SpiderLegWalker.legShader`,
   `HoloMap` shaders, `TransparentDepthForPostFeature.shader`, `AmbientParticles.shader`,
-  `VirusRope.phantomMaterial` (else it needs URP Unlit in the build), `ImmuneSystem.fumeShader` (Hidden/SignalFume) and `antibodyMaterial` (else URP Lit by name), `GenomeView` shaders (Hidden/GenomeBubble, Hidden/GenomeStrand: add a GenomeView to the scene with them assigned and set it as VirusMovement's `headView`), `VirusRope.bloodMaterial`
+  `VirusRope.phantomMaterial` (else it needs URP Unlit in the build), `ImmuneSystem.fumeShader` (Hidden/SignalFume) and `antibodyShader` (Custom/Antibody; else no antibodies drawn), `GenomeView` shaders (Hidden/GenomeBubble, Hidden/GenomeStrand: add a GenomeView to the scene with them assigned and set it as VirusMovement's `headView`), `VirusRope.bloodMaterial`
   (a `Custom/RopeBlood` material; else found by name, no beads without it).
 - Inspector values reset in an earlier refactor: check Organism > Grounded > surface >
   `hoverHeight` (>= collider radius), snap distance, layers, Flying lead axis.

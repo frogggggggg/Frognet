@@ -116,8 +116,11 @@ public class ScreenInvertTransparentDepthFeature : ScriptableRendererFeature
         ScriptableRenderer renderer,
         ref RenderingData renderingData)
     {
+        // Nothing reads the texture while no sweep is showing, and requesting it also
+        // makes URP render every opaque object again for the normals prepass.
         if (_pass == null ||
-            _depthMaterial == null)
+            _depthMaterial == null ||
+            !ScreenInvertTest.AnyShowing)
         {
             Shader.SetGlobalFloat(
                 AvailableID,

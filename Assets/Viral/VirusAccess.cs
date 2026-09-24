@@ -27,6 +27,21 @@ public class VirusAccess : MonoBehaviour
     {
         _contact = virus ? virus.GetComponentInParent<ISurfaceContact>() : null;
         _frame = parentObject.GetComponent<RectTransform>();
+
+        // The first focus opens this; do its first-time work now instead: DOTween sets itself up
+        // on its first tween (nothing else here uses it), and the frame's canvas builds on its
+        // first activation.
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        DOTween.Init();
+        double tween = watch.Elapsed.TotalMilliseconds;
+        watch.Restart();
+        if (!parentObject.activeSelf)
+        {
+            parentObject.SetActive(true);
+            Canvas.ForceUpdateCanvases();
+            parentObject.SetActive(false);
+        }
+        Debug.Log($"VirusAccess: prewarmed (DOTween {tween:0.0} ms, frame {watch.Elapsed.TotalMilliseconds:0.0} ms).", this);
     }
 
     public void OpenUI()

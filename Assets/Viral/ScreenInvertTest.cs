@@ -100,6 +100,11 @@ public class ScreenInvertTest : MonoBehaviour
     [Tooltip("Shaders that support it (INVERT_BACKFACES and a _Cull property).")]
     public Shader[] backShaders;
 
+    [Tooltip(
+        "At load, run a couple of frames with the sweep's shader variants and depth pass on " +
+        "(covering nothing, so it looks the same), so the first focus doesn't stall on first-time work.")]
+    public bool prewarm = true;
+
     [Header("Depth Of Field")]
 
     [Tooltip(
@@ -163,6 +168,7 @@ public class ScreenInvertTest : MonoBehaviour
     readonly System.Collections.Generic.Dictionary<Material, float> _backMaterials =
         new System.Collections.Generic.Dictionary<Material, float>();
     bool _backsOn;
+    bool _warming;
 
     // Runtime copy of the volume's depth of field, with its values to restore.
     DepthOfField _dof;
@@ -172,13 +178,55 @@ public class ScreenInvertTest : MonoBehaviour
     float _dofEnd;
     float _dofAperture;
 
+    // Live instances. ScreenInvertTransparentDepthFeature only draws its transparent depth
+    // (and asks URP for the normals prepass) while one of these has its overlay showing.
+    static readonly System.Collections.Generic.List<ScreenInvertTest> s_instances =
+        new System.Collections.Generic.List<ScreenInvertTest>();
+
+    /// <summary>Whether any sweep overlay is drawing this frame (it's set in LateUpdate, before rendering).</summary>
+    public static bool AnyShowing
+    {
+        get
+        {
+            for (int i = 0; i < s_instances.Count; i++)
+                if (s_instances[i]._warming ||
+                    s_instances[i]._renderer && s_instances[i]._renderer.enabled)
+                    return true;
+            return false;
+        }
+    }
+
     void OnEnable()
     {
+        if (!s_instances.Contains(this)) s_instances.Add(this);
         Build();
+    }
+
+    // Everything the first sweep would do for the first time: every back-capable shader's
+    // INVERT_BACKFACES variant, their materials' Cull Off, and the transparent depth + normals
+    // passes (ScreenInvertTransparentDepthFeature). The sweep covers nothing meanwhile
+    // (_InvertSweep.w = 0), so nothing is clipped and the frames look as usual.
+    System.Collections.IEnumerator Start()
+    {
+        if (!Application.isPlaying || !prewarm || _progress > 0.0001f) yield break;
+        yield return null; // after everyone's Start
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        _warming = true;
+        SetBacks(showBacks);
+        Shader.SetGlobalVector(InvertSweepId, Vector4.zero);
+        double backs = watch.Elapsed.TotalMilliseconds;
+
+        yield return null;
+        yield return null;
+        _warming = false;
+        if (_progress <= 0.0001f) SetBacks(false);
+        Debug.Log($"ScreenInvertTest: prewarmed the sweep (switching materials took {backs:0.0} ms).", this);
     }
 
     void OnDisable()
     {
+        s_instances.Remove(this);
         Cleanup();
         RestoreDepthOfField();
         SetBacks(false);
@@ -556,6 +604,7 @@ public class ScreenInvertTest : MonoBehaviour
     // (they're shared assets, so it must).
     void UpdateBacks()
     {
+        if (_warming) return; // Start's prewarm holds them on
         bool on = showBacks && Application.isPlaying && _progress > 0.0001f;
         SetBacks(on);
         if (!on) return;

@@ -131,17 +131,57 @@ Shader "Custom/BloodCellTriplanar"
             return clamp(_TessDensity * len / max(dist, 0.001), 1.0, _TessMax);
         }
 
-        // No manual patch culling: displacement makes source-triangle tests
-        // unsafe, and the shadow pass would cull with the wrong frustum.
+        // Furthest the live ripples can push a vertex: each wave is at most its decayed peak.
+        float RippleReach()
+        {
+            float reach = 0.0;
+            int count = min((int)_RippleCount, RIPPLE_COUNT);
+            [loop]
+            for (int i = 0; i < count; i++)
+                reach += max(_RippleValues[i].x, 0.0)
+                       * exp(-max(_Time.y - _RipplePoints[i].w, 0.0) * max(_RippleDecay, 0.0));
+            return reach * abs(_RippleAmplitude);
+        }
+
+        // Patch culling against whatever view this pass renders (the camera, or the light in
+        // the shadow pass: both come through the current view-projection). The patch's bounding
+        // sphere is padded by everything that can move a vertex off the flat triangle (Phong
+        // rounding, relief, live ripples), so a culled patch could never have reached the view.
+        // Only the four side planes: near/far are left alone (shadows pancake onto the near plane).
+        // Riders (_FollowRipples) also move with the ripple field, which isn't bounded here.
+        bool PatchOutsideView(float3 p0, float3 p1, float3 p2)
+        {
+            if (_FollowRipples > 0.5) return false;
+
+            float3 c    = (p0 + p1 + p2) * (1.0 / 3.0);
+            float  edge = max(max(distance(p0, p1), distance(p1, p2)), distance(p2, p0));
+            float  r    = edge * (1.0 + _PhongStrength) + abs(_Displace) + RippleReach() + 0.25;
+
+            float4x4 m = GetWorldToHClipMatrix();
+            float4 planes[4] = { m[3] + m[0], m[3] - m[0], m[3] + m[1], m[3] - m[1] };
+            [unroll]
+            for (int i = 0; i < 4; i++)
+                if (dot(planes[i].xyz, c) + planes[i].w < -r * length(planes[i].xyz))
+                    return true;
+            return false;
+        }
+
         TessFactors PatchConstant(InputPatch<TessControlPoint, 3> patch)
         {
             float3 p0 = TransformObjectToWorld(patch[0].positionOS.xyz);
             float3 p1 = TransformObjectToWorld(patch[1].positionOS.xyz);
             float3 p2 = TransformObjectToWorld(patch[2].positionOS.xyz);
 
+            TessFactors f;
+            if (PatchOutsideView(p0, p1, p2))
+            {
+                // Factor 0 drops the patch before any vertex is generated.
+                f.edge[0] = f.edge[1] = f.edge[2] = f.inside = 0.0;
+                return f;
+            }
+
             // Edge factors depend only on the edge's two vertices, so
             // neighbouring triangles agree and no cracks open.
-            TessFactors f;
             f.edge[0] = EdgeFactor(p1, p2);
             f.edge[1] = EdgeFactor(p2, p0);
             f.edge[2] = EdgeFactor(p0, p1);

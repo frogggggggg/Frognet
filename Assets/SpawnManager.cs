@@ -24,8 +24,12 @@ public class SpawnManager : MonoBehaviour
     [Header("Placement")]
     [Min(0f), Tooltip("Extra gap kept between spawns and anything already there, in world units.")]
     public float spacing = 5f;
-    [Tooltip("Random scale multiplier per spawn (min, max).")]
-    public Vector2 scaleRange = new Vector2(1f, 1f);
+    [Tooltip("Random size multiplier per spawn (min, max), on the prefab's own scale.")]
+    public Vector2 sizeRange = new Vector2(0.5f, 2.5f);
+    [Min(1f), Tooltip("Above 1, small spawns are commoner than big ones (the random pick is raised to this power).")]
+    public float sizeSkew = 1.8f;
+    [Tooltip("Scale each spawn's Rigidbody mass with its volume (size cubed), so big ones are heavy.")]
+    public bool massWithSize = true;
     public bool randomRotation = true;
     [Tooltip("Layers that block a spawn spot (the player, scenery, other cells).")]
     public LayerMask blockingLayers = ~0;
@@ -65,7 +69,7 @@ public class SpawnManager : MonoBehaviour
         for (int n = 0; n < amount; n++)
         {
             Template t = Pick(templates, totalWeight);
-            float scale = UnityEngine.Random.Range(scaleRange.x, Mathf.Max(scaleRange.x, scaleRange.y));
+            float scale = Mathf.Lerp(sizeRange.x, Mathf.Max(sizeRange.x, sizeRange.y), Mathf.Pow(UnityEngine.Random.value, sizeSkew));
             float radius = t.radius * scale;
 
             if (!FindSpot(centre, radius, placed, out Vector3 position))
@@ -78,6 +82,7 @@ public class SpawnManager : MonoBehaviour
             Quaternion rotation = randomRotation ? UnityEngine.Random.rotation : t.prefab.transform.rotation;
             GameObject spawn = Instantiate(t.prefab, position, rotation);
             spawn.transform.localScale = t.prefab.transform.localScale * scale;
+            if (massWithSize && spawn.TryGetComponent(out Rigidbody body)) body.mass *= scale * scale * scale;
         }
 
         if (skipped > 0)

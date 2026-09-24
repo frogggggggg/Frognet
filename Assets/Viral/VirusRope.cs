@@ -177,6 +177,13 @@ public class VirusRope : MonoBehaviour
     public int RopeCount => _ropes.Count;
     public bool HasRopeAttachedToPlayer => _active != null;
 
+    /// <summary>Sound / FX hooks (RopeAudio). Anchored: an end was pinned to a surface (world point,
+    /// normal). Spooled: rope run through the mouth this physics step, in metres (+ paid out,
+    /// - reeled in). Stowed: a held rope was reeled all the way in.</summary>
+    public event System.Action<Vector3, Vector3> Anchored;
+    public event System.Action<float> Spooled;
+    public event System.Action Stowed;
+
     // ------------------------------------------------------------------ constants
 
     const int HARD_MAX_SEGMENTS = 2048;
@@ -205,6 +212,28 @@ public class VirusRope : MonoBehaviour
 
     static readonly ProfilerMarker s_simMarker = new ProfilerMarker("VirusRope.Simulate");
     static readonly ProfilerMarker s_meshMarker = new ProfilerMarker("VirusRope.Mesh");
+    static readonly ProfilerMarker s_gatherMarker = new ProfilerMarker("VirusRope.Gather"),
+                                   s_solveMarker = new ProfilerMarker("VirusRope.Solve"),
+                                   s_collideMarker = new ProfilerMarker("VirusRope.Collide"),
+                                   s_sweepMarker = new ProfilerMarker("VirusRope.Sweep"),
+                                   s_wakeMarker = new ProfilerMarker("VirusRope.WakeCheck");
+
+    /// <summary>One line on what the ropes are doing, for profiling reports.</summary>
+    public string DebugSummary()
+    {
+        int particles = 0, asleep = 0, pairs = 0, generic = 0, shapes = 0;
+        foreach (Rope r in _ropes)
+        {
+            particles += r.n;
+            if (r.sleeping) asleep++;
+            pairs += r.pairCount;
+            shapes += r.shapeCount;
+            for (int p = 0; p < r.pairCount; p++)
+                if (r.shapes[r.pairShape[p]].kind == KIND_GENERIC) generic++;
+        }
+        return $"{_ropes.Count} ropes ({asleep} asleep), {particles} particles, {Substeps} substeps, " +
+               $"{shapes} nearby colliders, {pairs} collision pairs ({generic} against mesh/generic colliders)";
+    }
 
     // ------------------------------------------------------------------ types
 
@@ -913,6 +942,7 @@ public class VirusRope : MonoBehaviour
         r.pinA = r.pinB = r.bIsPlayer = true;
 
         Lay(r, point, PlayerSimPoint(), normal);
+        Anchored?.Invoke(point, normal);
         return true;
     }
 
@@ -1025,6 +1055,7 @@ public class VirusRope : MonoBehaviour
         r.graceUntil = Time.time + BREAK_GRACE;
         r.topologyDirty = true;
         _active = null;
+        Anchored?.Invoke(point, normal);
         return true;
     }
 
@@ -1079,9 +1110,12 @@ public class VirusRope : MonoBehaviour
         float lengthBefore = r.length;
         if (r == _active && UpdateSpool(r, b, dt))
         {
+            Spooled?.Invoke(r.length - lengthBefore);
             DestroyRopeAt(index); // fully reeled in
+            Stowed?.Invoke();
             return;
         }
+        if (r == _active && r.length != lengthBefore) Spooled?.Invoke(r.length - lengthBefore);
         if (r.length != lengthBefore) r.targetLength = 0f; // reeled or paid out by hand: that's its length now
         if (r.targetLength > 0f && !r.suspended) AdjustLength(r, dt);
 
@@ -1091,8 +1125,10 @@ public class VirusRope : MonoBehaviour
 
         if (r.sleeping)
         {
-            bool wake = endsMoved || r == _active ||
-                        (((_stepCounter + index) & 3) == 0 && DynamicBodyNear(r));
+            bool wake = endsMoved || r == _active;
+            if (!wake && ((_stepCounter + index) & 3) == 0)
+                using (s_wakeMarker.Auto())
+                    wake = DynamicBodyNear(r);
             if (!wake) return;
             r.sleeping = false;
             r.sleepTimer = 0f;
@@ -1104,7 +1140,8 @@ public class VirusRope : MonoBehaviour
 
         if (r.topologyDirty || r.stepsSinceGather >= GATHER_INTERVAL || r.drift > GATHER_MARGIN)
         {
-            GatherPairs(r, a, b, sub);
+            using (s_gatherMarker.Auto())
+                GatherPairs(r, a, b, sub);
             r.stepsSinceGather = 0;
             r.drift = 0f;
             r.topologyDirty = false;
@@ -1138,6 +1175,7 @@ public class VirusRope : MonoBehaviour
         Vector3 dirB = upB ? SafeDir(r.b.SimNormal, Vector3.up) : Vector3.up;
         float uprightK = 1f - Mathf.Exp(-straightenStrength * h);
 
+        s_solveMarker.Begin();
         for (int s = 0; s < sub; s++)
         {
             float t = (s + 1f) / sub;
@@ -1151,12 +1189,16 @@ public class VirusRope : MonoBehaviour
             if (bendK > 0f) SolveBend(r, forward, bendK);
             if (r.pairCount > 0)
             {
+                s_collideMarker.Begin();
                 SolveCollisions(r, h);
                 ApplyContactVelocity(r, h, gripKeep);
+                s_collideMarker.End();
             }
         }
+        s_solveMarker.End();
 
-        SweepFastParticles(r);
+        using (s_sweepMarker.Auto())
+            SweepFastParticles(r);
 
         // Tug the player: the overshoot the rope resisted becomes velocity. Velocity only, not a
         // position shift too: moving the body directly skips collisions, so a rope running into

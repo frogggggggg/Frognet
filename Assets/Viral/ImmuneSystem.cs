@@ -66,8 +66,16 @@ public class ImmuneSystem : MonoBehaviour
     public float cellMargin = 1.5f;
     [Min(0.02f), Tooltip("Seconds between looks round for viruses.")]
     public float lookInterval = 0.25f;
-    [Tooltip("Empty: a pale URP Lit material.")]
+    [Tooltip("A Custom/Antibody material (it reads the instance buffer; others won't draw). Empty: made from antibodyShader.")]
     public Material antibodyMaterial;
+    [Tooltip("Custom/Antibody. Found by name when empty (editor only: keep it assigned for builds).")]
+    public Shader antibodyShader;
+    [Min(1f), Tooltip("Past this from the camera antibodies draw the low-detail mesh.")]
+    public float lodDistance = 30f;
+    [Min(1f), Tooltip("Not drawn past this.")]
+    public float drawDistance = 400f;
+    [Min(1f), Tooltip("Antibodies tick every frame within this of the camera, then every 2..4 frames further out (x2 off screen). Stuck ones always tick.")]
+    public float tickDistance = 40f;
 
     [Header("Fumes")]
     [Min(0f), Tooltip("Puffs per second per unit of signal.")]
@@ -83,8 +91,16 @@ public class ImmuneSystem : MonoBehaviour
     public Shader fumeShader;
 
     readonly List<Antibody> _antibodies = new List<Antibody>();
-    Mesh _antibodyMesh;
+    Mesh _nearMesh, _farMesh;
     Material _ownMaterial;
+
+    // Every antibody in one buffer (near ones first, then far), two instanced draws.
+    struct Instance { public Vector4 positionScale, rotation, wiggle; }
+    const int InstanceStride = 48;
+    Instance[] _near, _far;
+    GraphicsBuffer _instanceBuffer;
+    MaterialPropertyBlock _nearProps, _farProps;
+    static readonly int AntibodiesId = Shader.PropertyToID("_Antibodies"), OffsetId = Shader.PropertyToID("_InstanceOffset");
     float _nextActivity, _lastActivity;
     readonly Dictionary<CellSignal, float> _owed = new Dictionary<CellSignal, float>();
 
@@ -123,6 +139,14 @@ public class ImmuneSystem : MonoBehaviour
         c.Inject(gene, s ? s.controlGene : "INT-5", s ? s.wrongGeneBurst : 40f);
     }
 
+    /// <summary>Antibodies stuck on 'o' are destroyed with it (a white blood cell swallowing it).</summary>
+    public static void EatStuck(Organism o)
+    {
+        if (!s_instance || !o) return;
+        foreach (Antibody a in s_instance._antibodies)
+            if (a && a.Current == Antibody.State.Stuck && a.Prey == o) Destroy(a.gameObject);
+    }
+
     void OnEnable() => s_instance = this;
 
     void Start()
@@ -135,7 +159,9 @@ public class ImmuneSystem : MonoBehaviour
     {
         _bufferA?.Release();
         _bufferB?.Release();
-        if (_antibodyMesh) Destroy(_antibodyMesh);
+        _instanceBuffer?.Release();
+        if (_nearMesh) Destroy(_nearMesh);
+        if (_farMesh) Destroy(_farMesh);
         if (_ownMaterial) Destroy(_ownMaterial);
         if (_fumeMat) Destroy(_fumeMat);
     }
@@ -156,7 +182,8 @@ public class ImmuneSystem : MonoBehaviour
         }
 
         _antibodies.RemoveAll(a => !a);
-        foreach (Antibody a in _antibodies) a.Tick(this, dt, now);
+        TickAntibodies(now);
+        DrawAntibodies();
 
         Fumes(dt);
     }
@@ -226,39 +253,113 @@ public class ImmuneSystem : MonoBehaviour
         go.transform.SetPositionAndRotation(at, Random.rotation);
         go.transform.localScale = Vector3.one * antibodySize;
         go.transform.SetParent(transform, true);
-        go.AddComponent<MeshFilter>().sharedMesh = AntibodyMesh();
+        // Drawn by DrawAntibodies; the renderer (never drawn) is only there for Selectable's box.
+        Meshes();
+        go.AddComponent<MeshFilter>().sharedMesh = _farMesh;
         var r = go.AddComponent<MeshRenderer>();
-        r.sharedMaterial = AntibodyMaterial();
+        r.forceRenderingOff = true;
         r.shadowCastingMode = ShadowCastingMode.Off;
         Selectable.Add(go, Selectable.Category.Target, "Antibody", CommandBoard.Jobs.Attack | CommandBoard.Jobs.MoveTo);
-        _antibodies.Add(go.AddComponent<Antibody>());
+        var a = go.AddComponent<Antibody>();
+        a.LastTick = Time.time;
+        _antibodies.Add(a);
     }
 
-    // A Y out of three capsules: the stem down, the two arms up and out (the arms grab).
-    Mesh AntibodyMesh()
+    void Meshes()
     {
-        if (_antibodyMesh) return _antibodyMesh;
-        Mesh capsule = Resources.GetBuiltinResource<Mesh>("Capsule.fbx");
-        var parts = new CombineInstance[3];
-        parts[0] = new CombineInstance { mesh = capsule, transform = Matrix4x4.TRS(new Vector3(0f, -0.32f, 0f), Quaternion.identity, new Vector3(0.2f, 0.32f, 0.2f)) };
-        for (int side = 0; side < 2; side++)
+        if (!_nearMesh) _nearMesh = AntibodyMesh.Build(1f);
+        if (!_farMesh) _farMesh = AntibodyMesh.Build(0.35f);
+    }
+
+    // Simulation LOD, like SimulationTicker: far and off-screen antibodies tick every few frames, staggered,
+    // with the skipped time handed back as dt (capped). Stuck ones ride a virus, so they tick every frame.
+    void TickAntibodies(float now)
+    {
+        Vector3 cam = SimulationTicker.CameraPosition;
+        int frame = Time.frameCount;
+        for (int i = 0; i < _antibodies.Count; i++)
         {
-            Quaternion tilt = Quaternion.Euler(0f, 0f, side == 0 ? 32f : -32f);
-            parts[side + 1] = new CombineInstance { mesh = capsule, transform = Matrix4x4.TRS(tilt * new Vector3(0f, 0.3f, 0f), tilt, new Vector3(0.17f, 0.3f, 0.17f)) };
+            Antibody a = _antibodies[i];
+            if (a.Current != Antibody.State.Stuck)
+            {
+                Vector3 pos = a.transform.position;
+                int every = Mathf.Clamp(1 + (int)((pos - cam).magnitude / tickDistance), 1, 4);
+                if (!SimulationTicker.OnScreen(pos, antibodySize)) every *= 2;
+                if ((frame + i) % every != 0) continue;
+            }
+            float dt = Mathf.Min(now - a.LastTick, 0.25f);
+            a.LastTick = now;
+            a.Tick(this, dt, now);
         }
-        _antibodyMesh = new Mesh { name = "Antibody", hideFlags = HideFlags.DontSave };
-        _antibodyMesh.CombineMeshes(parts, true, true);
-        return _antibodyMesh;
+    }
+
+    // All antibodies in two instanced draws (near: beaded mesh, far: coarse mesh), culled against the
+    // view and drawDistance. Everything per antibody (pose, wiggle) goes through one buffer.
+    void DrawAntibodies()
+    {
+        int n = _antibodies.Count;
+        if (n == 0) return;
+        Meshes();
+        Material mat = AntibodyMaterial();
+        if (!mat) return;
+        if (_near == null || _near.Length < n) { _near = new Instance[Mathf.NextPowerOfTwo(n)]; _far = new Instance[_near.Length]; }
+        if (_nearProps == null) { _nearProps = new MaterialPropertyBlock(); _farProps = new MaterialPropertyBlock(); } // reload wipes them
+
+        Vector3 cam = SimulationTicker.CameraPosition;
+        float lod2 = lodDistance * lodDistance, draw2 = drawDistance * drawDistance;
+        int near = 0, far = 0;
+        var bounds = new Bounds();
+        foreach (Antibody a in _antibodies)
+        {
+            Transform t = a.transform;
+            Vector3 pos = t.position;
+            float scale = t.lossyScale.x, d2 = (pos - cam).sqrMagnitude;
+            if (d2 > draw2 || !SimulationTicker.OnScreen(pos, scale)) continue;
+            Quaternion q = t.rotation;
+            var inst = new Instance
+            {
+                positionScale = new Vector4(pos.x, pos.y, pos.z, scale),
+                rotation = new Vector4(q.x, q.y, q.z, q.w),
+                wiggle = a.Wiggle
+            };
+            if (d2 < lod2) _near[near++] = inst; else _far[far++] = inst;
+            var b = new Bounds(pos, Vector3.one * scale * 2f);
+            if (near + far == 1) bounds = b; else bounds.Encapsulate(b);
+        }
+        if (near + far == 0) return;
+
+        if (_instanceBuffer == null || !_instanceBuffer.IsValid() || _instanceBuffer.count < n)
+        {
+            _instanceBuffer?.Release();
+            _instanceBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _near.Length, InstanceStride);
+        }
+        _instanceBuffer.SetData(_near, 0, 0, near);
+        _instanceBuffer.SetData(_far, 0, near, far);
+
+        var rp = new RenderParams(mat) { worldBounds = bounds, shadowCastingMode = ShadowCastingMode.Off, receiveShadows = true };
+        if (near > 0)
+        {
+            _nearProps.SetBuffer(AntibodiesId, _instanceBuffer);
+            _nearProps.SetInt(OffsetId, 0);
+            rp.matProps = _nearProps;
+            Graphics.RenderMeshPrimitives(rp, _nearMesh, 0, near);
+        }
+        if (far > 0)
+        {
+            _farProps.SetBuffer(AntibodiesId, _instanceBuffer);
+            _farProps.SetInt(OffsetId, near);
+            rp.matProps = _farProps;
+            Graphics.RenderMeshPrimitives(rp, _farMesh, 0, far);
+        }
     }
 
     Material AntibodyMaterial()
     {
         if (antibodyMaterial) return antibodyMaterial;
         if (_ownMaterial) return _ownMaterial;
-        Shader lit = Shader.Find("Universal Render Pipeline/Lit");
-        _ownMaterial = new Material(lit ? lit : Shader.Find("Standard")) { name = "Antibody", hideFlags = HideFlags.DontSave };
-        _ownMaterial.SetColor("_BaseColor", new Color(0.95f, 0.93f, 0.8f));
-        _ownMaterial.SetFloat("_Smoothness", 0.6f);
+        Shader shader = antibodyShader ? antibodyShader : Shader.Find("Custom/Antibody");
+        if (!shader) return null;
+        _ownMaterial = new Material(shader) { name = "Antibody", hideFlags = HideFlags.DontSave };
         return _ownMaterial;
     }
 

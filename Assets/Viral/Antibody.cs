@@ -11,6 +11,8 @@ using UnityEngine;
 ///   for it (ImmuneSystem.stickChance; if not, it ignores that one for a while).
 /// - Stuck: it reached the virus and holds on, arms first, riding along until the virus is gone.
 ///   <see cref="StuckOn"/> counts them per virus (for effects to come).
+/// Looks: ImmuneSystem draws every antibody in one instanced call (AntibodyMesh, Custom/Antibody, which
+/// wiggles it); this only keeps its <see cref="Wiggle"/> (seed, agitation by state, grip).
 /// </summary>
 public class Antibody : MonoBehaviour
 {
@@ -26,6 +28,15 @@ public class Antibody : MonoBehaviour
     Vector3 _stuckLocal;
     Quaternion _stuckRotation;
 
+    float _agitation = 0.5f, _grip;
+
+    /// <summary>When ImmuneSystem last ticked it (it ticks far ones every few frames).</summary>
+    public float LastTick { get; set; }
+
+    /// <summary>Per-instance shader data: seed, agitation (calm drifting .. frantic chasing), grip (arms
+    /// clamped while stuck).</summary>
+    public Vector4 Wiggle => new Vector4(_seed, _agitation, _grip, 0f);
+
     static readonly Dictionary<Organism, int> s_stuck = new Dictionary<Organism, int>();
 
     /// <summary>How many antibodies are holding on to this creature.</summary>
@@ -37,6 +48,10 @@ public class Antibody : MonoBehaviour
 
     public void Tick(ImmuneSystem s, float dt, float now)
     {
+        float agitation = Current switch { State.Patrol => 0.8f, State.Chase => 1.6f, State.Stuck => 1.2f, _ => 0.5f };
+        _agitation = Mathf.MoveTowards(_agitation, agitation, dt * 1.5f);
+        _grip = Mathf.MoveTowards(_grip, Current == State.Stuck ? 1f : 0f, dt * 4f);
+
         if (Current == State.Stuck)
         {
             if (!Prey || !Prey.isActiveAndEnabled)
@@ -86,7 +101,7 @@ public class Antibody : MonoBehaviour
         pos += _velocity * dt;
 
         // Tumble along, turning to face where it's going.
-        _spin += dt * (Current == State.Chase ? 240f : 60f);
+        _spin += dt * (Current == State.Chase ? 150f : 30f);
         Quaternion face = _velocity.sqrMagnitude > 1e-4f ? Quaternion.LookRotation(_velocity) : transform.rotation;
         transform.SetPositionAndRotation(pos, Quaternion.Slerp(transform.rotation, face * Quaternion.Euler(90f, _spin, 0f), dt * 3f));
     }
