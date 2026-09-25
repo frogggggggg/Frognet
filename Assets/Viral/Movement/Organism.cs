@@ -44,6 +44,10 @@ public class Organism : MonoBehaviour, ISurfaceContact
 
     public OrganismState Current { get; private set; }
     public Rigidbody Rb { get; private set; }
+
+    /// <summary>The blood's velocity where the body is (Vessel.FlowAt, each physics step): flight effects move
+    /// relative to it, so a body left alone drifts with the current.</summary>
+    public Vector3 Fluid { get; private set; }
     public bool InState(OrganismState s) => Current != null && Current.Is(s);
 
     /// <summary>Surface normal while attached; the last one after leaving.</summary>
@@ -230,8 +234,13 @@ public class Organism : MonoBehaviour, ISurfaceContact
         ApplyBodyOffset(dt);
     }
 
+    /// <summary>Where the body was before the last physics step (outside anything it then hit).</summary>
+    public Vector3 StepStart { get; private set; }
+
     public void FixedTick(float dt)
     {
+        StepStart = Rb.position;
+        Fluid = Vessel.FlowAt(Rb.position);
         Run(Phase.Fixed, dt);
 
         // Dynamic root (no separate body child): rotate through physics so interpolation doesn't fight it.

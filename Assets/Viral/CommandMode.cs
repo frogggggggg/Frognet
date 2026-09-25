@@ -224,6 +224,7 @@ public class CommandMode : MonoBehaviour
             _boardDirty = true;
         }
 
+        if (PauseMenu.IsOpen) return;
         Mouse m = Mouse.current;
         Keyboard k = Keyboard.current;
         if (k != null && k[toggleKey].wasPressedThisFrame) SetActive(!Active);

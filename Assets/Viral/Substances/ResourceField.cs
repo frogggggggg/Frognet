@@ -156,23 +156,15 @@ public class ResourceField : MonoBehaviour
     /// <summary>Chunks being extracted right now.</summary>
     public IReadOnlyList<ResourceChunk> Extracting => _extracting;
 
-    // A scene with cells (or hand-placed chunks) and no field gets one: in the editor the prefab's (with
-    // its chunk list, so the scene fills up), in a build a bare one that only draws what's there.
+    // A scene with cells (or hand-placed chunks) and no field gets one: the prefab from Resources/ViralBuildAssets (with
+    // its chunk list, so the scene fills up), else a bare one that only draws what's there.
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     static void Bootstrap()
     {
         if (FindAnyObjectByType<ResourceField>(FindObjectsInactive.Include)) return;
         if (!Any && !FindAnyObjectByType<Surface>()) return;
-#if UNITY_EDITOR
-        var prefab = UnityEditor.AssetDatabase.LoadAssetAtPath<ResourceField>("Assets/Viral/Prefabs/ResourceField.prefab");
-        if (prefab)
-        {
-            Instantiate(prefab).name = "Resource Field";
-            Debug.Log("ResourceField: none in the scene, so the prefab's was added for this session (editor only). " +
-                      "Drag Assets/Viral/Prefabs/ResourceField.prefab into the scene to keep it in builds.");
-            return;
-        }
-#endif
+        ViralBuildAssets assets = ViralBuildAssets.Instance;
+        if (assets && ViralBuildAssets.Spawn<ResourceField>(assets.resourceField, "Resource Field")) return;
         if (Any) new GameObject("Resource Field").AddComponent<ResourceField>();
     }
 
@@ -184,7 +176,7 @@ public class ResourceField : MonoBehaviour
 
     void Start()
     {
-        if (s_instance != this) return;
+        if (s_instance != this || WorldStreamer.Active) return; // a streamed world places its own
         Spawn();
     }
 
@@ -247,6 +239,8 @@ public class ResourceField : MonoBehaviour
 
     // ---------------- floating ----------------
 
+    const float DriftEveryFrame = 0.3f * 0.3f; // (m/s)^2: slower drift in 4-frame steps doesn't show
+
     void Update()
     {
         int frame = Time.frameCount;
@@ -267,7 +261,10 @@ public class ResourceField : MonoBehaviour
                 Vector3 p = c.T.position;
                 if ((p - cam).sqrMagnitude > near2)
                 {
-                    int every = SimulationTicker.OnScreen(p, c.radius * 1.3f) ? 4 : 8;
+                    // On screen and carried by the blood (off the calm middle it moves relative to the camera):
+                    // every frame, else it moved in steps of 4 frames' drift (judder).
+                    bool seen = SimulationTicker.OnScreen(p, c.radius * 1.3f);
+                    int every = !seen ? 8 : Vessel.FlowAt(p).sqrMagnitude > DriftEveryFrame ? 1 : 4;
                     if ((i + frame) % every != 0) continue;
                 }
             }

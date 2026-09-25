@@ -42,6 +42,20 @@ public class Antibody : MonoBehaviour
 
     /// <summary>When ImmuneSystem last ticked it (it ticks far ones every few frames).</summary>
     public float LastTick { get; set; }
+    float _lastCarry = -1f;
+
+    /// <summary>Moves it by its swimming velocity + the blood's flow since the last call. Separate from the
+    /// (LOD'd) Tick so ImmuneSystem can move on-screen ones every frame while they only think every few: stepped
+    /// with the tick, drifting ones juddered against the camera.</summary>
+    public void Carry(float now)
+    {
+        float dt = _lastCarry < 0f ? 0f : Mathf.Min(now - _lastCarry, 0.25f);
+        _lastCarry = now;
+        if (dt <= 0f || Current == State.Stuck) return; // stuck: posed by Follow
+        Vector3 pos = transform.position;
+        Vector3 step = (_velocity + Vessel.FlowAt(pos)) * dt; // swims through the blood, carried by it
+        if (step.sqrMagnitude > 1e-10f) transform.position = pos + step;
+    }
 
     /// <summary>Per-instance shader data: seed, agitation (calm drifting .. frantic chasing), grip (arms
     /// wrapped round the body while stuck), wrap (hinge-to-centre in antibody sizes: what it bends round).</summary>
@@ -62,6 +76,7 @@ public class Antibody : MonoBehaviour
 
         if (Current == State.Stuck)
         {
+            _lastCarry = now; // posed by Follow meanwhile: shaken off, it swims on from here
             if (!Prey || !Prey.isActiveAndEnabled)
             {
                 Unstick();
@@ -93,7 +108,8 @@ public class Antibody : MonoBehaviour
                 Vector3 at = Prey.transform.position;
                 Vector3 to = at - pos;
                 float dist = to.magnitude;
-                if (dist <= Reach(Prey) + s.stickDistance)
+                BodyHull hull = BodyHull.For(Prey);
+                if ((pos - hull.Centre).magnitude <= hull.RadiusToward(pos) + s.stickDistance)
                 {
                     Stick(s);
                     return;
@@ -112,12 +128,12 @@ public class Antibody : MonoBehaviour
 
         if (!dive) desire += Avoid(s, pos);
         _velocity = Vector3.MoveTowards(_velocity, Vector3.ClampMagnitude(desire, 1f) * speed, accel * dt);
-        pos += _velocity * dt;
+        Carry(now); // moves by _velocity + flow (and every frame on screen, from ImmuneSystem)
 
         // Tumble along, turning to face where it's going.
         _spin += dt * (Current == State.Chase ? 150f : 30f);
         Quaternion face = _velocity.sqrMagnitude > 1e-4f ? Quaternion.LookRotation(_velocity) : transform.rotation;
-        transform.SetPositionAndRotation(pos, Quaternion.Slerp(transform.rotation, face * Quaternion.Euler(90f, _spin, 0f), dt * 3f));
+        transform.rotation = Quaternion.Slerp(transform.rotation, face * Quaternion.Euler(90f, _spin, 0f), dt * 3f);
     }
 
     // Drifting: wander, pulled along the signal field. Near a loud cell: circle over its activity.
@@ -285,16 +301,5 @@ public class Antibody : MonoBehaviour
         _hold?.Release(_slot);
         _hold = null;
         _slot = -1; // _wrap stays: it unbends as the grip eases off
-    }
-
-    // How far a creature's outside is from its middle (its colliders, else a guess).
-    static readonly Dictionary<Organism, float> s_reach = new Dictionary<Organism, float>();
-    static float Reach(Organism o)
-    {
-        if (s_reach.TryGetValue(o, out float r)) return r;
-        Collider c = o.GetComponentInChildren<Collider>();
-        r = c ? Mathf.Min(c.bounds.extents.x, Mathf.Min(c.bounds.extents.y, c.bounds.extents.z)) : 0.8f;
-        s_reach[o] = r;
-        return r;
     }
 }

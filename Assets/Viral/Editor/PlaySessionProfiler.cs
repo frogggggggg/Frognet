@@ -52,6 +52,7 @@ static class PlaySessionProfiler
     }
 
     static IEnumerator s_job;
+    static bool s_refreshed;
     static Action s_restore; // puts back whatever the running experiment turned off
     static readonly List<Result> s_results = new List<Result>();
     static readonly Dictionary<string, Marker> s_main = new Dictionary<string, Marker>(), s_render = new Dictionary<string, Marker>();
@@ -84,6 +85,14 @@ static class PlaySessionProfiler
     {
         if (s_job == null && File.Exists(RequestPath) && !EditorApplication.isCompiling)
         {
+            // Scripts edited outside Unity aren't imported until the editor gets focus: import them first, so the
+            // run measures the current code (a compile reloads the domain and this comes round again).
+            if (!s_refreshed)
+            {
+                s_refreshed = true;
+                AssetDatabase.Refresh();
+                if (EditorApplication.isCompiling) return;
+            }
             File.Delete(RequestPath);
             Request();
         }
@@ -220,7 +229,38 @@ static class PlaySessionProfiler
         LiveSky(),
         SkyOff(),
         new Experiment { name = Baseline },
+        VesselWallOff(),
+        Behaviours<AmbientParticles>("ambient specks off"),
+        Behaviours<HoloMap>("holo map off"),
+        new Experiment { name = Baseline },
+        Behaviours<WhiteBloodCells>("white blood cells off (sim + draw)"),
+        Behaviours<ResourceField>("resource chunks off (sim + draw)"),
+        Behaviours<ImmuneSystem>("immune system off (antibodies, motes)"),
+        new Experiment { name = Baseline },
     };
+
+    // Wall hidden with the sky kept off too (the vessel gives the camera back its skybox when the wall goes, so
+    // the sky material itself is removed), so it measures the wall alone.
+    static Experiment VesselWallOff()
+    {
+        Experiment sky = SkyOff();
+        Vessel vessel = null;
+        return new Experiment
+        {
+            name = "vessel wall hidden (sky still off)",
+            off = () =>
+            {
+                vessel = Vessel.Active;
+                if (vessel) vessel.drawWall = false;
+                sky.off();
+            },
+            on = () =>
+            {
+                sky.on();
+                if (vessel) vessel.drawWall = true;
+            },
+        };
+    }
 
     const string Baseline = "baseline";
 

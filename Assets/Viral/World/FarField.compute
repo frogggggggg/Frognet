@@ -1,0 +1,103 @@
+// The far field (FarField.cs): what the world holds beyond the loaded bubble, drawn from data. One thread per
+// record: turn it to where the blood has carried it since it was posed (rigid turn round the vessel's axis at its
+// band's rate, the same maths as WorldStreamer.Advance), cull it (frustum, too small to see, past the far distance,
+// fully shown by its real object), pick the mesh LOD by on-screen size, write its pose and append it to its draw
+// group (look x LOD): visible list + that group's indirect instance count.
+#pragma kernel Cull
+
+// StreamFade.hlsl's StreamFade (that file needs Core.hlsl and clip): keep the two alike. Set by FarField (w > 0).
+float4 _StreamFade;
+float  _StreamFadeEnd;
+float StreamFade(float3 centreWS)
+{
+    return smoothstep(0.0, 1.0, saturate((_StreamFadeEnd - distance(centreWS, _StreamFade.xyz)) * _StreamFade.w));
+}
+
+struct FarInstance
+{
+    float4 position; // xyz where it was posed, w = its band's turn rate (rad / s)
+    float4 rotation; // quaternion when posed
+    float4 scale;    // xyz, w = bounding radius (metres)
+    float4 time;     // x pose time, y frame angle then (both from the epoch), z born (fade in from), w look (-1 = empty)
+};
+
+struct Posed
+{
+    float4 position; // xyz now, w = its own fade (far edge x born)
+    float4 rotation;
+    float4 scale;    // xyz, w = how much the real object shows (StreamFade): the stand-in takes the other pixels
+};
+
+StructuredBuffer<FarInstance> _Source;
+RWStructuredBuffer<Posed> _Posed;
+RWStructuredBuffer<uint> _Visible;
+RWStructuredBuffer<uint> _Args; // 5 uints per group (IndirectDrawIndexedArgs); [g * 5 + 1] = instance count
+
+uint _SourceCount, _PosedOffset, _GroupCapacity;
+float4 _Planes[6];
+float4 _CameraPos;   // xyz, w = pixels per metre at 1 m (screen height / (2 tan(fov / 2)))
+float4 _VesselC;     // centre, w = 1 with a vessel
+float4 _VesselA;     // axis
+float4 _Clock;       // x now, y frame angle now (from the epoch), z born fade seconds
+float4 _Range;       // x far distance, y far fade length, z least pixels, w LOD pixels
+
+float3 Turn(float3 v, float3 k, float a)
+{
+    float s, c;
+    sincos(a, s, c);
+    return v * c + cross(k, v) * s + k * dot(k, v) * (1.0 - c);
+}
+
+float4 QuatMul(float4 a, float4 b)
+{
+    return float4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz), a.w * b.w - dot(a.xyz, b.xyz));
+}
+
+[numthreads(64, 1, 1)]
+void Cull(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= _SourceCount) return;
+    FarInstance f = _Source[i];
+    if (f.time.w < 0.0) return;
+
+    float3 p = f.position.xyz;
+    float4 q = f.rotation;
+    if (_VesselC.w > 0.5)
+    {
+        float angle = f.position.w * (_Clock.x - f.time.x) - (_Clock.y - f.time.y);
+        float3 k = _VesselA.xyz;
+        p = _VesselC.xyz + Turn(p - _VesselC.xyz, k, angle);
+        float s, c;
+        sincos(angle * 0.5, s, c);
+        q = QuatMul(float4(k * s, c), q);
+    }
+
+    float radius = f.scale.w;
+    for (int n = 0; n < 6; n++)
+        if (dot(_Planes[n].xyz, p) + _Planes[n].w < -radius) return;
+
+    float d = distance(p, _CameraPos.xyz);
+    float pixels = radius * _CameraPos.w / max(d, 1.0);
+    if (pixels < _Range.z) return;
+
+    float own = saturate((_Range.x - d) / max(_Range.y, 1.0));
+    if (_Clock.z > 0.0) own *= saturate((_Clock.x - f.time.z) / _Clock.z);
+    if (own <= 0.0) return;
+    float real = StreamFade(p);
+    if (real >= 1.0) return;
+
+    uint lod = pixels < _Range.w ? 1u : 0u;
+    uint group = (uint)f.time.w * 2u + lod;
+    uint slot;
+    InterlockedAdd(_Args[group * 5u + 1u], 1u, slot);
+    if (slot >= _GroupCapacity) return; // can't happen (capacity = every record), but never write past it
+
+    Posed o;
+    o.position = float4(p, own);
+    o.rotation = q;
+    o.scale = float4(f.scale.xyz, real);
+    uint at = _PosedOffset + i;
+    _Posed[at] = o;
+    _Visible[group * _GroupCapacity + slot] = at;
+}

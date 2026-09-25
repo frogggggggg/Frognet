@@ -35,6 +35,7 @@ Shader "Custom/Antibody"
 
         HLSLINCLUDE
         #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+        #include "World/StreamFade.hlsl"
 
         CBUFFER_START(UnityPerMaterial)
             float4 _Tint, _Rim;
@@ -137,6 +138,8 @@ Shader "Custom/Antibody"
             normalWS = Rotate(inst.rotation, n); // uniform scale
             return inst.positionScale.xyz + Rotate(inst.rotation, p) * inst.positionScale.w;
         }
+
+        float Fade(Attributes v) { return StreamFade(_Antibodies[_InstanceOffset + v.instanceID].positionScale.xyz); }
         ENDHLSL
 
         Pass
@@ -160,6 +163,7 @@ Shader "Custom/Antibody"
                 float3 normalWS   : TEXCOORD1;
                 float4 color      : TEXCOORD2;
                 float  fog        : TEXCOORD3;
+                nointerpolation float fade : TEXCOORD4;
             };
 
             Varyings vert(Attributes v)
@@ -169,11 +173,14 @@ Shader "Custom/Antibody"
                 o.positionCS = TransformWorldToHClip(o.positionWS);
                 o.color = v.color * _Tint;
                 o.fog = ComputeFogFactor(o.positionCS.z);
+                o.fade = Fade(v);
+                o.positionCS = StreamFadeHide(o.positionCS, o.fade);
                 return o;
             }
 
             half4 frag(Varyings i) : SV_Target
             {
+                StreamFadeClip(i.fade, i.positionCS.xy);
                 float3 n = normalize(i.normalWS);
                 float3 v = normalize(GetWorldSpaceViewDir(i.positionWS));
                 Light l = GetMainLight(TransformWorldToShadowCoord(i.positionWS));
@@ -240,12 +247,17 @@ Shader "Custom/Antibody"
             HLSLPROGRAM
             #pragma vertex vert
             #pragma fragment frag
-            float4 vert(Attributes v) : SV_POSITION
+            struct Varyings { float4 positionCS : SV_POSITION; nointerpolation float fade : TEXCOORD0; };
+
+            Varyings vert(Attributes v)
             {
                 float3 n;
-                return TransformWorldToHClip(WiggledWorld(v, n));
+                Varyings o;
+                o.fade = Fade(v);
+                o.positionCS = StreamFadeHide(TransformWorldToHClip(WiggledWorld(v, n)), o.fade);
+                return o;
             }
-            half4 frag() : SV_Target { return 0; }
+            half4 frag(Varyings i) : SV_Target { StreamFadeClip(i.fade, i.positionCS.xy); return 0; }
             ENDHLSL
         }
 
@@ -260,17 +272,19 @@ Shader "Custom/Antibody"
             #pragma multi_compile_fragment _ _GBUFFER_NORMALS_OCT
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Packing.hlsl"
 
-            struct Varyings { float4 positionCS : SV_POSITION; float3 normalWS : TEXCOORD0; };
+            struct Varyings { float4 positionCS : SV_POSITION; float3 normalWS : TEXCOORD0; nointerpolation float fade : TEXCOORD1; };
 
             Varyings vert(Attributes v)
             {
                 Varyings o;
-                o.positionCS = TransformWorldToHClip(WiggledWorld(v, o.normalWS));
+                o.fade = Fade(v);
+                o.positionCS = StreamFadeHide(TransformWorldToHClip(WiggledWorld(v, o.normalWS)), o.fade);
                 return o;
             }
 
             half4 frag(Varyings i) : SV_Target
             {
+                StreamFadeClip(i.fade, i.positionCS.xy);
                 float3 n = normalize(i.normalWS);
             #if defined(_GBUFFER_NORMALS_OCT)
                 float2 oct = saturate(PackNormalOctQuadEncode(n) * 0.5 + 0.5);

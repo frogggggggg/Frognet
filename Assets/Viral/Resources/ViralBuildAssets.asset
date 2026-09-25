@@ -1,0 +1,46 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 02031cd432974428801a32ead425a821, type: 3}
+  m_Name: ViralBuildAssets
+  m_EditorClassIdentifier: 
+  shaders:
+  - {fileID: 4800000, guid: 4fe42934d7c7eb3439337e194841b027, type: 3}
+  - {fileID: 4800000, guid: 9e0c7045d72f7434488b1aaf005cd418, type: 3}
+  - {fileID: 4800000, guid: 49532895b3c235b42974c2911f4149d7, type: 3}
+  - {fileID: 4800000, guid: 701409237e8514c458c4f7ffe580ce78, type: 3}
+  - {fileID: 4800000, guid: 699337b36a10ad140965236c7ae0ef65, type: 3}
+  - {fileID: 4800000, guid: 2a9dbbf71afaba7478ad0aad331c0450, type: 3}
+  - {fileID: 4800000, guid: 14ab0ef871571f04387c017b1435f06e, type: 3}
+  - {fileID: 4800000, guid: 2188d3c50a70544459dff6f3c1197079, type: 3}
+  - {fileID: 4800000, guid: b81e0d0ab81c326439e620a19e8a97c5, type: 3}
+  - {fileID: 4800000, guid: edc05a999b7a8e742a492ac068f75d9b, type: 3}
+  - {fileID: 4800000, guid: 96da4745d55efa14c8248e7ec00fc419, type: 3}
+  - {fileID: 4800000, guid: 18d445f09e9b168438d365c4c1d5e214, type: 3}
+  - {fileID: 4800000, guid: 5e73e6d04106e0340ad944053c0eee64, type: 3}
+  - {fileID: 4800000, guid: 4e3c02e93c843b346baf7535c4d5c4ab, type: 3}
+  - {fileID: 4800000, guid: e7ac85f30f82485787afeef67b665a08, type: 3}
+  - {fileID: 4800000, guid: 0a2b39148150468e9270ec2106c3d0b8, type: 3}
+  - {fileID: 4800000, guid: 00d67abd9eb24c6cb37d56a70963460b, type: 3}
+  - {fileID: 4800000, guid: 2d685ee99f4129245b4be032a1892f78, type: 3}
+  - {fileID: 4800000, guid: 8ea863846e72c7f4ea653484d14ba539, type: 3}
+  - {fileID: 4800000, guid: 1b1ad72005adbb6448fd9606b97425bc, type: 3}
+  - {fileID: 4800000, guid: 5073c5d9586f7804e940bfe63f4a0d89, type: 3}
+  - {fileID: 4800000, guid: 0d44eba6a365c9141b1954828a42e83f, type: 3}
+  - {fileID: 4800000, guid: 7a778cb8a7664523aa88afbc420c599a, type: 3}
+  - {fileID: 4800000, guid: dc5cb830b3b94b18a0e4d9e073bcd038, type: 3}
+  - {fileID: 4800000, guid: c521b829bbed4d5c81ca6f65d74a7adb, type: 3}
+  whiteBloodCellBake: {fileID: 7200000, guid: 173faba0258243deac2e0d59e6fe5d2c, type: 3}
+  legSimulation: {fileID: 7200000, guid: 3d7ae7460664431dbd54648a23f8089c, type: 3}
+  farField: {fileID: 7200000, guid: 20b98e4c7e3c4ecd9f989a7572589217, type: 3}
+  whiteBloodCells: {fileID: 1000000000000000001, guid: d224e2afc78f461daf1ebda30f5383ce, type: 3}
+  resourceField: {fileID: 1000000000000000001, guid: f90844798d96425eb0c775977f3c18ab, type: 3}
+  worldStreamer: {fileID: 1000000000000000001, guid: e9ce9516f5ef4f75aab4fe434932927c, type: 3}

@@ -210,6 +210,8 @@ Shader "Custom/WhiteBloodCell"
             o.normalWS = n;
             return o;
         }
+
+        float Fade(Attributes v) { return StreamFade(_Cells[_InstanceOffset + v.instanceID].positionRadius.xyz); }
         ENDHLSL
 
         Pass
@@ -241,6 +243,7 @@ Shader "Custom/WhiteBloodCell"
                 float  fog        : TEXCOORD4;
                 nointerpolation uint id : TEXCOORD5;
                 float4 mapTip     : TEXCOORD6; // the tip's material map, w = its share
+                nointerpolation float fade : TEXCOORD7;
             };
 
             WhiteVaryings vert(Attributes v)
@@ -255,6 +258,8 @@ Shader "Custom/WhiteBloodCell"
                 o.marks = float3(s.lump, s.mouth, s.tendril);
                 o.fog = ComputeFogFactor(o.positionCS.z);
                 o.id = _InstanceOffset + v.instanceID;
+                o.fade = Fade(v);
+                o.positionCS = StreamFadeHide(o.positionCS, o.fade);
                 return o;
             }
 
@@ -327,6 +332,7 @@ Shader "Custom/WhiteBloodCell"
 
             half4 WhiteFrag(WhiteVaryings i) : SV_Target
             {
+                StreamFadeClip(i.fade, i.positionCS.xy);
                 Instance inst = _Cells[i.id];
                 float seed = inst.motion.w, hunger = inst.state.x, R = max(inst.positionRadius.w, 1e-3);
                 float crest = saturate(i.marks.x), mouth = saturate(i.marks.y), tendril = saturate(i.marks.z);
@@ -418,8 +424,16 @@ Shader "Custom/WhiteBloodCell"
             #pragma vertex vert
             #pragma fragment frag
             #pragma target 4.5
-            float4 vert(Attributes v) : SV_POSITION { return TransformWorldToHClip(Evaluate(v).positionWS); }
-            half4 frag() : SV_Target { return 0; }
+            struct Varyings { float4 positionCS : SV_POSITION; nointerpolation float fade : TEXCOORD0; };
+
+            Varyings vert(Attributes v)
+            {
+                Varyings o;
+                o.fade = Fade(v);
+                o.positionCS = StreamFadeHide(TransformWorldToHClip(Evaluate(v).positionWS), o.fade);
+                return o;
+            }
+            half4 frag(Varyings i) : SV_Target { StreamFadeClip(i.fade, i.positionCS.xy); return 0; }
             ENDHLSL
         }
 
@@ -435,19 +449,21 @@ Shader "Custom/WhiteBloodCell"
             #pragma multi_compile_fragment _ _GBUFFER_NORMALS_OCT
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Packing.hlsl"
 
-            struct Varyings { float4 positionCS : SV_POSITION; float3 normalWS : TEXCOORD0; };
+            struct Varyings { float4 positionCS : SV_POSITION; float3 normalWS : TEXCOORD0; nointerpolation float fade : TEXCOORD1; };
 
             Varyings vert(Attributes v)
             {
                 Surfel s = Evaluate(v);
                 Varyings o;
-                o.positionCS = TransformWorldToHClip(s.positionWS);
+                o.fade = Fade(v);
+                o.positionCS = StreamFadeHide(TransformWorldToHClip(s.positionWS), o.fade);
                 o.normalWS = s.normalWS;
                 return o;
             }
 
             half4 frag(Varyings i) : SV_Target
             {
+                StreamFadeClip(i.fade, i.positionCS.xy);
                 float3 n = normalize(i.normalWS);
             #if defined(_GBUFFER_NORMALS_OCT)
                 float2 oct = saturate(PackNormalOctQuadEncode(n) * 0.5 + 0.5);

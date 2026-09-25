@@ -22,10 +22,16 @@ public class SkyboxCache : MonoBehaviour
 {
     const string SkyShader = "Custom/StylizedCellSkybox";
 
-    [Tooltip("Cubemap face size. 2048 matches a 1080p screen at a 60 degree field of view.")]
-    public int faceSize = 2048;
-    [Min(0.1f), Tooltip("Seconds per bake: how far apart the two crossfaded moments are.")]
-    public float refreshSeconds = 1f;
+    [Tooltip("Cubemap face size; 0 = fit the camera's rendered height and field of view (1080p at 60 degrees ~ 2048, " +
+             "a laptop's 810p render ~ 1280). Each bake draws 6 faces of the full sky shader, so an oversized face " +
+             "cost about as much as drawing the sky live.")]
+    public int faceSize = 0;
+    [Min(0.1f), Tooltip("Seconds per bake: how far apart the two crossfaded moments are. The sky drifts slowly; " +
+                        "a bake costs 6 x faceSize^2 sky pixels, spread over this.")]
+    public float refreshSeconds = 2f;
+
+    /// <summary>The sky material the cache stands in for (while it's drawn, RenderSettings.skybox is the cache's).</summary>
+    public static Material Source { get; private set; }
     [Min(1f), Tooltip("Draw the live sky when the view is zoomed in so far that a cache texel would cover more than this many pixels.")]
     public float maxMagnification = 1.15f;
     public Key toggleKey = Key.F6;
@@ -82,7 +88,9 @@ public class SkyboxCache : MonoBehaviour
         }
 
         _source = sky;
-        _bake = new Material(bakeShader) { hideFlags = HideFlags.HideAndDontSave };
+        Source = sky;
+        if (faceSize <= 0) faceSize = FitFaceSize();
+        _bake =new Material(bakeShader) { hideFlags = HideFlags.HideAndDontSave };
         _display = new Material(cachedShader) { hideFlags = HideFlags.HideAndDontSave };
         _cmd = new CommandBuffer { name = "Skybox Cache" };
 
@@ -121,6 +129,7 @@ public class SkyboxCache : MonoBehaviour
     void OnDisable()
     {
         if (_source && RenderSettings.skybox == _display) RenderSettings.skybox = _source;
+        if (Source == _source) Source = null;
         Drawing = false;
         for (int i = 0; i < 3; i++)
             if (_cubes[i]) { _cubes[i].Release(); Destroy(_cubes[i]); _cubes[i] = null; }
@@ -137,6 +146,7 @@ public class SkyboxCache : MonoBehaviour
 
         float now = Time.timeSinceLevelLoad;
         _dt = Mathf.Lerp(_dt, Mathf.Max(Time.unscaledDeltaTime, 1e-4f), 0.1f);
+        if (Vessel.HidesSky) return; // the vessel's wall covers every view: nothing to bake (catches up after)
 
         // Bake the next moment's strips, spread so it's done when the crossfade reaches it.
         // Kept going while the live sky shows too, so switching back is seamless.
@@ -188,15 +198,32 @@ public class SkyboxCache : MonoBehaviour
         if (RenderSettings.skybox != want) RenderSettings.skybox = want;
     }
 
+    // The smallest face SharpEnough accepts for the main camera as it renders now (render scale included),
+    // rounded up to 64.
+    int FitFaceSize()
+    {
+        Camera cam = Camera.main;
+        if (!cam) return 2048;
+        float need = RenderHeight(cam) / (Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad) * maxMagnification);
+        return Mathf.Clamp(Mathf.CeilToInt(need / 64f) * 64, 256, 2048);
+    }
+
     // A face-centre texel spans 2/faceSize in tangent space; a screen-centre pixel spans
     // 2 tan(fov/2) / height. The cache is used while a texel covers at most maxMagnification pixels.
     bool SharpEnough()
     {
         Camera cam = Camera.main;
         if (!cam) return true;
-        float pixel = 2f * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad) / Mathf.Max(1, cam.pixelHeight);
+        float pixel = 2f * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad) / RenderHeight(cam);
         float texel = 2f / faceSize;
-        return texel <= pixel * maxMagnification;
+        return texel <= pixel * maxMagnification * 1.001f;
+    }
+
+    // Pixels the camera really renders vertically (URP's render scale included).
+    static float RenderHeight(Camera cam)
+    {
+        var urp = UnityEngine.Rendering.Universal.UniversalRenderPipeline.asset;
+        return Mathf.Max(1f, cam.pixelHeight * (urp ? urp.renderScale : 1f));
     }
 
     /// <summary>

@@ -20,6 +20,9 @@ using UnityEngine;
 /// anything else = its bounding sphere; a creature (anything with an Organism) is one sphere around all its colliders
 /// (oneSpherePerCreature). Colliders with a Rigidbody are tracked every physics step (position + velocity), reading
 /// each body once for all its spheres; colliders without one are treated as fixed. Call Rescan() after spawning/destroying obstacles.
+/// Lazy: Rescan() only marks the scene changed, and nothing is scanned or refreshed until an agent asks for a
+/// direction (then at most once per physics step), so with no flying agents the field costs nothing, and a streamed
+/// world spawning cells doesn't pay a full scene scan per batch.
 /// </summary>
 [DefaultExecutionOrder(-100)]
 public class PathManager : MonoBehaviour
@@ -55,11 +58,24 @@ public class PathManager : MonoBehaviour
     /// <summary>Id of the obstacle "group" a component belongs to (its Rigidbody, else its own transform). Cache it and pass it to GetDirection to ignore that body.</summary>
     public static int Id(Component c) { var b = c.GetComponentInParent<Rigidbody>(); return b ? b.GetInstanceID() : c.transform.GetInstanceID(); }
 
-    void Awake() { I = this; Rescan(); }
-    void FixedUpdate() => Refresh();
+    bool _rescan = true, _stale;
 
-    /// <summary>Grab all colliders in the scene and generalize them to spheres.</summary>
-    public void Rescan()
+    void Awake() { I = this; }
+    void FixedUpdate() => _stale = true;
+
+    /// <summary>The scene's obstacles changed: they're gathered again before the next query.</summary>
+    public void Rescan() => _rescan = true;
+
+    // Brought up to date on the first query after a change / physics step (main thread; queries on worker threads
+    // come after GetDirections has done this, so they only read the flags).
+    void Ensure()
+    {
+        if (_rescan) { _rescan = _stale = false; Scan(); }
+        else if (_stale) { _stale = false; Refresh(); }
+    }
+
+    // Grab all colliders in the scene and generalize them to spheres.
+    void Scan()
     {
         lt.Clear(); lb.Clear(); ll.Clear(); lr.Clear(); lg.Clear();
         // Merged into one sphere each: a creature's colliders (oneSpherePerCreature), and a Surface's (a concave
@@ -209,6 +225,7 @@ public class PathManager : MonoBehaviour
     /// ignoreA/ignoreB: PathManager.Id(...) of bodies to treat as non-obstacles for this query (yourself, the thing you want to hit).</summary>
     public Vector3 GetField(Vector3 x, Vector3 target, int ignoreA = 0, int ignoreB = 0)
     {
+        Ensure();
         Vector3 V = Sink(x - target), eject = Vector3.zero, nGuard = Vector3.zero; bool hit = false; float guard = 0f, invW0 = 1f / (1f - 1f / (cutoff * cutoff));
         int cx = Mathf.FloorToInt(x.x * inv), cy = Mathf.FloorToInt(x.y * inv), cz = Mathf.FloorToInt(x.z * inv);
         for (int dx = -1; dx <= 1; dx++) for (int dy = -1; dy <= 1; dy++) for (int dz = -1; dz <= 1; dz++)
@@ -241,7 +258,10 @@ public class PathManager : MonoBehaviour
 
     /// <summary>Many agents at once, spread over threads (read-only, no Unity API calls inside). selfIds (optional): each agent's own Id.</summary>
     public void GetDirections(Vector3[] positions, Vector3[] targets, Vector3[] result, int count, int[] selfIds = null)
-        => Parallel.For(0, count, i => result[i] = GetDirection(positions[i], targets[i], selfIds != null ? selfIds[i] : 0));
+    {
+        Ensure();
+        Parallel.For(0, count, i => result[i] = GetDirection(positions[i], targets[i], selfIds != null ? selfIds[i] : 0));
+    }
 
     void OnDrawGizmosSelected()
     {

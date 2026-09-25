@@ -1,0 +1,760 @@
+// Every SpiderLegWalker's legs, simulated on the GPU. One thread per walker: its legs' gait (stepping, planting,
+// swing arcs), air pose, spin wiggle, the smoothed frame and the knee springs, then the leg records the leg
+// shader draws (LegData). Feet are placed with the walker's surface's SurfaceMap (nearest point on the real mesh),
+// never raycasts. State lives here across frames (_LegState per leg, _WalkerState per walker); the CPU only sends
+// what's per walker (Walker: hub, frame, velocity, the support's matrices, mode changes), see SpiderLegWalker.
+//
+// This is SpiderLegWalker's old per-leg code moved over line for line; the comments there that explained each rule
+// are kept here. Anchors (feet, step ends) ride the walker's support (the surface it stands on) as local points.
+
+#pragma kernel Simulate
+#pragma kernel CopyLegs
+#pragma kernel CopyWalkers
+
+#include "SurfaceMap.hlsl"
+#include "LegData.hlsl"
+
+#define PI 3.14159265
+
+// Feel constants, shared by every walker (were SpiderLegWalker's).
+#define CurveBias 0.35
+#define StretchThickness 0.16
+#define SwingFraction 0.45   // share of the gait cycle a foot is in the air
+#define SpanMargin 0.4
+#define KneeFrequency 9.0
+#define KneeDamping 0.85
+#define TurnAngle (27.0 * PI / 180.0)
+#define TurnRadius 0.12
+#define HoldSpeed 0.2
+#define TakeoffTime 0.25
+#define MinProbeFacing 0.5   // ground more than 60 degrees off the probe direction doesn't count
+
+// Walker flags (SpiderLegWalker.Flag).
+#define F_INIT 1
+#define F_ENTER_GROUND 2
+#define F_FROM_AIR 4
+#define F_ENTER_AIR 8
+#define F_AIR 16
+#define F_SNAP_KNEES 32
+#define F_CARRY 64
+#define F_SUPPORT_CHANGED 128
+#define F_HAS_LAND 256
+#define F_HAS_SUPPORT 512
+#define F_WIGGLE_START 1024
+
+// One walker's frame, from the CPU (LegRenderer.Walker: 27 float4s).
+struct Walker
+{
+    float4 pos;      // xyz hub, w dt
+    float4 normal;   // xyz ground normal, w turn (-1..1)
+    float4 right;    // xyz ring right, w gait cycles per second
+    float4 fwd;      // xyz ring forward, w swing time
+    float4 planar;   // xyz velocity along the ground (relative to the support), w stance time
+    float4 bodyUp;   // xyz hub -> body, w farthest a foot may be (max span)
+    float4 m0, m1, m2; // support: local -> world (rows)
+    float4 i0, i1, i2; // support: world -> local (rows)
+    float4 carry;    // quaternion: the support's turn since last frame (F_CARRY)
+    float4 shape0;   // foot distance, root radius, step distance, step height
+    float4 shape1;   // curve height, upright feet, base radius, tip radius
+    float4 gait;     // organic, ring spin, mirror, wobble phase
+    float4 airAxis;  // xyz, w spread
+    float4 orbitRef; // xyz, w away
+    float4 trail;    // xyz, w landing (0..1)
+    float4 land;     // xyz landing centre, w longest air leg
+    float4 landUp;   // xyz, w time in the air
+    float4 toLand;   // quaternion: air ring -> landing plane
+    float4 grabAxis; // xyz, w wiggle (0..1)
+    float4 grabRef;  // xyz, w air flow
+    float4 look;     // wobble amplitude, air wave, swell, shape dt (knee springs)
+    int4 slots;      // first leg state, leg count, first output leg (-1: not drawn), flags
+    int4 ids;        // map (-1: none), seed, walker state, -
+};
+
+struct Anchor
+{
+    float3 local, localN; // on the support
+    float3 world, normal; // last evaluated
+};
+
+// Per leg, kept across frames (LegRenderer.LegStateStride = 364 bytes).
+struct LegState
+{
+    float angle, phase, rReach, rHeight, delay; // r*: -1..1 personality seeds
+    float swingStart, lift, plant;              // plant: 0 free (air) .. 1 on a surface, eased
+    int stepping, window;                       // window: last gait cycle this leg had its swing window
+    Anchor foot, from, to;
+    float3 aimLocal, aimWorld;                  // the goal the swing's target was last matched to
+    float3 home, tip, airStart, ground, clampN, bendUp, hipUp, side, rootDir, rootGoal;
+    float3 knee, kneeVel;                       // upper control point, relative to the hub, on a spring
+    float3 wig;                                 // rotation-wiggle tip, relative to the hub, eased
+};
+
+StructuredBuffer<Walker> _Walkers;
+RWStructuredBuffer<LegState> _LegState;
+RWStructuredBuffer<float2> _WalkerState; // x gait cycle, y hub height over its surface (-1 unknown)
+RWStructuredBuffer<LegData> _LegsOut;
+RWStructuredBuffer<uint4> _Events;       // per walker this frame: xyz last planted foot (as float bits), w legs planted (bits)
+
+StructuredBuffer<LegState> _LegSrc;
+StructuredBuffer<float2> _WalkerSrc;
+
+float _SimTime;
+uint _WalkerCount, _CopyCount;
+
+// ---------------------------------------------------------------------
+// The walker being simulated (per thread)
+// ---------------------------------------------------------------------
+
+static Walker W;
+static uint Flags;
+static float FD, Organic;
+static float3 Hub;
+static float ReachLimit; // Probe ignores ground farther than this from Hub (a leg can't get there)
+static uint Planted;
+static float3 LastPlant;
+
+float FootLift() { return W.shape1.w + 0.02; }
+float ProbeUp() { return FD * 1.3; }
+float ProbeDown() { return FD * 3.0; }
+float Reach(LegState l) { return FD * (1.0 + l.rReach * 0.08 * Organic); }
+float Slot(LegState l) { return W.gait.z * l.angle + W.gait.y; }
+
+float3 SafeNorm(float3 v, float3 fallback)
+{
+    float l = dot(v, v);
+    return l > 1e-12 ? v * rsqrt(l) : fallback;
+}
+
+float3 Perp(float3 n) { return normalize(cross(n, abs(n.y) < 0.9 ? float3(0, 1, 0) : float3(1, 0, 0))); }
+float3 Flatten(float3 v, float3 n) { return v - n * dot(v, n); }
+float PlanarDist(float3 a, float3 b, float3 n) { return length(Flatten(b - a, n)); }
+float3 Rotate(float4 q, float3 v) { float3 t = 2.0 * cross(q.xyz, v); return v + q.w * t + cross(q.xyz, t); }
+float3 RotateAxis(float3 v, float3 axis, float angle)
+{
+    float s, c;
+    sincos(angle, s, c);
+    return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
+}
+float3 ClampLength(float3 v, float m) { float l = length(v); return l > m ? v * (m / l) : v; }
+
+// Vector3.Slerp: the direction turns on the great circle, the length is lerped.
+float3 Slerp(float3 a, float3 b, float t)
+{
+    float la = length(a), lb = length(b);
+    if (la < 1e-6 || lb < 1e-6) return lerp(a, b, t);
+    float3 na = a / la, nb = b / lb;
+    float d = clamp(dot(na, nb), -1.0, 1.0);
+    float3 dir;
+    if (d > 0.99999) dir = normalize(lerp(na, nb, t));
+    else
+    {
+        float3 ortho = nb - na * d;
+        ortho = dot(ortho, ortho) > 1e-10 ? normalize(ortho) : Perp(na); // opposite: any way round
+        float angle = acos(d) * t, s, c;
+        sincos(angle, s, c);
+        dir = na * c + ortho * s;
+    }
+    return dir * lerp(la, lb, t);
+}
+
+float Hash01(int value)
+{
+    uint x = asuint(value);
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return (x & 0x00FFFFFFu) / 16777215.0;
+}
+
+// ---------------------------------------------------------------------
+// The support (what the walker stands on; identity in the air)
+// ---------------------------------------------------------------------
+
+float3 ToWorldP(float3 p) { float4 h = float4(p, 1.0); return float3(dot(W.m0, h), dot(W.m1, h), dot(W.m2, h)); }
+float3 ToLocalP(float3 p) { float4 h = float4(p, 1.0); return float3(dot(W.i0, h), dot(W.i1, h), dot(W.i2, h)); }
+// Normals by the inverse transpose, so a stretched support keeps them perpendicular.
+float3 ToLocalN(float3 n) { return SafeNorm(W.m0.xyz * n.x + W.m1.xyz * n.y + W.m2.xyz * n.z, n); }
+float3 ToWorldN(float3 n) { return SafeNorm(W.i0.xyz * n.x + W.i1.xyz * n.y + W.i2.xyz * n.z, n); }
+
+void ASet(inout Anchor a, float3 w) { a.world = w; a.local = ToLocalP(w); a.localN = ToLocalN(a.normal); }
+void ASetNormal(inout Anchor a, float3 n) { a.normal = n; a.localN = ToLocalN(n); }
+float3 AGet(inout Anchor a) { a.world = ToWorldP(a.local); a.normal = ToWorldN(a.localN); return a.world; }
+void AReanchor(inout Anchor a) { a.local = ToLocalP(a.world); a.localN = ToLocalN(a.normal); }
+
+// ---------------------------------------------------------------------
+// Ground under a point: the support's SurfaceMap
+// ---------------------------------------------------------------------
+
+// Probe: the surface near p, seen along -n from up above it down to 'down' below. The nearest point of the
+// mesh (over faces turned toward n), accepted when it's what a ray down would meet: p lies along the surface's
+// normal from it. Past a hard edge the nearest facing point is the edge itself and p is off to its side: no
+// ground here, the step wraps round (Wrap). Ground out of a leg's reach doesn't count either.
+bool Probe(float3 p, float3 n, float up, float down, out float3 foot, out float3 normal)
+{
+    foot = p;
+    normal = n;
+    int map = W.ids.x;
+    if (map < 0) return false;
+
+    float3 q, ns, nf;
+    if (!MapNearest(map, ToLocalP(p), ToLocalN(n), MinProbeFacing, q, ns, nf)) return false;
+    float3 hit = ToWorldP(q), hn = ToWorldN(ns);
+    float3 d = p - hit;
+    float h = dot(d, n);
+    if (h > up || h < -down) return false;
+    float3 off = d - hn * dot(d, hn);
+    float offSq = dot(off, off);
+    if (offSq > 0.01 * FD * FD && offSq > 0.25 * dot(d, d)) return false; // beside the surface, not over it
+    float3 fromHub = hit - Hub;
+    if (dot(fromHub, fromHub) > ReachLimit * ReachLimit) return false;
+
+    normal = hn;
+    foot = hit + hn * FootLift();
+    return true;
+}
+
+// The target is past a convex edge. The edge is the nearest ground facing n; then probe back in from beyond it,
+// as far below the surface as the step overshot: a foot stepping over a cube's edge lands on the side, where
+// walking the same distance takes it.
+bool Wrap(float3 pos, float3 target, float3 n, out float3 foot, out float3 normal)
+{
+    foot = target;
+    normal = n;
+    int map = W.ids.x;
+    if (map < 0) return false;
+    float3 outward = Flatten(target - pos, n);
+    float reach = length(outward);
+    if (reach < 1e-4) return false;
+    outward /= reach;
+
+    float3 q, ns, nf;
+    if (!MapNearest(map, ToLocalP(target), ToLocalN(n), MinProbeFacing, q, ns, nf)) return false;
+    float3 edge = ToWorldP(q), en = ToWorldN(ns);
+    float3 d = target - edge;
+    float over = length(d - en * dot(d, en));
+    float3 beside = edge + en * FootLift() - n * (FootLift() + over);
+    if (Probe(beside, outward, over + FD, FD, foot, normal)) return true;
+    foot = target;
+    normal = n;
+    return false;
+}
+
+void SetPlanted(inout LegState l)
+{
+    l.tip = l.foot.world;
+    l.ground = l.tip - l.foot.normal * FootLift();
+    l.clampN = l.foot.normal;
+}
+
+// Two alternating groups for even counts (a tripod with six), a neighbour-skipping wave for odd ones.
+float GaitOffset(uint i, uint count, LegState l)
+{
+    float o = count % 2 == 0 ? (i & 1) * 0.5 : (i * 2 % count) / (float)count;
+    return o + (l.phase / (PI * 2.0) - 0.5) * 0.06 * Organic;
+}
+
+void StartStep(inout LegState l, float3 pos, float3 n, float3 target, float legCycle)
+{
+    float3 start = AGet(l.foot);
+    l.stepping = 1;
+    l.swingStart = legCycle;
+    l.from = l.foot;
+
+    // Nothing under the target: past an edge. Wrap round it onto the face beyond (a cube's side), else try
+    // closer in, before giving up and stepping into the current plane. (HLSL doesn't short-circuit ||.)
+    float3 hit, tn;
+    bool ok = Probe(target, n, ProbeUp(), ProbeDown(), hit, tn);
+    if (!ok) ok = Wrap(pos, target, n, hit, tn);
+    if (!ok) ok = Probe(lerp(pos, target, 0.55), n, ProbeUp(), ProbeDown(), hit, tn);
+    ASet(l.to, ok ? hit : target - n * dot(target - start, n));
+    ASetNormal(l.to, tn);
+    l.aimWorld = target;
+    l.aimLocal = ToLocalP(target);
+
+    // Short corrective steps stay low; full strides lift fully.
+    float stride = PlanarDist(start, l.to.world, n);
+    l.lift = W.shape0.w * lerp(0.45, 1.0, saturate(stride / (FD * 0.5))) * (1.0 + l.rHeight * 0.15 * Organic);
+
+    // Stepping round an edge: the straight line between the feet cuts through the corner, by up to half the
+    // chord x tan(half the angle) at mid-swing. Lift that much more so the foot clears it.
+    float c = clamp(dot(l.from.normal, l.to.normal), -0.9, 1.0);
+    l.lift += 0.5 * distance(start, l.to.world) * sqrt((1.0 - c) / (1.0 + c));
+}
+
+// ---------------------------------------------------------------------
+// Modes
+// ---------------------------------------------------------------------
+
+void Init(uint base, uint count)
+{
+    float3 pos = W.pos.xyz, up = W.normal.xyz, right = W.right.xyz, fwd = W.fwd.xyz;
+    for (uint i = 0; i < count; i++)
+    {
+        LegState l = (LegState)0;
+        int h = W.ids.y + (int)i * 101;
+        l.angle = PI * 2.0 * i / count;
+        l.phase = Hash01(h + 13) * PI * 2.0;
+        l.rReach = Hash01(h + 3) * 2.0 - 1.0;
+        l.rHeight = Hash01(h + 11) * 2.0 - 1.0;
+        l.delay = 0.05 + Hash01(h + 17) * 0.35;
+
+        float3 radial = right * cos(l.angle) + fwd * sin(l.angle);
+        l.rootDir = l.rootGoal = radial;
+        l.tip = pos + radial * Reach(l);
+        l.bendUp = l.hipUp = up;
+        l.foot.normal = l.from.normal = l.to.normal = up;
+        _LegState[base + i] = l;
+    }
+}
+
+void EnterAir(uint base, uint count)
+{
+    for (uint i = 0; i < count; i++)
+    {
+        LegState l = _LegState[base + i];
+        l.airStart = l.tip - W.pos.xyz; // translation-carried, so the peel-off travels with the owner
+        l.stepping = 0;
+        _LegState[base + i] = l;
+    }
+}
+
+void EnterGround(uint base, uint count, bool fromAir, float cycle)
+{
+    float3 pos = W.pos.xyz, n = W.normal.xyz, right = W.right.xyz, fwd = W.fwd.xyz;
+    Hub = pos;
+    ReachLimit = FD * (1.0 + SpanMargin);
+
+    for (uint i = 0; i < count; i++)
+    {
+        LegState l = _LegState[base + i];
+        float a = Slot(l);
+        float3 radial = right * cos(a) + fwd * sin(a);
+        float3 rest = pos + radial * Reach(l);
+        l.rootGoal = radial;
+        l.home = rest;
+        l.stepping = 0;
+
+        if (fromAir)
+        {
+            // Landing: each foot steps from wherever it is in the air onto its spot, so nothing snaps.
+            ASet(l.foot, l.tip);
+            ASetNormal(l.foot, n);
+            StartStep(l, pos, n, rest, cycle + GaitOffset(i, count, l));
+        }
+        else
+        {
+            float3 foot, hn;
+            if (!Probe(rest, n, ProbeUp(), ProbeDown(), foot, hn)) Wrap(pos, rest, n, foot, hn);
+            ASet(l.foot, foot);
+            ASetNormal(l.foot, hn);
+            SetPlanted(l);
+            l.rootDir = radial;
+        }
+        _LegState[base + i] = l;
+    }
+}
+
+// One leg's gait this frame (UpdateGround's second pass).
+void StepLeg(inout LegState l, uint j, uint count, float cycle, float3 planar, float swingTime, float stanceTime,
+             float maxSpan, float stepDistance, float lift, bool hasSupport)
+{
+    float3 pos = W.pos.xyz, n = W.normal.xyz;
+    float legCycle = cycle + GaitOffset(j, count, l);
+    int window = (int)floor(legCycle);
+
+    if (l.stepping == 0)
+    {
+        float3 p = AGet(l.foot);
+        SetPlanted(l);
+
+        // Swing only in this leg's window, once per cycle, and only if it would actually move. An
+        // overstretched foot goes now, out of turn.
+        float3 span = p - pos;
+        bool overstretched = dot(span, span) > maxSpan * maxSpan;
+        bool windowOpen = window != l.window && legCycle - window < SwingFraction;
+        if (!windowOpen && !overstretched) return;
+        l.window = window;
+
+        float3 target = l.home + planar * (swingTime + stanceTime * 0.5);
+        if (!overstretched && hasSupport && PlanarDist(p, target, n) < stepDistance * 0.5) return;
+        StartStep(l, pos, n, target, legCycle);
+    }
+
+    float t = saturate((legCycle - l.swingStart) / SwingFraction);
+
+    // Keep aiming at where mid-stance will be as the body's motion changes: follow how the goal moves,
+    // along the landing face (a target wrapped round an edge would be dragged back up off its face).
+    float3 goal = l.home + planar * ((1.0 - t) * swingTime + stanceTime * 0.5);
+    float3 aim = ToWorldP(l.aimLocal);
+    float3 end = AGet(l.to) + Flatten(goal - aim, l.to.normal);
+    l.aimWorld = goal;
+    l.aimLocal = ToLocalP(goal);
+    ASet(l.to, end);
+
+    if (t >= 1.0)
+    {
+        l.stepping = 0;
+        // Onto the face it aimed at, else the ground under the body's plane, else round an edge.
+        float3 foot, hn;
+        bool ok = Probe(end, l.to.normal, lift + W.shape0.w, ProbeDown(), foot, hn);
+        if (!ok) ok = Probe(end, n, ProbeUp(), ProbeDown(), foot, hn);
+        if (!ok) ok = Wrap(pos, end, n, foot, hn);
+        ASet(l.foot, ok ? foot : end);
+        ASetNormal(l.foot, hn);
+        SetPlanted(l);
+        Planted |= 1u << j;
+        LastPlant = l.tip;
+        return;
+    }
+
+    // Peel up, reach, set down: travel starts a moment after the lift and the arc peaks early.
+    float tt = saturate((t - 0.1) / 0.9);
+    float e = tt * tt * tt * (tt * (tt * 6.0 - 15.0) + 10.0);
+    float3 basePoint = lerp(AGet(l.from), end, e);
+
+    l.ground = basePoint - l.to.normal * lift;
+    l.clampN = l.to.normal;
+    // Lift along both faces' normals, so round an edge the arc goes out over the corner.
+    float3 both = l.from.normal + l.to.normal;
+    float3 up = dot(both, both) > 1e-4 ? normalize(both) : l.to.normal;
+    l.tip = basePoint + up * (sin(pow(t, 0.7) * PI) * l.lift);
+}
+
+void UpdateGround(uint base, uint count, inout float cycle)
+{
+    float3 pos = W.pos.xyz, n = W.normal.xyz, right = W.right.xyz, fwd = W.fwd.xyz, planar = W.planar.xyz;
+    float dt = W.pos.w, turn = W.normal.w, rate = W.right.w;
+    float swingTime = W.fwd.w, stanceTime = W.planar.w, maxSpan = W.bodyUp.w;
+    float stepDistance = W.shape0.z, lift = FootLift();
+    bool hasSupport = (Flags & F_HAS_SUPPORT) != 0;
+    Hub = pos;
+    ReachLimit = maxSpan; // a foot planted farther would be overstretched at once
+    bool active = length(planar) > HoldSpeed;
+
+    // Rest spots (turning shapes them), and whether anything needs the clock running.
+    for (uint i = 0; i < count; i++)
+    {
+        LegState l = _LegState[base + i];
+        float slot = Slot(l);
+        l.rootGoal = right * cos(slot) + fwd * sin(slot);
+
+        // Turning: outside legs reach, inside legs tuck, quadrants shear.
+        float side = cos(slot), fore = sin(slot);
+        float a = slot - turn * side * fore * TurnAngle;
+        float rScale = 1.0 + (max(0.0, -turn * side) - 0.65 * max(0.0, turn * side)) * TurnRadius;
+        l.home = pos + (right * cos(a) + fwd * sin(a)) * (Reach(l) * rScale);
+
+        if (l.stepping != 0 || !hasSupport || PlanarDist(AGet(l.foot), l.home, n) > stepDistance * 0.5) active = true;
+        _LegState[base + i] = l;
+    }
+
+    if (active) cycle += rate * dt; // idle and settled: the rhythm holds still
+
+    for (uint j = 0; j < count; j++)
+    {
+        // One load and one unconditional store per leg: fxc dropped the stores before each 'continue' of an
+        // inline loop body (legs that finished a step never saved it and froze mid-step).
+        LegState l = _LegState[base + j];
+        StepLeg(l, j, count, cycle, planar, swingTime, stanceTime, maxSpan, stepDistance, lift, hasSupport);
+        _LegState[base + j] = l;
+    }
+}
+
+void UpdateAir(uint base, uint count)
+{
+    float3 pos = W.pos.xyz, airAxis = W.airAxis.xyz, orbitRef = W.orbitRef.xyz, trail = W.trail.xyz;
+    float3 orbitFwd = cross(orbitRef, airAxis);
+    float spread = W.airAxis.w, away = W.orbitRef.w, landing = W.trail.w, maxLen = W.land.w, airTime = W.landUp.w;
+    float airFlow = W.grabRef.w, time = _SimTime, lift = FootLift();
+    bool hasLand = (Flags & F_HAS_LAND) != 0;
+
+    for (uint i = 0; i < count; i++)
+    {
+        LegState l = _LegState[base + i];
+        float reach = Reach(l);
+        float a = Slot(l);
+        float3 radial = orbitRef * cos(a) + orbitFwd * sin(a);
+        l.rootGoal = radial;
+
+        float af = a + sin(time * 1.1 + l.phase) * 0.35 * airFlow;
+        float3 flow = orbitRef * cos(af) + orbitFwd * sin(af);
+        float len = reach * (1.0 + sin(time * 1.7 + l.phase * 1.3) * 0.12 * airFlow);
+        float3 target = pos + SafeNorm(flow * spread - airAxis * away + trail, -airAxis) * len;
+        l.clampN = 0.0;
+
+        // Staggered reach: each leg goes out to its own spot and plants there.
+        if (hasLand)
+        {
+            float r = smoothstep(0.0, 1.0, saturate((landing - l.delay) / 0.35));
+            if (r > 0.0)
+            {
+                // Centred under the body on the landing plane, not on the ray hit.
+                float3 spot = W.land.xyz + Rotate(W.toLand, radial) * reach + W.landUp.xyz * lift;
+                target = lerp(target, pos + ClampLength(spot - pos, maxLen), r);
+                if (r > 0.3)
+                {
+                    l.clampN = W.landUp.xyz;
+                    l.ground = spot - W.landUp.xyz * lift;
+                }
+            }
+        }
+
+        // Takeoff: each foot peels from where it was into the flight pose, staggered.
+        float tb = smoothstep(0.0, 1.0, saturate((airTime - l.delay * 0.4) / TakeoffTime));
+        l.tip = lerp(pos + l.airStart, target, tb);
+        _LegState[base + i] = l;
+    }
+}
+
+// Spinning in the air: the legs stretch out all around and grab at space, then blend back onto wherever the gait
+// has their feet as it settles. Purely an overlay on the tips: the gait keeps running underneath.
+void Wiggle(uint base, uint count)
+{
+    float wiggle = W.grabAxis.w;
+    if (wiggle <= 0.0) return;
+    float3 pos = W.pos.xyz, up = W.bodyUp.xyz, grabAxis = W.grabAxis.xyz, grabRef = W.grabRef.xyz;
+    float time = _SimTime, follow = 1.0 - exp(-14.0 * W.pos.w);
+    bool starting = (Flags & F_WIGGLE_START) != 0;
+
+    for (uint i = 0; i < count; i++)
+    {
+        LegState l = _LegState[base + i];
+        float ph = l.phase;
+
+        // Grab all around: each leg owns a direction on a cap below and around the hub (golden-angle spiral),
+        // held in the world rather than spinning with the body. The cap churns slowly.
+        float y = lerp(1.0, -0.25, (i + 0.5) / count);
+        float az = i * 2.39996 + time * 0.4;
+        float3 dir = grabAxis * y + RotateAxis(grabRef, grabAxis, az) * sqrt(max(0.0, 1.0 - y * y));
+        dir += float3(sin(time * 1.7 + ph), sin(time * 1.3 + ph * 1.9), sin(time * 1.1 + ph * 2.7)) * 0.15;
+
+        // Never into the body.
+        dir = SafeNorm(dir, grabAxis);
+        float over = dot(dir, up) - 0.25;
+        if (over > 0.0) dir = SafeNorm(dir - up * over, grabAxis);
+
+        // Reach out long, snatch back quick.
+        float g = frac(time * 1.4 + ph / (PI * 2.0));
+        float ext = g < 0.7 ? smoothstep(0.0, 1.0, g / 0.7) : 1.0 - smoothstep(0.0, 1.0, (g - 0.7) / 0.3);
+        float len = Reach(l) * lerp(0.75, 1.5, ext);
+
+        if (starting) l.wig = l.tip - pos;
+        l.wig = lerp(l.wig, dir * len, follow);
+        l.tip = lerp(l.tip, pos + l.wig, wiggle);
+        _LegState[base + i] = l;
+    }
+}
+
+// ---------------------------------------------------------------------
+// Legs for the shader
+// ---------------------------------------------------------------------
+
+// How deep the segment a -> b goes into the solid behind both planes (a convex edge between two faces), at its
+// deepest; negative when it stays clear.
+float CornerSink(float3 a, float3 b, float3 pointA, float3 nA, float3 pointB, float3 nB)
+{
+    float a0 = dot(pointA - a, nA), a1 = dot(pointA - b, nA);
+    float b0 = dot(pointB - a, nB), b1 = dot(pointB - b, nB);
+    float best = max(min(a0, b0), min(a1, b1));
+    float den = (a1 - a0) - (b1 - b0);
+    if (abs(den) > 1e-6)
+    {
+        float s = (b0 - a0) / den;
+        if (s > 0.0 && s < 1.0) best = max(best, a0 + (a1 - a0) * s);
+    }
+    return best;
+}
+
+void WriteLegs(uint base, uint count, uint outBase, inout float hubHeight)
+{
+    float3 pos = W.pos.xyz, n = W.normal.xyz;
+    bool air = (Flags & F_AIR) != 0, snapKnees = (Flags & F_SNAP_KNEES) != 0;
+    float dt = W.look.w, kw = KneeFrequency * PI * 2.0;
+    float wobbleAmp = W.look.x, airWave = W.look.y, swell = W.look.z, wobblePhase = W.gait.w;
+    float legRootRadius = W.shape0.y, stepHeight = W.shape0.w, curveHeight = W.shape1.x, uprightFeet = W.shape1.y;
+    float baseRadius = W.shape1.z, tipRadius = W.shape1.w, wiggle = W.grabAxis.w;
+
+    // The body's own ground plane, for clearing corners: the hub's height over it, from the planted feet that
+    // share its surface (an edge's far face says nothing about it).
+    if (!air)
+    {
+        float sum = 0.0, feet = 0.0;
+        for (uint k = 0; k < count; k++)
+        {
+            LegState f = _LegState[base + k];
+            if (f.stepping == 0 && dot(f.clampN, f.clampN) > 0.0 && dot(f.clampN, n) > 0.98)
+            {
+                sum += dot(pos - f.ground, n);
+                feet += 1.0;
+            }
+        }
+        if (feet > 0.0) hubHeight = hubHeight < 0.0 ? sum / feet : lerp(hubHeight, sum / feet, 1.0 - exp(-10.0 * dt));
+    }
+    float3 bodyGround = pos - n * max(hubHeight, 0.0);
+
+    for (uint i = 0; i < count; i++)
+    {
+        LegState l = _LegState[base + i];
+
+        float3 p0 = pos + l.rootDir * legRootRadius;
+        float3 p3 = l.tip;
+        float3 d = p3 - p0;
+        float len = length(d);
+        float3 dir = len > 1e-4 ? d / len : l.rootDir;
+        len = max(len, 1e-4);
+
+        // Bend frame from its (smoothed) semantic up; reuse last side only when degenerate.
+        float3 up = Flatten(l.bendUp, dir);
+        float3 side;
+        if (dot(up, up) > 1e-5) side = normalize(cross(dir, up));
+        else side = SafeNorm(Flatten(l.side, dir), Perp(dir));
+        up = cross(side, dir);
+        l.side = side;
+
+        float3 wob = side * (sin(wobblePhase + l.phase) * wobbleAmp);
+        float arch = curveHeight + (l.stepping != 0 ? stepHeight * 0.2 : 0.0);
+
+        // The upper leg rises off the body's surface, the lower comes down onto the foot's; round an edge the leg
+        // arches out over the corner by exactly as much as the straight root-to-foot line would sink into it.
+        float3 hip = Flatten(l.hipUp, dir);
+        hip = dot(hip, hip) > 1e-5 ? normalize(hip) : up;
+        float corner = 0.0;
+        bool onGround = dot(l.clampN, l.clampN) > 0.0;
+        if (!air && hubHeight >= 0.0 && onGround)
+        {
+            float sink = CornerSink(p0, p3, bodyGround, n, l.ground, l.clampN) + baseRadius;
+            if (sink > 0.0) corner = min(sink * 1.4, len * 0.5); // a Bezier bows ~3/4 of its handles
+        }
+        float3 p1 = p0 + dir * (len * CurveBias) + hip * (arch + corner) + wob;
+
+        // Upper leg trails its pose on a damped spring (relative to the hub, so travel doesn't drag it).
+        float3 kneeGoal = p1 - pos;
+        if (snapKnees) { l.knee = kneeGoal; l.kneeVel = 0.0; }
+        else
+        {
+            // Substepped: a stiff spring integrated in one big frame step would explode.
+            float spanT = min(dt, 1.0 / 15.0);
+            int steps = max(1, (int)ceil(spanT * 120.0));
+            float h = spanT / steps;
+            for (int k2 = 0; k2 < steps; k2++)
+            {
+                l.kneeVel += (kneeGoal - l.knee) * (kw * kw * h) - l.kneeVel * (2.0 * KneeDamping * kw * h);
+                l.knee += l.kneeVel * h;
+            }
+            l.knee = kneeGoal + ClampLength(l.knee - kneeGoal, len * 0.35);
+        }
+        p1 = pos + l.knee;
+
+        // Upright foot: the lower control point sits straight above the foot along the surface normal.
+        float3 p2 = p3 - dir * (len * (1.0 - CurveBias) * 0.55) + up * (arch * 0.55 + corner) - wob * 0.5;
+        float upright = uprightFeet * l.plant;
+        if (upright > 0.0 && dot(l.bendUp, l.bendUp) > 1e-6)
+            p2 = lerp(p2, p3 + normalize(l.bendUp) * (arch * 0.55 + len * 0.25 + corner), upright);
+
+        float thick = clamp(1.0 - (len / FD - 1.0) * StretchThickness, 0.55, 1.45);
+        float wave = max(onGround ? 0.0 : airWave, wiggle * FD * 0.08); // free legs and wiggling legs writhe
+
+        LegData o;
+        o.p0 = float4(p0, baseRadius * thick);
+        o.p1 = float4(p1, tipRadius * thick);
+        o.p2 = float4(p2, wave);
+        o.p3 = float4(p3, l.phase);
+        o.side = float4(side, swell);
+        o.clampN = onGround ? float4(l.clampN, 1.0) : 0.0;
+        o.ground = float4(l.ground, 0.0);
+        o.hub = float4(pos, 0.0);
+        _LegsOut[outBase + i] = o;
+        _LegState[base + i] = l;
+    }
+}
+
+// ---------------------------------------------------------------------
+// Kernels
+// ---------------------------------------------------------------------
+
+[numthreads(64, 1, 1)]
+void Simulate(uint id : SV_DispatchThreadID)
+{
+    if (id >= _WalkerCount) return;
+    W = _Walkers[id];
+    Flags = (uint)W.slots.w;
+    FD = W.shape0.x;
+    Organic = W.gait.x;
+    Planted = 0;
+    LastPlant = W.pos.xyz;
+
+    uint base = (uint)W.slots.x, count = (uint)W.slots.y;
+    float2 ws = _WalkerState[W.ids.z];
+
+    if (Flags & F_INIT)
+    {
+        Init(base, count);
+        ws = float2(0.0, -1.0);
+    }
+
+    // A new support (landed, took off): the anchors' world positions carry over into its space.
+    if (Flags & F_SUPPORT_CHANGED)
+        for (uint i = 0; i < count; i++)
+        {
+            LegState l = _LegState[base + i];
+            AReanchor(l.foot); AReanchor(l.from); AReanchor(l.to);
+            l.aimLocal = ToLocalP(l.aimWorld);
+            _LegState[base + i] = l;
+        }
+
+    if (Flags & F_ENTER_AIR) EnterAir(base, count);
+    if (Flags & F_ENTER_GROUND) EnterGround(base, count, (Flags & F_FROM_AIR) != 0, ws.x);
+
+    // Standing on something that turns: turn the smoothed, world-space parts of the leg shape with it, or they lag
+    // the turn and the legs bend off to one side until the next step.
+    if (Flags & F_CARRY)
+        for (uint c = 0; c < count; c++)
+        {
+            LegState l = _LegState[base + c];
+            l.rootDir = Rotate(W.carry, l.rootDir);
+            l.bendUp = Rotate(W.carry, l.bendUp);
+            l.hipUp = Rotate(W.carry, l.hipUp);
+            l.side = Rotate(W.carry, l.side);
+            l.knee = Rotate(W.carry, l.knee);
+            l.kneeVel = Rotate(W.carry, l.kneeVel);
+            _LegState[base + c] = l;
+        }
+
+    bool air = (Flags & F_AIR) != 0;
+    if (air) UpdateAir(base, count);
+    else UpdateGround(base, count, ws.x);
+    Wiggle(base, count);
+
+    // Ease the frame: roots toward their slots, bends toward the ground (or away from the body in the air).
+    float dt = W.pos.w;
+    float rootK = 1.0 - exp(-14.0 * dt), bendK = 1.0 - exp(-8.0 * dt);
+    float3 bodyUp = W.bodyUp.xyz;
+    for (uint s = 0; s < count; s++)
+    {
+        LegState l = _LegState[base + s];
+        bool onGround = dot(l.clampN, l.clampN) > 0.0;
+        l.rootDir = SafeNorm(Slerp(l.rootDir, l.rootGoal, rootK), l.rootGoal);
+        l.bendUp = Slerp(l.bendUp, onGround ? l.clampN : -bodyUp, bendK);
+        l.hipUp = Slerp(l.hipUp, air ? -bodyUp : W.normal.xyz, bendK);
+        l.plant = lerp(l.plant, onGround ? 1.0 : 0.0, bendK);
+        _LegState[base + s] = l;
+    }
+
+    if (W.slots.z >= 0) WriteLegs(base, count, (uint)W.slots.z, ws.y);
+
+    _WalkerState[W.ids.z] = ws;
+    _Events[id] = uint4(asuint(LastPlant), Planted);
+}
+
+// Growing the state buffers: the old contents copied into the new ones.
+[numthreads(64, 1, 1)]
+void CopyLegs(uint id : SV_DispatchThreadID)
+{
+    if (id < _CopyCount) _LegState[id] = _LegSrc[id];
+}
+
+[numthreads(64, 1, 1)]
+void CopyWalkers(uint id : SV_DispatchThreadID)
+{
+    if (id < _CopyCount) _WalkerState[id] = _WalkerSrc[id];
+}

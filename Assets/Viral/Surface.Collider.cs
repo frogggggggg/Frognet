@@ -11,6 +11,13 @@ using UnityEngine;
 /// within colliderTolerance (BuildPieces). Built once per mesh and shared (the cooked data too); a convex mesh keeps
 /// its hull. Cost: the build is ~O(faces x points) per box, once per mesh; per cell, one convex shape per piece
 /// (at most colliderPieces).
+///
+/// Collider LOD: the pieces are only needed where something walks, lands, or raycasts legs. A cell farther than
+/// detailDistance (past its own size) from every Organism keeps its one hull (one shape for physics instead of
+/// ~48, and spawning it makes no piece objects); the pieces are made the first time a creature comes near and
+/// switched in. A surface something stands on is always detailed (Ground asks, UseDetailedCollider). Checked
+/// round-robin, a fifteenth of the split surfaces a frame against every organism: O(surfaces x organisms / 15)
+/// per frame (give it a grid if AI counts reach the thousands).
 /// </summary>
 public partial class Surface
 {
@@ -24,8 +31,23 @@ public partial class Surface
     [Range(2, 128), Tooltip("Most convex pieces the collider is cut into (physics cost per cell grows with it). Worst dents are "+
                             "split first, so at the cap what is left bridges least.")]
     public int colliderPieces = 48;
+    [Min(0f), Tooltip("Collider LOD: past this (metres, beyond the surface's own radius) from every creature the body uses " +
+                      "its one convex hull instead of the pieces.")]
+    public float detailDistance = 50f;
 
     Collider[] _colliders;
+    MeshCollider _hull;       // the convex hull the pieces replace near creatures
+    Mesh[] _pieceMeshes;      // shared per mesh; their colliders are made on first need
+    Collider[] _pieces;
+    bool _detailed;
+    int _lodIndex = -1;
+
+    static readonly List<Surface> s_split = new List<Surface>();
+    static readonly List<Vector3> s_organisms = new List<Vector3>();
+    static int s_lodFrame = -1, s_lodCursor;
+
+    /// <summary>Whether the body uses its convex pieces (near creatures) rather than its one hull.</summary>
+    public bool DetailedCollider => _pieceMeshes == null || _detailed;
 
     /// <summary>The (solid) colliders this surface's body is made of: its pieces, or the colliders it came with.</summary>
     public Collider[] Colliders => _colliders ??= OwnColliders();
@@ -65,25 +87,87 @@ public partial class Surface
         Mesh[] pieces = Pieces(source.sharedMesh, colliderTolerance, colliderPieces, source.cookingOptions);
         if (pieces == null) return; // convex (within tolerance): the hull is right
 
-        var made = new List<Collider>(pieces.Length);
-        foreach (Collider c in Colliders) if (c != source) made.Add(c);
-        for (int i = 0; i < pieces.Length; i++)
+        _hull = source;
+        _pieceMeshes = pieces;
+        _detailed = false;
+        _lodIndex = s_split.Count;
+        s_split.Add(this);
+    }
+
+    void OnDestroy()
+    {
+        if (!ReferenceEquals(_listedAs, null)) BySpace.Remove(_listedAs); // Surface.Of's cache
+        // After a script reload the static list is empty but instances keep their index (1300 exceptions on exit).
+        if (_lodIndex < 0 || _lodIndex >= s_split.Count || s_split[_lodIndex] != this) { _lodIndex = -1; return; }
+        Surface last = s_split[s_split.Count - 1];
+        s_split[_lodIndex] = last;
+        last._lodIndex = _lodIndex;
+        s_split.RemoveAt(s_split.Count - 1);
+        _lodIndex = -1;
+    }
+
+    /// <summary>Pieces (true) or the one hull (false). Pieces are made the first time they're asked for.</summary>
+    public void UseDetailedCollider(bool on)
+    {
+        if (_pieceMeshes == null || !_hull || on == _detailed) return;
+        if (on && _pieces == null) MakePieces();
+        _detailed = on;
+        foreach (Collider c in _pieces) if (c) c.enabled = on;
+        _hull.enabled = !on;
+    }
+
+    void MakePieces()
+    {
+        var made = new List<Collider>(_pieceMeshes.Length + 1);
+        foreach (Collider c in Colliders) made.Add(c); // the hull stays (switched off near creatures)
+        _pieces = new Collider[_pieceMeshes.Length];
+        for (int i = 0; i < _pieceMeshes.Length; i++)
         {
-            var go = new GameObject("Collider Piece " + i) { layer = source.gameObject.layer };
-            go.transform.SetParent(source.transform, false);
+            var go = new GameObject("Collider Piece " + i) { layer = _hull.gameObject.layer };
+            go.transform.SetParent(_hull.transform, false);
             var mc = go.AddComponent<MeshCollider>();
-            mc.cookingOptions = source.cookingOptions;
+            mc.enabled = false; // switched on by UseDetailedCollider
+            mc.cookingOptions = _hull.cookingOptions;
             mc.convex = true; // before the mesh, so it's cooked once, as a hull
-            mc.sharedMesh = pieces[i];
-            mc.sharedMaterial = source.sharedMaterial;
-            mc.includeLayers = source.includeLayers;
-            mc.excludeLayers = source.excludeLayers;
-            mc.layerOverridePriority = source.layerOverridePriority;
+            mc.sharedMesh = _pieceMeshes[i];
+            mc.sharedMaterial = _hull.sharedMaterial;
+            mc.includeLayers = _hull.includeLayers;
+            mc.excludeLayers = _hull.excludeLayers;
+            mc.layerOverridePriority = _hull.layerOverridePriority;
+            _pieces[i] = mc;
             made.Add(mc);
         }
-        source.enabled = false;
-        Destroy(source);
         _colliders = made.ToArray();
+    }
+
+    // Round-robin collider LOD (once a frame, from the first Surface to update).
+    static void StepColliderLod()
+    {
+        if (s_lodFrame == Time.frameCount) return;
+        s_lodFrame = Time.frameCount;
+        if (s_split.Count == 0) return;
+
+        s_organisms.Clear();
+        foreach (Organism o in Organism.All) if (o) s_organisms.Add(o.transform.position);
+
+        int count = (s_split.Count + 14) / 15;
+        for (int n = 0; n < count; n++)
+        {
+            if (s_lodCursor >= s_split.Count) s_lodCursor = 0;
+            Surface s = s_split[s_lodCursor++];
+            if (!s || !s._hull) continue;
+            // From the mesh, not the collider: a disabled collider's bounds are empty.
+            Transform t = s._hull.transform;
+            Bounds b = s._hull.sharedMesh.bounds;
+            Vector3 scale = t.lossyScale;
+            Vector3 centre = t.TransformPoint(b.center);
+            float reach = b.extents.magnitude * Mathf.Max(Mathf.Abs(scale.x), Mathf.Abs(scale.y), Mathf.Abs(scale.z)) + s.detailDistance;
+            reach *= reach;
+            bool near = false;
+            foreach (Vector3 p in s_organisms)
+                if ((p - centre).sqrMagnitude < reach) { near = true; break; }
+            s.UseDetailedCollider(near);
+        }
     }
 
     // Per (mesh, tolerance): its pieces, or null when the mesh is convex enough for one hull.

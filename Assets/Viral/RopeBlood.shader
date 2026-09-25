@@ -437,7 +437,8 @@ Shader "Custom/RopeBlood"
             #pragma multi_compile_fragment _ _ADDITIONAL_LIGHT_SHADOWS
             #pragma multi_compile_fragment _ _SHADOWS_SOFT
             #pragma multi_compile_fog
-            #pragma shader_feature_local_fragment _SHADING_SMOOTH _SHADING_CEL
+            // multi_compile, not shader_feature: the runtime material copies a cell's look, so a build must keep both
+            #pragma multi_compile_local_fragment _SHADING_SMOOTH _SHADING_CEL
 
             #include "BloodCellForward.hlsl"
 

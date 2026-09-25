@@ -70,6 +70,24 @@ public partial class Surface : MonoBehaviour
 
     public GraphMask Mask => Graph != null ? GraphMask.FromGraph(_graph) : GraphMask.everything;
 
+    /// <summary>Nearest-point map of the mesh (SurfaceMap: legs plant with it), shared per mesh, built on a worker
+    /// thread from Start. Null for an unreadable mesh; check Ready.</summary>
+    public SurfaceMap Map => _map ??= SurfaceMap.For(Mesh);
+    SurfaceMap _map;
+
+    static readonly Dictionary<Transform, Surface> BySpace = new Dictionary<Transform, Surface>();
+    Transform _listedAs;
+
+    /// <summary>The Surface whose Space is 't' (what ISurfaceContact.Surface reports), or null.</summary>
+    public static Surface Of(Transform t)
+    {
+        if (!t) return null;
+        if (BySpace.TryGetValue(t, out Surface s) && s) return s;
+        s = t.GetComponentInParent<Surface>();
+        if (s && s.Space == t) { BySpace[t] = s; s._listedAs = t; }
+        return s;
+    }
+
     // World <-> graph. Directions carry rotation only, like Transform.TransformDirection;
     // normals also undo the scale, so they stay perpendicular on a stretched surface.
     public Vector3 ToGraph(Vector3 world) => Space.InverseTransformPoint(world) * Scale;
@@ -154,7 +172,11 @@ public partial class Surface : MonoBehaviour
 
     // Built after every Awake, so a scene Pathfinder has loaded its own graphs by then. The
     // corners too: built on first use they'd land (as a hitch) on the first touchdown.
-    void Start() => CornerMap();
+    void Start()
+    {
+        CornerMap();
+        _ = Map; // starts the leg map's build
+    }
 
     // ---------------- corner normals and curvature ----------------
 

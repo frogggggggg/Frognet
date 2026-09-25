@@ -1,3 +1,4 @@
+using System.Globalization;
 using UnityEngine;
 
 /// <summary>
@@ -23,7 +24,7 @@ using UnityEngine;
 /// </summary>
 [DefaultExecutionOrder(-50)] // mesh in place before the Surface's Awake bakes it
 [RequireComponent(typeof(Rigidbody), typeof(MeshCollider), typeof(Surface))]
-public class ResourceChunk : MonoBehaviour
+public class ResourceChunk : MonoBehaviour, IWorldState
 {
     public Substance substance = new Substance();
     public ChunkMesh.Shape shape = ChunkMesh.Shape.Lumpy;
@@ -207,14 +208,15 @@ public class ResourceChunk : MonoBehaviour
         _still = Mathf.MoveTowards(_still, occupied ? 1f : 0f, dt / settleTime);
         float moving = 1f - _still * _still * (3f - 2f * _still);
         _push *= Mathf.Exp(-bumpDamping * (1f + 3f * _still) * dt);
-        if (moving <= 0f && _push.sqrMagnitude < 1e-6f)
+        Vector3 flow = Vessel.FlowAt(_home); // it drifts with the blood, stood on or not
+        if (moving <= 0f && _push.sqrMagnitude < 1e-6f && flow.sqrMagnitude < 1e-4f)
         {
             Velocity = Vector3.zero;
             return; // at rest: no transform write, so physics has nothing to resync
         }
 
         _phase += dt * moving;
-        _home += _push * dt;
+        _home += (_push + flow) * dt;
         Vector3 at = _home + Bob(_phase);
         if (dt > 0f) Velocity = (at - T.position) / dt;
         T.SetPositionAndRotation(at, Quaternion.AngleAxis(_spinRate * _phase, _spinAxis) * _baseRotation);
@@ -236,6 +238,23 @@ public class ResourceChunk : MonoBehaviour
         float speed = Mathf.Abs(Vector3.Dot(c.relativeVelocity, n)) * bumpResponse * other.mass / (other.mass + Mass);
         _push = Vector3.ClampMagnitude(_push + n * speed, maxBump);
     }
+
+    // Streaming / saves (WorldStreamer): its full radius and what's left in it.
+    string IWorldState.SaveState() =>
+        radius.ToString("R", CultureInfo.InvariantCulture) + ";" + Remaining.ToString("R", CultureInfo.InvariantCulture);
+
+    void IWorldState.LoadState(string state)
+    {
+        string[] parts = state.Split(';');
+        if (parts.Length > 0 && float.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float r)) Resize(r);
+        if (parts.Length > 1 && float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float left))
+        {
+            Remaining = Mathf.Clamp(left, 0f, Amount);
+            Shrink();
+        }
+    }
+
+    bool IWorldState.Pinned => Extractor; // mid-extraction: stays
 
     static string Title(string s) => string.IsNullOrEmpty(s) ? "Resource" : s.Substring(0, 1).ToUpperInvariant() + s.Substring(1).ToLowerInvariant();
 

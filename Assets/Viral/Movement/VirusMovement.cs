@@ -91,6 +91,8 @@ public class VirusMovement : MonoBehaviour
     public VirusInventory Inventory => _inventory ? _inventory : _inventory = VirusInventory.Of(this);
     public bool IsGrounded => Organism.InState(Organism.grounded);
     public bool IsFocusMode => Organism.InState(Organism.grounded.focus);
+    /// <summary>Escape would close something of ours (focus, the rope menu, the head view): the pause menu waits.</summary>
+    public bool ClaimsEscape => IsFocusMode || MenuOpen || ViewOpen;
 
     // Pass-throughs for existing callers.
     public float speed => Organism.speed;
@@ -138,6 +140,7 @@ public class VirusMovement : MonoBehaviour
 
     void Update()
     {
+        if (PauseMenu.IsOpen) return; // its clicks and keys aren't ours
         if (!_cam && Camera.main) _cam = Camera.main.transform;
         RefreshButton(); // toggles only on mismatch, so an active hold is never reset
         bool focus = IsFocusMode, commanding = CommandMode.Active;

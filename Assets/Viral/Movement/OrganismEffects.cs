@@ -74,11 +74,11 @@ public class Coast : Effect
 {
     [Tooltip("u/s². Lower coasts further.")] public float deceleration = 6f;
 
-    public override void FixedTick(float dt) =>
-        O.Rb.linearVelocity = Vector3.MoveTowards(O.Rb.linearVelocity, Vector3.zero, deceleration * dt);
+    public override void FixedTick(float dt) => // slows to the blood's speed: left alone it drifts with the current
+        O.Rb.linearVelocity = Vector3.MoveTowards(O.Rb.linearVelocity, O.Fluid, deceleration * dt);
 }
 
-/// <summary>Accelerate toward Move * speed, facing the thrust.</summary>
+/// <summary>Accelerate toward Move * speed through the blood (on top of its flow), facing the thrust.</summary>
 [Serializable]
 public class Thrust : Effect
 {
@@ -91,13 +91,13 @@ public class Thrust : Effect
 
     public override void FixedTick(float dt)
     {
-        Vector3 v = O.Rb.linearVelocity, target = O.Move * speed, change = target - v;
+        Vector3 u = O.Fluid, v = O.Rb.linearVelocity - u, target = O.Move * speed, change = target - v;
 
         // Boost only against momentum, so straight-line build-up still reads as acceleration.
         float against = change.sqrMagnitude > 1e-6f && v.sqrMagnitude > 1e-6f ? Mathf.Clamp01(-Vector3.Dot(change.normalized, v.normalized)) : 0f;
         float accel = acceleration * (1f + against * control / Mathf.Max(1f - control, 1e-4f));
 
-        O.Rb.linearVelocity = Vector3.MoveTowards(v, target, accel * dt);
+        O.Rb.linearVelocity = u + Vector3.MoveTowards(v, target, accel * dt);
         O.Face(O.Move); // aim at thrust, not the wandering velocity
     }
 }
@@ -116,7 +116,7 @@ public class Burst : Effect
 
     public override float TopSpeed => speed;
     public override void Enter() { _dir = O.aimForward.normalized; O.Face(_dir); }
-    public override void FixedTick(float dt) => O.Rb.linearVelocity = _dir * (speed * curve.Evaluate(S.TimeInState / duration));
+    public override void FixedTick(float dt) => O.Rb.linearVelocity = O.Fluid + _dir * (speed * curve.Evaluate(S.TimeInState / duration));
 }
 
 /// <summary>An underwater whoosh as the dash starts (CreatureAudio).</summary>
@@ -135,7 +135,7 @@ public class Launch : Effect
     public override void Enter()
     {
         O.Rb.isKinematic = false;
-        O.Rb.linearVelocity = O.up * force;
+        O.Rb.linearVelocity = Vessel.FlowAt(O.transform.position) + O.up * force; // off a cell drifting with the blood
     }
 }
 
@@ -168,14 +168,17 @@ public class Ground : Effect
 
     public override void OnCollision(Collision c)
     {
-        if (!S.enabled || Attached || c.contactCount == 0 || O.Holding(Intent.Seized) || !nav.Accepts(c.gameObject)) return;
+        // S / nav can be null after a play-mode script reload.
+        if (S == null || nav == null || !S.enabled || Attached || c.contactCount == 0 || O.Holding(Intent.Seized) || !nav.Accepts(c.gameObject)) return;
 
         ContactPoint hit = c.GetContact(0);
         HitCollider = c.collider;
         HitPoint = hit.point;
         HitSpeed = c.relativeVelocity.magnitude; // before landing zeroes it
         Surface on = c.gameObject.GetComponentInParent<Surface>();
-        if (!Land(hit.point, hit.normal, on) && O.Brain == null && Time.unscaledTime >= _refusedLogAt)
+        Vector3 point = hit.point, normal = hit.normal;
+        FromOutside(on, O.StepStart, ref point, ref normal);
+        if (!Land(point, normal, on) && O.Brain == null && Time.unscaledTime >= _refusedLogAt)
         {
             // Diagnostic (the player touching ground without landing: the focus prompt waits for it).
             _refusedLogAt = Time.unscaledTime + 1f;
@@ -189,6 +192,32 @@ public class Ground : Effect
 
     float _refusedLogAt;
     bool _outranked;
+
+    // A hard landing sinks the body into the cell before the contact is reported: its point can be deep in the
+    // collider (on a cut face between two of a concave cell's pieces, or past the middle of a thin part like the red
+    // cell's dimple) and its normal can point anywhere. The walk mesh's nearest triangle was then the far face, or
+    // the side test flipped, and the body attached on the inside. So find the touchdown again with a ray from where
+    // the body was before this physics step (outside) toward the contact: it meets the near face from outside.
+    // Keeps the contact if the ray misses (a grazing touch, or already inside). Cost: a ray per collider, on landing only.
+    static void FromOutside(Surface on, Vector3 from, ref Vector3 point, ref Vector3 normal)
+    {
+        Vector3 d = point - from;
+        float length = d.magnitude;
+        if (!on || length < 1e-4f) return;
+
+        Ray ray = new Ray(from, d / length);
+        float best = length * 1.5f + 0.5f; // a little past the contact: it may sit just under the surface
+        bool found = false;
+        foreach (Collider c in on.Colliders)
+            if (c && c.enabled && c.Raycast(ray, out RaycastHit h, best))
+            {
+                best = h.distance;
+                point = h.point;
+                normal = h.normal;
+                found = true;
+            }
+        if (found && Vector3.Dot(normal, -ray.direction) < 0f) normal = -normal; // face the side we came from
+    }
 
     /// <summary>Attach and switch in now (kinematic before the next physics step). False if outranked.</summary>
     public bool Land(Vector3 point, Vector3 up, Surface on)
@@ -218,9 +247,10 @@ public class Ground : Effect
     void SetIgnored(Surface surface, bool ignore)
     {
         if (!surface) return;
+        if (ignore) surface.UseDetailedCollider(true); // the pieces it stands among, never the far hull
         _own ??= O.GetComponentsInChildren<Collider>(true);
         foreach (Collider c in surface.Colliders)
-            if (c)
+            if (c && c.enabled) // IgnoreCollision needs both enabled (the hull is off while detailed)
                 foreach (Collider own in _own)
                     if (own) Physics.IgnoreCollision(own, c, ignore);
     }

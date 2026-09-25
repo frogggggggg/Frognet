@@ -67,7 +67,7 @@ public class AmbientParticles : MonoBehaviour
     Material _material;
     MaterialPropertyBlock _props;
     int _builtCount;
-    Vector3 _lastPos, _velocity;
+    Vector3 _lastPos, _velocity, _flow, _flowOffset;
     Rigidbody _body;
     Transform _bodyOf;
     bool _searched;
@@ -81,7 +81,8 @@ public class AmbientParticles : MonoBehaviour
                         StreakId = Shader.PropertyToID("_StreakTime"), MaxStreakId = Shader.PropertyToID("_MaxStreak"),
                         OpacityId = Shader.PropertyToID("_Opacity"), PlasmaFractionId = Shader.PropertyToID("_PlasmaFraction"),
                         SpeckColorId = Shader.PropertyToID("_SpeckColor"), PlasmaColorId = Shader.PropertyToID("_PlasmaColor"),
-                        CamVelId = Shader.PropertyToID("_CamVel");
+                        CamVelId = Shader.PropertyToID("_CamVel"), FlowOffsetId = Shader.PropertyToID("_FlowOffset"),
+                        FlowVelId = Shader.PropertyToID("_FlowVel");
 
     void Reset()
     {
@@ -135,9 +136,15 @@ public class AmbientParticles : MonoBehaviour
         _lastPos = srcPos;
         _seeded = true;
 
-        // Only while flying fast; nothing is drawn at all otherwise.
+        // The specks ride the blood (Vessel): carried by its flow round the camera, wrapped in the box.
+        _flow = Vessel.FlowAt(pos);
+        _flowOffset += _flow * dt;
+        _flowOffset = new Vector3(Mathf.Repeat(_flowOffset.x, boxSize), Mathf.Repeat(_flowOffset.y, boxSize), Mathf.Repeat(_flowOffset.z, boxSize));
+
+        // Only while moving fast through the blood (not with it); nothing is drawn at all otherwise.
+        float through = (_velocity - _flow).magnitude;
         float lo = Mathf.Min(visibleSpeed.x, visibleSpeed.y), hi = Mathf.Max(visibleSpeed.x, visibleSpeed.y);
-        float goal = hi > lo ? Mathf.Clamp01((_velocity.magnitude - lo) / (hi - lo)) : _velocity.magnitude >= lo ? 1f : 0f;
+        float goal = hi > lo ? Mathf.Clamp01((through - lo) / (hi - lo)) : through >= lo ? 1f : 0f;
         goal = goal * goal * (3f - 2f * goal);
         _visible = Mathf.MoveTowards(_visible, goal, dt / (goal > _visible ? fadeIn : fadeOut));
         if (_visible <= 0.001f) return;
@@ -157,6 +164,8 @@ public class AmbientParticles : MonoBehaviour
         _props.SetColor(SpeckColorId, speckColor);
         _props.SetColor(PlasmaColorId, plasmaColor);
         _props.SetVector(CamVelId, _velocity);
+        _props.SetVector(FlowOffsetId, _flowOffset);
+        _props.SetVector(FlowVelId, _flow);
 
         var rp = new RenderParams(_material)
         {

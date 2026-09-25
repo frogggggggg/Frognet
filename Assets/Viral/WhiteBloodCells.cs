@@ -108,15 +108,9 @@ public class WhiteBloodCells : MonoBehaviour
     {
         if (FindAnyObjectByType<WhiteBloodCells>(FindObjectsInactive.Include)) return;
         if (!FindAnyObjectByType<Surface>()) return; // no cells, nothing to patrol
-#if UNITY_EDITOR
-        var prefab = UnityEditor.AssetDatabase.LoadAssetAtPath<WhiteBloodCells>("Assets/Viral/Prefabs/WhiteBloodCells.prefab");
-        if (prefab)
-        {
-            Instantiate(prefab).name = "White Blood Cells";
-            Debug.Log("WhiteBloodCells: none in the scene, so the prefab's was added for this session (editor only). " +
-                      "Drag Assets/Viral/Prefabs/WhiteBloodCells.prefab into the scene to keep it in builds.");
-        }
-#endif
+        ViralBuildAssets assets = ViralBuildAssets.Instance;
+        if (!assets || !ViralBuildAssets.Spawn<WhiteBloodCells>(assets.whiteBloodCells, "White Blood Cells"))
+            Debug.LogWarning("WhiteBloodCells: no prefab in Resources/ViralBuildAssets, so there are no white cells.");
     }
 
     public static void Register(WhiteBloodCell c)
@@ -135,7 +129,14 @@ public class WhiteBloodCells : MonoBehaviour
         yield return null; // after every Start, so SpawnManager has placed the cells
         foreach (VirusMovement v in FindObjectsByType<VirusMovement>(FindObjectsSortMode.None))
             if (v.TryGetComponent(out Organism o)) _spawns[o] = o.transform.position;
-        Spawn();
+        if (!WorldStreamer.Active) Spawn(); // a streamed world places its own
+    }
+
+    /// <summary>A white cell made by something else (WorldStreamer): its hidden renderer gets the material, whose
+    /// ripple settings Surface and RippleField read.</summary>
+    public static void Prepare(WhiteBloodCell c)
+    {
+        if (c && s_instance && c.TryGetComponent(out MeshRenderer mr)) mr.sharedMaterial = s_instance.Material();
     }
 
     void OnDestroy()
@@ -201,8 +202,13 @@ public class WhiteBloodCells : MonoBehaviour
             {
                 Vector3 pos = c.transform.position;
                 int every = Mathf.Clamp(1 + (int)((pos - cam).magnitude / tickDistance), 1, 4);
-                if (!SimulationTicker.OnScreen(pos, c.Radius * 2f)) every *= 2;
-                if ((frame + i) % every != 0) continue;
+                bool seen = SimulationTicker.OnScreen(pos, c.Radius * 2f);
+                if (!seen) every *= 2;
+                if ((frame + i) % every != 0)
+                {
+                    if (seen) c.Carry(now); // moves every frame on screen; only thinking is LOD'd
+                    continue;
+                }
             }
             float dt = Mathf.Min(now - c.LastTick, 0.25f);
             c.LastTick = now;
@@ -350,9 +356,7 @@ public class WhiteBloodCells : MonoBehaviour
 
     ComputeShader BakeShader()
     {
-#if UNITY_EDITOR
-        if (!bake) bake = UnityEditor.AssetDatabase.LoadAssetAtPath<ComputeShader>("Assets/Viral/WhiteBloodCellBake.compute");
-#endif
+        if (!bake && ViralBuildAssets.Instance) bake = ViralBuildAssets.Instance.whiteBloodCellBake;
         return bake;
     }
 
@@ -446,6 +450,21 @@ public class WhiteBloodCells : MonoBehaviour
     }
 
     public static bool Gripped(Organism o) => o && s_gripped.ContainsKey(o);
+    /// <summary>Being swallowed (or swallowed, waiting to respawn).</summary>
+    public static bool Captured(Organism o) => o && s_captives.ContainsKey(o);
+
+    /// <summary>Lets go of 'o' at once, however far it's been swallowed, and puts it back in play at 'at' (loading a
+    /// save). Call before its captor is destroyed: a captor switched off mid-swallow finishes the job.</summary>
+    public static void Free(Organism o, Vector3 at)
+    {
+        if (!o) return;
+        if (s_gripped.ContainsKey(o)) Release(o);
+        if (!s_captives.TryGetValue(o, out Captive c)) return;
+        s_captives.Remove(o); // a pending respawn sees it's gone and does nothing
+        Unpivot(c);
+        Unpin(c);
+        PutBack(c, at);
+    }
     readonly Dictionary<Organism, Vector3> _spawns = new Dictionary<Organism, Vector3>();
 
     /// <summary>Takes 'o' out of play to be swallowed by 'by'. False if it's already being swallowed.</summary>
@@ -453,7 +472,8 @@ public class WhiteBloodCells : MonoBehaviour
     {
         if (!o || s_captives.ContainsKey(o)) return false;
         Release(o);
-        var c = new Captive { organism = o, body = o.Rb, scale = o.transform.localScale, player = o.GetComponent<VirusMovement>() };
+        var c = new Captive { organism = o, body = o.Rb, scale = o.transform.localScale, player = o.GetComponent<VirusMovement>(),
+                              parent = o.transform.parent };
 
         if (o.OnSurface) o.grounded.surface.Detach(Vector3.zero); // else it'd pop back onto its cell on respawn
         ImmuneSystem.EatStuck(o); // antibodies on it go down with it
@@ -558,11 +578,18 @@ public class WhiteBloodCells : MonoBehaviour
     IEnumerator Respawn(Captive c)
     {
         yield return new WaitForSeconds(respawnDelay);
+        if (!c.organism || !s_captives.TryGetValue(c.organism, out Captive now) || now != c) yield break; // freed meanwhile (a save loaded)
         s_captives.Remove(c.organism);
         Unpin(c);
         Organism o = c.organism;
-        if (!o) yield break;
-        Vector3 at = _spawns.TryGetValue(o, out Vector3 p) ? p : transform.position;
+        PutBack(c, _spawns.TryGetValue(o, out Vector3 p) ? p : transform.position);
+    }
+
+    // Back in play at 'at', as it was before it was caught.
+    static void PutBack(Captive c, Vector3 at)
+    {
+        Organism o = c.organism;
+        if (!o) return;
         o.transform.SetParent(c.parent, true);
         o.transform.position = at;
         o.transform.localScale = c.scale;

@@ -32,6 +32,7 @@ Shader "Hidden/AmbientParticles"
             float  _Drift, _Wobble, _StreakTime, _MaxStreak, _Opacity, _PlasmaFraction;
             float4 _SpeckColor, _PlasmaColor;
             float3 _CamVel;
+            float3 _FlowOffset, _FlowVel; // the blood carrying them (Vessel): integrated offset (wrapped), velocity
 
             struct Attributes
             {
@@ -58,7 +59,7 @@ Shader "Hidden/AmbientParticles"
                 // Home + slow drift + a lazy wobble, then wrapped into the box around the camera.
                 float3 driftDir = v.seed.zxy - 0.5;
                 float3 wob = sin(t * (0.25 + v.rnd.y * 0.5) + v.seed * 6.2831853) * _Wobble;
-                float3 home = v.seed * _Box + driftDir * (_Drift * t) + wob;
+                float3 home = v.seed * _Box + driftDir * (_Drift * t) + wob + _FlowOffset;
 
                 float3 cam = _WorldSpaceCameraPos;
                 float3 rel = frac((home - cam) / _Box + 0.5) - 0.5; // -0.5..0.5 of the box
@@ -72,7 +73,7 @@ Shader "Hidden/AmbientParticles"
                 float size = lerp(_SizeMin, _SizeMax, size01);
 
                 // Smear toward where it was a moment ago, relative to the camera.
-                float3 relVel = driftDir * _Drift - _CamVel;
+                float3 relVel = driftDir * _Drift + _FlowVel - _CamVel;
                 float3 smear = -relVel * _StreakTime;
                 float smearLen = length(smear);
                 if (smearLen > _MaxStreak) smear *= _MaxStreak / smearLen;

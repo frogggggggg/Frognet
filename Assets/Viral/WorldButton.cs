@@ -287,7 +287,9 @@ public class WorldButton : MonoBehaviour
         _made.Clear();
 
         Font font = TerminalUI.Font(TerminalUI.DefaultFonts);
-        _canvas = TerminalUI.Canvas("World Button Canvas", transform, 570);
+        // A root object: under this (moving) transform the overlay canvas was dragged along until Unity re-pinned it
+        // at canvas rebuild, after LateUpdate, so the screen -> canvas mapping below lagged by the player's motion.
+        _canvas = TerminalUI.Canvas("World Button Canvas", null, 570);
         Destroy(_canvas.GetComponent<GraphicRaycaster>()); // read only
         _canvasRect = (RectTransform)_canvas.transform;
         _root = TerminalUI.Rect("Prompt", _canvasRect, Vector2.zero, Vector2.one * size);

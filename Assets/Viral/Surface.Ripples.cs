@@ -69,6 +69,7 @@ public partial class Surface
     // Drop ripples as they fade, so the shader stops looping over them.
     void Update()
     {
+        StepColliderLod(); // Surface.Collider.cs; once a frame
         if (_rippleCount > 0 && Time.time >= _nextExpiry)
         {
             EnsureRipples();

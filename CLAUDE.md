@@ -151,33 +151,74 @@ goal per reflood (V = mesh vertices), O(1) per crawler query; topology built onc
 Gridless potential-flow field (sink + doublets), trap-free. `GetField/GetDirection(pos, target,
 ignoreA, ignoreB)`. Creatures are obstacles by default (`ignoreOrganisms = false`, the user
 wants this). `oneSpherePerCreature` merges each creature's colliders into one sphere; body
-poses are read once per Rigidbody per step, with offsets/radii baked at `Rescan()`.
+poses are read once per Rigidbody per step, with offsets/radii baked at `Rescan()`. **Lazy:** `Rescan()` only flags
+a change; the scene scan / per-step refresh run on the first query after it (at most once per physics step), so with
+no flying agents it costs nothing (the streamer's rescans were 60-90 ms hitches).
 **Known weakness:** its lookup grid is sized to the largest obstacle (a cell, ~70m), so
 creature-sized spheres share a few huge buckets and each query walks most of them. A two-tier
 grid (small buckets for creatures) is the next fix if the AI pass is hot.
 
-### Legs: SpiderLegWalker + LegRenderer + BloodCellLegs
-- `SpiderLegWalker` simulates the gait (phase-locked: two alternating groups, feet aimed where
-  they'll sit at mid-stance so they never trail; catch-up steps; upright feet; air grab pose
-  when spinning fast). Feet and their **normals** are stored relative to the cell they stand on.
-- It no longer builds meshes. Each frame it writes 6 small records to `LegRenderer`, which
-  draws every walker's legs as instances of one tube mesh — one draw per (material, tube
-  resolution, shadows) group — and copies the leg material onto `Custom/BloodCellLegs`.
-- Off screen (by more than `offscreenMargin`) or past `cullDistance` the walker skips everything
-  and re-plants when seen again. The shared view is sampled before the camera's LateUpdate, so it
-  trails a frame: visibility checks are padded (else edge legs blinked and re-planted on camera moves).
+### Legs: SpiderLegWalker + LegRenderer + LegSimulation.compute + BloodCellLegs
+**The legs run on the GPU.** Nothing per leg happens on the CPU.
+- `SpiderLegWalker` keeps only what's per walker: the ring's heading / phase / mirror, velocity relative to the
+  support, turn, cadence (`_rate`, swing / stance time, max span), the flight pose (air axis, orbit, trail, spin),
+  the landing spot (one raycast a frame in the air; walkers without an ISurfaceContact also raycast for ground), the
+  spin-wiggle amount, the support's turn since last frame (carry), and mode changes as flags (init, enter ground /
+  from air, enter air, support changed, snap knees). Each frame it fills one `LegRenderer.Walker` record (27 float4s:
+  those + the support's local<->world matrices + its SurfaceMap index) and `Submit`s it.
+- `LegRenderer` owns the GPU state: per walker a slot (`Allocate` / `Free` on disable; a walker slot for its gait
+  cycle + hub height, a block of `legCount` leg states, 364 B each), grown by copy kernels. `LateUpdate` sorts the
+  frame's records by draw group (material, tube resolution, shadows; undrawn = simulate only), dispatches
+  `LegSimulation.compute` `Simulate` (one thread per walker), then one `DrawMeshInstancedProcedural` per group
+  (`_LegBase` = the group's first leg in the shared `_Legs` output). Footsteps: the kernel writes per walker which
+  legs planted and where; read back with `AsyncGPUReadback` (polled, a frame or two late) -> `SpiderLegWalker.Planted`
+  -> `CreatureAudio.Step`. `LegRenderer.Generation` changes on a script reload so walkers re-allocate.
+- `LegSimulation.compute` is the old per-leg C# moved over line for line (gait: phase-locked, two alternating groups,
+  feet aimed where they'll sit at mid-stance, catch-up steps; swing arcs; air pose; takeoff / landing reach; spin
+  wiggle; rootDir / bendUp / hipUp easing; hub height; knee springs; CornerSink; the LegData records). Anchors (feet,
+  step ends, aim) are stored in the walker's **support's** local space (all ride the one surface it stands on;
+  identity in the air); on a support change they're re-anchored from their last world position.
+- **Feet are placed with the support's `SurfaceMap`**, never raycasts: `Probe` = nearest point of the mesh over faces
+  turned within 60° of the probe direction (`MinProbeFacing`), accepted when the point is what a ray would meet (the
+  offset lies along the surface normal there), within the probe's height range and the leg's reach. Past a hard edge
+  the nearest facing point is the edge itself and the offset points sideways: `Wrap` then probes back in from beyond
+  the edge, as far down as the step overshot (a foot stepping off a cube's top lands on its side). No map (unreadable
+  mesh, map still building, no ISurfaceContact) = feet step in the body's plane. Feet no longer plant on neighbouring
+  bodies (only the surface the walker stands on).
+- Off screen (by more than `offscreenMargin`) or past `cullDistance` the walker submits nothing and re-plants when
+  seen again. The shared view is sampled before the camera's LateUpdate, so it trails a frame: visibility checks are
+  padded. Bounds are conservative (MaxSpan leg reach), not from the tips.
 - Past `lodDistance` legs submit a lighter tube (about half the rings, fewer sides): its own group.
 - Swing: travel starts 10% after the lift and the arc peaks early (peel up, reach, set down).
 - Edges: the upper leg arches off the body's surface (`hipUp`), the lower comes down onto the foot's
   (`bendUp`), both lifted by exactly how deep the straight root-to-foot line sinks into the corner
-  (`CornerSink`: body plane from `_hubHeight`, learned from feet on the body's face; foot plane), else
+  (`CornerSink`: body plane from the hub height, learned from feet on the body's face; foot plane), else
   not at all. A guessed tan(half angle) lift arched every edge leg long and read as stretching. A foot steps out of turn past rest reach + the planned lead at this
   speed + `SpanMargin` (capped at `MaxSpan`), not a flat 2x leg length.
-- `Probe` ignores hits more than 60° off its direction (`MinProbeFacing`): a probe aimed past a cube's
-  edge skimmed the side face and planted feet on bumps far down it.
+- HLSL has no short-circuit `||`: the probe fallbacks are explicit `if (!ok)` chains.
+- **fxc dropped RWStructuredBuffer stores placed right before a `continue`** in the leg loop (found by disassembling:
+  legs that finished a step never saved it and froze mid-step at the landing point). Each leg's work is a function
+  (`StepLeg`) with early `return`s and one unconditional store after the call; keep loops over UAV state that way.
+  `SpiderLegWalker.debugLog` logs what a walker sends and what the GPU holds for its first leg (async readback).
 - Shader: foot and root caps pushed out into rounded nubs, tip tapered; the noise sample is
   reused by DepthNormals; inside the focus sweep legs go plain (`LegSweepCover`, reads the global
-  `_InvertSweep`). LegRenderer copies the leg material every frame only in the editor.
+  `_InvertSweep`). LegRenderer copies the leg material every frame only in the editor. `LegData.hlsl` is the record
+  shared by the compute and the shader.
+- Cost: CPU O(walkers in view), a record each; GPU one thread per walker, SurfaceMap lookups (~15-50 triangles each)
+  only on the frames a foot lifts or plants.
+
+### SurfaceMap (`SurfaceMap.cs`, `SurfaceMap.hlsl`)
+Nearest point on a mesh from anywhere around it, O(1), in mesh space (shared by every copy at any pose / scale).
+A grid over the padded bounds (40 cells on the longest side for ~1300 triangles, scaled by cbrt(triangles)); each
+cell within `Band` (3) cells of the surface lists every triangle within (nearest from its centre + the cell's
+diagonal), so it's exact there (~13% of the longest side, all a leg probe needs); farther cells borrow the nearest
+banded cell's list (a nearby point, not exact). Queries return the point, the mesh's own normals interpolated (hard
+edges stay hard) and the face normal, with an optional facing filter. Built on a worker thread from `Surface.Start`
+(`Surface.Map`; `Ready` when done; ~150 ms and ~1.7 MB for 1500 triangles). `GpuIndex` registers it into the shared
+GPU arrays (`SurfaceMap.Pack`, uploaded by LegRenderer when `Version` changes). Tested offline against brute force
+(cube, sphere, Evans-Fung red cell profile). Tried and dropped: a tighter corner bound (cut lists only ~10% at 4x
+the build); finer grids with a narrower band (lost exactness at probe distances). `Surface.Of(transform)` finds
+the Surface for an ISurfaceContact's `Surface` (its Space).
 
 ### Cell shader family
 `BloodCellCore.hlsl` (properties, noise, ripple, bump, depth fragments) and
@@ -185,6 +226,11 @@ grid (small buckets for creatures) is the next fix if the AI pass is hot.
 so cells and legs share exactly one code path. `BloodCellTriplanar` keeps tessellation;
 `BloodCellLegs` builds its geometry in the vertex stage from the leg buffer.
 Legs use `_TessMax = 1` (tessellation is for planets, not thin legs).
+**Style: stylized, cel shaded; the user doesn't want lighting or shadows.** Real-time shadows are off in every URP
+tier (Laptop / PC / Mobile RP assets): profiled on the laptop iGPU they were ~15 ms of a ~24 ms frame, nearly all the
+cells' tessellated ShadowCaster. In case they come back: `EdgeFactor` caps tessellation at 4 in orthographic views
+(a directional light's cascades), whose "camera" sat a few metres from everything and tessellated every patch round
+the player to `_TessMax`.
 
 ### Ripples
 `Surface.AddImpact` (Surface.Ripples.cs; was CellImpactRipples; per surface, 64 slots, fades dropped, weakest replaced, near-simultaneous
@@ -272,17 +318,22 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
   the MeshFilter to a shared copy with a crack-free displacement direction in UV3 (angle-
   weighted average of all faces at a position); `BloodCellTriplanar` displaces along it.
   **Concave collider** (`Surface.Collider.cs`): a dynamic body only takes convex MeshColliders, and the red blood
-  cell's hull lidded both dimples (legs raycast colliders, so they stood on the lid above the body, and the body
-  sank into it and shoved its own cell = the jitter). On Awake a convex MeshCollider over a concave mesh is replaced
+  cell's hull lidded both dimples (legs used to raycast colliders, so they stood on the lid above the body, and the
+  body sank into it and shoved its own cell = the jitter; legs now use SurfaceMap and don't need the pieces, but
+  landing contacts, rope anchors / wraps, the camera and white cells still query the colliders). On Awake a convex MeshCollider over a concave mesh is replaced
   by child convex pieces: the solid cut into boxes, the worst box halved (longest side) until each piece's hull sits
   within `colliderTolerance` (x mesh size) of the surface, measured along the surface normal via the support
   function (an incremental hull broke on the cut faces' coplanar points; "every point behind every face plane"
   over-measured ~4x), capped at `colliderPieces` (48). Built once per mesh (~0.1 s), shared + pre-baked; logs the
-  count. The cell mesh (bloodcell.blend "Icosphere", 1280 tris): 48 pieces, lid 15.8% -> 1.6% of its size
+  count. **Collider LOD:** the convex hull is kept; past `detailDistance` (50 m beyond its size) from every Organism a
+  cell uses only the hull (1 physics shape instead of 48, and spawning makes no piece objects); pieces are made the
+  first time a creature comes near and switched in (round-robin, 1/15 of split surfaces a frame vs `Organism.All`).
+  Ground forces detail on the surface it lands on (`UseDetailedCollider`) and only ignores *enabled* colliders.
+  The cell mesh (bloodcell.blend "Icosphere", 1280 tris): 48 pieces, lid 15.8% -> 1.6% of its size
   (checked in Blender against the real mesh). `Surface.Colliders` = its solid colliders; `ClosestPoint` over them
   (VirusAI uses it). Anything iterating a cell's colliders must treat pieces as one body: PathManager merges them
   into one sphere, WhiteBloodCell takes one push per body and one pick per Surface; query buffers were raised
-  (legs 16 hits, rope 256 overlaps / 16 hits, WBC 256). **Ground ignores collisions with the surface it's attached
+  (rope 256 overlaps / 16 hits, WBC 256). **Ground ignores collisions with the surface it's attached
   to** (`Physics.IgnoreCollision`, restored on leaving): the body follows the walk mesh, never the collider.
 - `NavSurface.cs`: attachment to a Surface's graph (graph space). Works on any shape:
   lifts along per-corner arcs by directional curvature (round on spheres, straight along
@@ -306,6 +357,10 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
   command-mode "Cell", not a spawn anchor). Resource chunks use it.
 - `AmbientParticles.cs`: GPU speck field around the camera, wrapped into a box, smeared by the
   **player's** velocity, only visible above a speed.
+- `SkyboxCache.cs`: the cell sky (`StylizedCellSky.hlsl`, 30 noise layers per pixel) drawn from crossfaded cubemaps
+  baked a strip at a time. Face size fits the camera's *rendered* height (render scale included; `faceSize` 0 = auto,
+  ~1280 at a laptop's 810p) and bakes every `refreshSeconds` (2): a bake is 6 x face² sky pixels, and the old fixed
+  2048 / 1 s baked about as many per second as drawing the sky live (and was a multi-second hitch at start).
 - `InjectionDrill.cs` (on the Virus): procedural fluted drill that screws from under the virus to
   the centre of the surface it stands on when focus starts (VirusMovement focus events, added by
   code), spins, ripples the cell at entry, winds back in on exit. Replaces VirusAccess's UI bar.
@@ -462,7 +517,10 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
   than a crawling virus they used to hover above it and only stick when it stopped) -> Stuck.
   **Holding on** (`AntibodyHold`, one per creature with antibodies on it): slots in latitude rings round the
   creature's *shown* body (`Organism.Shown`: the turned, leaned, lifted visual, so they ride its animation),
-  top down to 55° off its underside (the ground side), rings an antibody's width apart, slots round a ring an
+  top down to 55° off its underside (the ground side), each hinge just off the farthest *drawn* surface under the
+  antibody (`BodyHull`: per-direction star hull of the meshes under `Organism.Shown`, a 6x12x12 cube map of
+  farthest distances built once per creature from its triangles; needs Read/Write, else the collider sphere it
+  replaced; also the stick distance), rings an antibody's width apart, slots round a ring an
   arm span apart, alternate rings staggered, each lying arms-along-its-ring: no overlaps with each other or the
   body; full -> a second / third shell over the first (else it gives up on that virus). A stuck antibody takes
   the free slot nearest where it touched (so they spread round from the approach side) and climbs there
@@ -729,6 +787,135 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
   same `ShrinkWrapUV` the reader uses, so orientation can't mismatch; triangles reaching 53° past a hemisphere's
   edge are dropped there (the other has them). `Begin` / `Capture` / `Submit` each frame; unused slots are freed.
   Cost: 2 draws per renderer per captured object per frame. Used by WhiteBloodCells (grip / swallow).
+- **World streaming + saves** (`Assets/Viral/World`; prefab `Prefabs/WorldStreamer`, bootstrapped from
+  `ViralBuildAssets.worldStreamer` into any scene with a VirusMovement; clear that field to go back to the scene's
+  own spawners). `WorldStreamer`: cube sectors (`sectorSize`) load within `loadDistance` of the player, unload past
+  `unloadDistance`. A sector's contents are generated **once**, the first time it loads, from (seed, sector) by
+  `layers` in order (cells as anchors, chunks hovering off them via `nearAnchors`, white cells, AI viruses at 0 per
+  sector for now); region density = smooth value noise over sectors (`regionSectors`, `voidBelow`: patches and
+  voids; the start sector is at least `homeDensity`). Objects may straddle sector borders; placement checks the
+  sector's own placements, the 26 neighbours' unspawned records and one `Physics.CheckSphere`. Every streamed object
+  gets a `WorldEntity` (catalog key = prefab name, seed). **Objects belong to the sector they're in**, not where
+  they spawned: a sweep (`sweepPerFrame`) stashes anything standing in an unloaded sector into that sector's record
+  (pose, scale, velocity, mass, `IWorldState` strings) and destroys it; loading spawns records back, seeding
+  `UnityEngine.Random` with the entity seed first so Awake-randomized looks (chunk tint / bob) match. Destroyed by
+  the game = gone for good (no regeneration). `IWorldState` (`SaveState` / `LoadState` / `Pinned`): ResourceChunk
+  keeps radius + remaining and is pinned while extracted; WhiteBloodCell is pinned while gripping / engulfing /
+  digesting; anything reparented off `WorldStreamer.Root` (swallowed) is pinned. Spawning is time-budgeted
+  (`spawnBudgetMs`, nearest sector first; generating newly loaded sectors shares that budget, since generating every
+  sector that came into range at once was a 60-90 ms hitch; markers `WorldStreamer.Scan/Sweep/Generate/Spawn`); `Prime()` loads everything in range at once (start, after a load).
+  **Stream fade** (`World/StreamFade.hlsl`): streamed things dissolve (screen-door
+  dither, clipped in every pass so depth / outlines match) by their *centre's* distance from the player over `fadeLength`,
+  gone `fadeMargin` inside `loadDistance`: anything not loaded has its centre past that, so nothing pops in or out in
+  view (exp² fog alone left big cells 8-25% visible at the edge). Globals `_StreamFade` / `_StreamFadeEnd` from
+  `WorldStreamer.PublishFade` (off without a streamer). Instanced shaders (chunks, white cells, antibodies) fade by
+  instance position and cull fully faded instances in the vertex stage; cells (`STREAM_FADE_OBJECTS` in BloodCellTriplanar)
+  by `UNITY_MATRIX_M`'s origin, only renderers with rendering layer bit `WorldEntity.StreamedLayer` (1<<30, set in
+  `Bind`), so hand-placed scenery never fades. A new streamed shader: include it and call `StreamFadeClip` in every pass.
+  **Far field** (`World/FarField.cs` + `.compute` + `Custom/FarField`, on the WorldStreamer prefab, added by code if
+  missing): the user wanted to *see* the world past the loaded bubble (the wall showed 10 km of empty tube). Sectors
+  within `FarField.distance` (1600 m) that aren't loaded are generated too (`FarScan` every `scanInterval` / sector
+  crossed, `GenerateFar` nearest first within `generateBudgetMs`) and drawn from their records, nothing spawned:
+  stand-in meshes per prefab (its meshes shrink-wrapped onto an icosphere from its origin, 320 / 80 tris; chunks a
+  lumpy ball), cel shaded in the prefab's colours (`_Color` / `_DeepColor`, substance, WBC lilac; `looks` overrides),
+  scene-fogged. Records drift on the GPU (the kernel turns each by band rate x time since posed, as `Advance`), culled
+  (frustum, `minPixels`, far edge), LOD by pixels, appended per (look, LOD), one `DrawMeshInstancedIndirect` each.
+  Far records sit in 32-slot pages owned per sector; a sector change (generated, swept into, loaded, unloaded, dropped)
+  rewrites only its pages (`Changed(key, fresh)`). **Crossover:** a real object dissolves by StreamFade; its stand-in
+  draws exactly the pixels it drops (`StreamFadeClipComplement`), so live objects in the fade band and loaded records
+  not spawned yet get stand-ins too (the per-frame dynamic list). Newly generated sectors fade in (`bornFade`).
+  **Pristine sectors** (`SectorRecord.touched` false: generated for the far field, never loaded or stored into) are
+  dropped when they leave the range and left out of saves: they regenerate from the seed (not necessarily identically,
+  unseen up close), so memory / saves stay bounded by where you've *been*, not what you've seen. An object swept into a
+  never-generated sector generates it on the spot; generation now also keeps clear of records already in the sector.
+  Vessel `fogDensity` 0.0045 -> 0.0012 (gone by ~1.9 / density = the far distance; keep them matched). Off in focus
+  mode and for orthographic cameras. Cost: CPU O(changed sectors' records) + O(live) per frame; GPU a thread per slot
+  (~40k at 1600 m) + visible stand-ins' vertices; far scan ~10k cell tests (vessel) per scan.
+  PathManager.Rescan at most every `rescanInterval` after changes. SpawnManager, ResourceField and WhiteBloodCells
+  skip their own spawning while `WorldStreamer.Active`; the streamer makes sure ResourceField, WhiteBloodCells and
+  ImmuneSystem exist. `SaveGame` (static): 3 JSON slots in `persistentDataPath/Saves` (player pose / velocity,
+  `VirusInventory.Restore` stores + ring, genes + selection, `WorldStreamer.Capture()`); load frees the player
+  (`WhiteBloodCells.Free`, before the captor is destroyed: a captor disabled mid-swallow finishes the job), detaches,
+  clears ropes, moves, `Restore`s the world, teleports cameras; refuses to save while being digested or to load
+  another scene's save. `PauseMenu` (creates itself on play, execution order -200): Escape opens it only when
+  `VirusMovement.ClaimsEscape` (focus / rope menu / head view) and command mode don't want it; time scale 0,
+  audio paused, cursor freed; SAVE / LOAD per slot + RESUME, terminal look, hit-tested in screen space;
+  VirusMovement and CommandMode return early while `PauseMenu.IsOpen`.
+- **The vessel loop** (`World/Vessel.cs` on the WorldStreamer prefab + `World/VesselWall.shader`): the world is the
+  inside of one blood vessel bent into a torus (`circumference` 24 km, tube `radius` 1.5 km, seeded width wobble +
+  `narrows`), so drifting downstream brings you back round (lap = circumference / `centreSpeed`, ~7 min). Game
+  direction: space-exploration / factory / RTS at virus scale; the base floats in the calm centre, the fast outer
+  layers and the wall slide past, landmarks come round again each lap. **World frame = the blood round the
+  player**: the frame turns round the loop's axis at the blood's rate where the player is (`followPlayer`, eased over
+  `frameEase`; `FrameAngle` = how far it has turned, saved), so whatever is near them is nearly at rest in world space
+  wherever they go (at the centre the base stays put; out by the wall the base drifts ahead instead). A change of the
+  frame's rate is a change of reference only: `FollowPlayer` gives every free Rigidbody (streamed + Organisms) the same
+  velocity change, kinematic movers read the flow. It exists because near the wall everything moved at ~v0 in world
+  space and every mismatch between interpolated bodies, script-moved things and the camera showed as rubber banding.
+  `Flow(p)` = a turn rate round the loop's axis: relative to the wall (v0/R)(1 - (r/a)^n), relative to the
+  centreline blood -(v0/R) (r/a)^n (the rate stored records turn at, `AngularRate`), minus the frame's rate, times rho.
+  n = `profileExponent`, **1 by default, not laminar 2**, and `centreSpeed` 60 (was 35): the user felt no sense of the
+  middle moving faster than the sides; with r² the middle few hundred metres (all that's in view past the fog) moved as
+  one (1.4 m/s of lag 300 m out), with n = 1 the shear is the same everywhere (~12 m/s per 300 m). Two traps fixed after the
+  first play test (the user saw everything rubber-band): a continuity speed-up through narrows made the base's whole
+  neighbourhood surge (to ~100 m/s) as width changes slid past, and linear speeds minus the wall's rigid turn left a
+  1-4 m/s shear near the centre of this fat torus. Within `InnerMargin` (= `wallMargin` + the wall's relief) of the
+  nominal wall it pushes back in (capped `maxWallPush`; no wall collider); nothing is generated there. **Narrows squeeze
+  the flow evenly**: `Flow` adds a radial part x * da/dS * v0 (1 - Lag(x)) (`SlopeAt`), so the blood keeps its share of
+  the width as a narrow passes and spreads out again after (~4x denser inside a 0.5 narrow). With only the margin push, a
+  narrow swept the outer half of the tube into one shell against the wall that never left: a pack of touching cells, each
+  near the player on its 48 collider pieces (the user saw everything bunch up, with massive lag). The
+  streamer moves the vessel onto `_home` (the player's start; centreline along the prefab's forward, axis its up).
+  Everything floating takes the flow: `Organism.Fluid` (set each FixedTick) and Thrust / Coast / Burst / Launch move
+  relative to it; `Vessel.FixedUpdate` drags loose streamed Rigidbodies (`WorldEntity.Drifts`, non-Organisms) toward
+  it (`drag`, compensating their own damping); ResourceChunk adds it to its home, Antibody and WhiteBloodCell to
+  their step (WBC keeps it as `_drift` so grip / swallow maths use its real velocity); AmbientParticles are carried
+  by it (`_FlowOffset`) and show only when moving *through* the blood. Coordinates: `ToTube` -> phi, s (world arc),
+  S (wall frame = s + S0, S0 integrated at v0 + frame rate x R), r, theta; `FromTube`; `Clock` = world time (double, saved). **Regions**: stretches
+  of `regionLength` with seeded types (`regionTypes`: Plasma (always the start), Rich, Inflamed, Crowded, Sparse),
+  each scaling streamer layers by `Layer.role` (Cells / Resources / Immune; the prefab sets them), tinting the fog,
+  and holding an alert that `ImmuneSystem` noise raises (`Vessel.Alert`, `alertPerSignal`) and that decays to the
+  type's `restAlert` (`alertHalfLife`); Immune density also rises toward the wall (margination), capped `maxDensity`.
+  **Atmosphere**: drives URP fog (exp²; `fogDensity` ~ hides past ~400 m, i.e. the streaming edge): deep colour
+  (skybox `_HorizonColor` by default) in the middle, `wallGlowColor` within `glowDistance` of the wall, region tint,
+  alert colour; faded to `focusFog` in focus mode (its ortho camera sits far back); restored on disable. **Wall**: one
+  grid mesh placed in the vertex stage from globals (`_VesselCentre/E1/E2/Axis`, radius profile `_VesselRadiusTex`),
+  covering the **whole loop** with rings packed toward the camera (phi offset ~ u²; a window round the camera left
+  the sky showing down the tube), hazed by its own thin haze (not the scene fog), capped so it still shows from the middle as a
+  landmark; its look (colours, ink near / far, band contrast, saturation, glint, rim, haze) is the editable material
+  `World/VesselWall.mat` (`Vessel.wallMaterial`; shape stays on Vessel). Toned down after it competed with the cells:
+  muted darker colours, ink fading with distance, more haze; the main camera's far plane is raised to the longest line inside the tube, 4 sqrt(R a) ~ 10 km
+  (`extendFarPlane`, restored on disable; the scene had 1000 m). While it's drawn the sky is never seen, so the camera
+  clears to the fog colour and `SkyboxCache` stops baking (`Vessel.HidesSky`); depth of field's Gaussian far blur (past 60 m) always covered the wall and smeared it at half res, so while it's drawn a runtime global Volume (priority 1000) pushes the far blur out (`sharpWall`; off in focus mode, where ScreenInvertTest fades the scene's DOF); focus mode skips the wall (no normals
+  pass for the sweep's outlines) and gets the sky back. Triangles are ordered nearest ring first (the far loop
+  behind the near wall is then only depth-tested; unordered it cost ~4 ms). Look: **real relief** in the vertex stage
+  (every pass, so depth matches): endothelial Voronoi cells (`tileSize`, periodic round both ways so the loop has no
+  seam) as pillows with raised nuclei (`wallRelief` m) on long wavy folds along the flow (`wallFolds` m); the same
+  height gives the pixel normal analytically (screen-derivative bumps shimmered). Stylized cel shading like the cells
+  (the user: cel shaded, no lighting / shadows needed): bands from main light + facing, nuclei a flat darker shade, ink
+  lines of constant screen width in the junctions, a rim (`wallLightColor`) at grazing angles; detail faded by on-screen
+  cell size, cell relief by distance. The pattern is laid out **conformally** (cells change size, never shape): round the tube by
+  the torus's isothermal angle (the grid's vertices too), along it by a warp in `_VesselRadiusTex` (RGBA: a, da/dS, warp)
+  that follows narrows' slopes and shrinks cells with the tube; normals lean with the slope. Laid out by centreline
+  length and plain angle, cells were 2.3x longer on the loop's outer side than its inner and stretched through narrows
+  (aspect 1.5..8.4x off; now exact outside narrows, within 8% for 95% inside, worst on the steepest inner slopes).
+  Wet cel glint on the pillows, seams shaded, an ink ring round each nucleus. **Streaming in the loop**
+  (`WorldStreamer` when a Vessel is on it): sectors are drifting cells = radial band b (`sectorSize` wide) x slice k
+  along the loop *in that band's own turning frame* x slice j round the tube. Each band turns rigidly
+  (`Vessel.AngularRate` at its middle), so a stored record never changes cell; records carry `time` (vessel clock of
+  their pose) and `frame` (the frame angle then; drift = band rate x time minus the frame's turn) and are turned into place (`Advance`) when spawned or placement-checked: storage costs nothing while
+  away. Record velocities are stored *relative to the blood* (`WorldEntity.Capture` / `Apply` subtract / add `FlowAt`): stored
+  in world space they belonged to the frame in force when stashed, so after the player moved out to the wall things came
+  back ~30 m/s off and slid sideways. Generated records are stamped with the frame angle too (they weren't: new
+  sectors' contents were turned by the whole frame turn so far and landed far round the loop = empty behind you).
+  **Drift vs simulation LOD:** anything carried by the flow must move every frame while on screen (off the calm
+  middle it moves relative to the camera): chunks step every frame on screen when drifting > 0.3 m/s; antibodies /
+  white cells split `Carry(now)` (velocity + flow, every frame on screen) from their LOD'd `Tick`; streamed dynamic
+  cells are Rigidbody-interpolated (`WorldEntity.Bind`). Cells near the wall stream past the player, so new ones keep generating there (once each; they come back
+  next lap). Counts are per `sectorSize`³ of volume (`VolumeScale`) x region density; nothing within the wall margin.
+  Saves carry `layout` + `Vessel.Save` (clock, alerts, wall offset, frame angle / rate); a save from another layout is re-sorted by position.
+  Cost: `FlowAt` O(1) (atan2 + sqrt + a table lookup) per body per physics step; drag O(streamed live objects) per
+  physics step; regions O(regions) once a second; wall = 1 draw, ~18k verts.
 - `ControlsHint.cs`: bottom-right terminal panel with the controls for the current mode (flight /
   surface / focus / seized by a white cell (`Intent.Seized`: aim away + Burst to tear free); lists are data at the top: "[RMB][RMB]" = two prompt icons, plain words are tags),
   retyped on change, H folds it. Inputs are game-style prompts (TerminalUI.PillSprite: circle / pill keycaps;
@@ -781,19 +968,45 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
 - **Depth of field still blurs transparent objects / world-space UI.** The stamp pass runs
   (log-confirmed) but its debug view drew nothing, so its renderer lists come back empty. It
   now uses an override *material* (override *shader* drew nothing here). Unresolved.
+- **GPU legs + SurfaceMap (unverified in play mode):** compiled (C#, all leg shader passes, every compute kernel) and
+  SurfaceMap tested offline, but the gait port was never seen running. Watch for: feet on small chunks (probes can
+  fall past the exact band there), footstep timing (events arrive a frame or two late), legs on non-Organism walkers
+  (plane only). With legs off the colliders, the 48 convex pieces per cell now serve only landing contacts, rope,
+  camera and white cells; landing could use SurfaceMap too, which would let cells go back to one hull.
 - **Crowd performance:** after GPU legs + ticker LOD + collider compression, profile again.
   Remaining candidates: PathManager's two-tier grid, agent-vs-agent physics collisions (a layer
-  that ignores itself), A* `GetNearest` per crawling agent per physics step.
+  that ignores itself), A* `GetNearest` per crawling agent per physics step. Touching detailed cells collide
+  piece-vs-piece (up to 48 x 48 pairs): pieces only need to meet creatures, cells could meet each other hull-vs-hull
+  (collider include / exclude masks, but queries would then see the lidded hull too).
   Antibodies are still O(antibodies x organisms) in `Look` (every ~0.25 s) and O(antibodies x cells) in
   `Avoid` / `Patrolled` per tick; at thousands they need the spatial hash, and past that a data-only
   (Burst jobs) simulation instead of a GameObject each.
+- **Far field (unverified in play mode):** colours / band thresholds were guessed from the materials, not matched
+  side by side with the real cells in the crossover band; stand-in shrink-wraps run once at start (~10 ms per 1k-tri
+  prefab mesh; the virus prefab may be bigger). Growing the page buffer re-uploads it whole (rare). Chunks at 1 km are
+  sub-pixel and culled; if far space still feels empty, raise `Crowded` / `Rich` region densities rather than the base.
+- World streaming (unverified in play mode): not saved yet = ropes (cleared on load), antibodies, cell signals /
+  converted cells, command-mode groups, hand-placed scene objects. `PathManager.Rescan` is a full scene scan per change batch; at thousands of streamed cells make it
+  incremental. Command mode only gives Selectables to cells present when it opens. Sector records stay in memory for
+  every visited sector (fine for a session; page them to disk if worlds get huge).
+- Vessel loop (unverified in play mode; tuning guessed): the wall isn't walkable or solid (the flow pushes back);
+  making it walkable means chunked `Surface`s near the camera. Generated cells are all kept, so a save grows with
+  every stretch seen (the whole loop is ~30k cells); the plan's "filler" tier (untouched records dropped and
+  regenerated from the seed, fresh each lap) would bound it. Only streamed Rigidbodies and Organisms feel the
+  flow, not hand-placed scene bodies. Band drift is quantized (a record turns at its band's middle rate; live
+  bodies at their exact r). Records ignore narrows (a stored thing can come back inside a narrowed wall; the push
+  moves it out). HoloMap doesn't show the loop or regions yet, and nothing names the current region on screen.
+  The far side of the loop is ~7.6 km from home: fine for floats, but a floating origin is needed if the loop grows.
 - Resources: `ResourceField` draw / reach / step loops are O(chunks) per frame (cheap per chunk, fine into the
   thousands); past ~10k give them a spatial grid and step them in a TransformAccessArray job. Kinematic chunks don't
   collide with each other (a bump can push one into another), and a rope-dragged cell stops dead against one.
   PathManager sizes MeshCollider obstacles by bounds (a bit big for chunks). Its prefab isn't in `Viral.unity` yet (editor auto-adds it).
-- For builds, keep these assigned (Shader.Find only saves the editor): `WhiteBloodCells.shader`, `.wrapShader` (Hidden/ShrinkWrapCapture) and `.bake` (WhiteBloodCellBake.compute; all set in its prefab; the prefab must be in the scene), `SpiderLegWalker.legShader`,
-  `HoloMap` shaders, `TransparentDepthForPostFeature.shader`, `AmbientParticles.shader`,
-  `VirusRope.phantomMaterial` (else it needs URP Unlit in the build), `ImmuneSystem.motes.shader` (Hidden/AlarmMote), `VirusRope.baseCoreShader` (Custom/ResourceCore) and `antibodyShader` (Custom/Antibody; else no antibodies drawn), `GenomeView` shaders (Hidden/GenomeBubble, Hidden/GenomeStrand: add a GenomeView to the scene with them assigned and set it as VirusMovement's `headView`), `VirusRope.bloodMaterial`
-  (a `Custom/RopeBlood` material; else found by name, no beads without it).
+- **Builds:** `Assets/Viral/Resources/ViralBuildAssets.asset` (`ViralBuildAssets.cs`) references every Viral shader,
+  WhiteBloodCellBake.compute, LegSimulation.compute (`legSimulation`), FarField.compute (`farField`) and the bootstrap prefabs (WhiteBloodCells, ResourceField). Resources always ship, so
+  `Shader.Find` works in a build and the bootstraps spawn their prefab there (they used AssetDatabase, editor only:
+  the first build had no antibodies, legs, chunks, white cells or head view). **Add any new shader found by name, or
+  prefab spawned from code, to it.** A `shader_feature` keyword a runtime-built material needs (copied from another
+  material) is stripped unless a material asset uses it: make it `multi_compile` (done for `_SHADING_*` in
+  BloodCellLegs / RopeBlood).
 - Inspector values reset in an earlier refactor: check Organism > Grounded > surface >
   `hoverHeight` (>= collider radius), snap distance, layers, Flying lead axis.

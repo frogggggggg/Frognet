@@ -47,6 +47,7 @@ public class SpawnManager : MonoBehaviour
 
     void Start()
     {
+        if (WorldStreamer.Active) return; // the streamer generates the world
         if (seed != 0) UnityEngine.Random.InitState(seed);
 
         var templates = new List<Template>();

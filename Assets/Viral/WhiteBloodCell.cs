@@ -27,7 +27,7 @@ using UnityEngine;
 /// Cost per cell: O(nearby organisms) per think (WhiteBloodCells' grid), one overlap query per think.
 /// </summary>
 [RequireComponent(typeof(Rigidbody))]
-public class WhiteBloodCell : MonoBehaviour
+public class WhiteBloodCell : MonoBehaviour, IWorldState
 {
     public enum State { Patrol, Examine, Hunt, Grip, Engulf, Digest }
 
@@ -173,6 +173,7 @@ public class WhiteBloodCell : MonoBehaviour
     /// <summary>When WhiteBloodCells last ticked it (far ones tick every few frames).</summary>
     public float LastTick { get; set; }
 
+    Vector3 _drift; // the blood's flow it was carried by last crawl (on top of _velocity)
     Vector3 _velocity, _reachDir = Vector3.forward, _avoid, _bodyGoal;
     float _reach, _seed, _hunger = 0.25f, _gulp, _nextThink, _stateUntil, _lastSensed;
     Vector3 _spin, _tipVel, _lastTip; // arm: angular velocity (rad/s); spot velocity for the shader (radii/s)
@@ -225,6 +226,11 @@ public class WhiteBloodCell : MonoBehaviour
         WhiteBloodCells.Unregister(this);
         Prey = null; // gives up its claim
     }
+
+    // Streaming (WorldStreamer): the pose is all it keeps; it isn't streamed out while it holds something.
+    string IWorldState.SaveState() => "";
+    void IWorldState.LoadState(string state) { }
+    bool IWorldState.Pinned => Current == State.Grip || Current == State.Engulf || Current == State.Digest;
 
     public void Tick(float dt, float now)
     {
@@ -471,8 +477,23 @@ public class WhiteBloodCell : MonoBehaviour
         desire = Vector3.ClampMagnitude(desire + _avoid, 1f);
         float surge = 0.55f + 0.45f * Mathf.Sin(Time.time * 1.7f + _seed) * Mathf.Sin(Time.time * 1.7f + _seed);
         _velocity = Vector3.MoveTowards(_velocity, desire * top * surge, acceleration * dt);
-        if (_velocity.sqrMagnitude < 1e-8f) return;
-        transform.position = c + _velocity * dt;
+        Carry(Time.time);
+    }
+
+    float _lastCarry = -1f;
+
+    /// <summary>Moves the body by its crawl + the blood's flow since the last call. Separate from the (LOD'd) Tick
+    /// so WhiteBloodCells can move on-screen idle cells every frame while they only think every few: stepped with
+    /// the tick, drifting ones juddered against the camera.</summary>
+    public void Carry(float now)
+    {
+        float dt = _lastCarry < 0f ? 0f : Mathf.Min(now - _lastCarry, 0.25f);
+        _lastCarry = now;
+        Vector3 c = transform.position;
+        _drift = Vessel.FlowAt(c); // crawls through the blood, carried by it
+        Vector3 step = _velocity + _drift;
+        if (dt <= 0f || step.sqrMagnitude < 1e-8f) return;
+        transform.position = c + step * dt;
     }
 
     // The spot swings toward its goal and the arm stretches to reach it, each on a damped spring (spotSpring,
@@ -693,7 +714,7 @@ public class WhiteBloodCell : MonoBehaviour
         if (d < 1e-3f) return;
         Vector3 dir = to / d;
         Vector3 target = c + dir * (Radius + _reel);
-        Vector3 rel = rb.linearVelocity - _velocity;
+        Vector3 rel = rb.linearVelocity - _velocity - _drift;
         float along = Vector3.Dot(rel, dir), damp = 2f * Mathf.Sqrt(gripStiffness);
         Vector3 a = (target - rb.position) * gripStiffness - dir * (along * damp * 0.7f) - (rel - dir * along) * (damp * 0.2f);
         rb.AddForce(Vector3.ClampMagnitude(a, gripStrength), ForceMode.Acceleration);
@@ -728,7 +749,7 @@ public class WhiteBloodCell : MonoBehaviour
         _swallow = 0f;
         Quaternion toCell = Quaternion.Inverse(transform.rotation);
         _held = toCell * (Prey.transform.position - transform.position);
-        _heldVel = toCell * (velocity - _velocity);
+        _heldVel = toCell * (velocity - _velocity - _drift);
         // Coming in fast, it splats: the squash is kicked by how hard it hit.
         float inward = -Vector3.Dot(_heldVel, _held.normalized);
         _squash = 0f;

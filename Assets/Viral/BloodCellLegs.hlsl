@@ -3,7 +3,8 @@
 
 // GPU legs for Custom/BloodCellLegs. Every leg of every SpiderLegWalker is one
 // instance of a shared tube mesh; the vertex stage rebuilds it from the leg's
-// record in _Legs (filled by LegRenderer): a cubic Bezier root->tip, rings around
+// record in _Legs (written by LegSimulation.compute; a draw's legs start at
+// _LegBase): a cubic Bezier root->tip, rings around
 // it framed by the leg's side axis, radius, writhing wave and ground clearance.
 // The same shape SpiderLegWalker used to build on the CPU, then the cell shader's
 // own displacement, ripple riding and lighting on top.
@@ -11,21 +12,12 @@
 // Template mesh vertex: shape = (t along the leg, cos, sin around it), cap.x =
 // -1 root cap, +1 tip cap, 0 ring.
 
-struct LegData
-{
-    float4 p0;     // xyz root,           w root radius
-    float4 p1;     // xyz control 1,      w tip radius
-    float4 p2;     // xyz control 2,      w writhe amplitude
-    float4 p3;     // xyz tip,            w phase
-    float4 side;   // xyz bend side axis, w radius swell
-    float4 clampN; // xyz ground normal,  w 1 = clear the ground
-    float4 ground; // xyz ground point
-    float4 hub;    // xyz hub (noise is mapped relative to it, so lumps ride the body)
-};
+#include "LegData.hlsl"
 
 #if SHADER_TARGET >= 45
 StructuredBuffer<LegData> _Legs;
 #endif
+int _LegBase; // this draw's first leg in _Legs (per draw, from LegRenderer's property block)
 
 void LegSetup() {} // procedural instancing hook; nothing per instance to set
 
@@ -72,7 +64,7 @@ LegData FetchLeg(LegAttributes v)
 {
     UNITY_SETUP_INSTANCE_ID(v);
 #if defined(UNITY_PROCEDURAL_INSTANCING_ENABLED) && SHADER_TARGET >= 45 // only drawn this way
-    return _Legs[unity_InstanceID];
+    return _Legs[_LegBase + unity_InstanceID];
 #else
     return (LegData)0;
 #endif

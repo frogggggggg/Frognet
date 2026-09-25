@@ -228,6 +228,21 @@ public class VirusInventory : MonoBehaviour
         return sum;
     }
 
+    /// <summary>Puts back saved stores and ring order (loading a save).</summary>
+    public void Restore(List<Slot> saved, List<Mount> savedRing)
+    {
+        slots = new List<Slot>();
+        if (saved != null)
+            foreach (Slot s in saved)
+                if (s != null) slots.Add(new Slot { substance = s.substance, code = s.code, color = s.color, amount = s.amount });
+        ring = new List<Mount>();
+        if (savedRing != null)
+            foreach (Mount m in savedRing)
+                if (m != null) ring.Add(new Mount { kind = m.kind, index = m.index });
+        Fit();
+        for (int i = 0; i < slots.Count; i++) Changed?.Invoke(this, i);
+    }
+
     // Exactly slotCount slots (the list is also edited in the inspector).
     void Fit()
     {

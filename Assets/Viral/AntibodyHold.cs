@@ -3,18 +3,20 @@ using UnityEngine;
 
 /// <summary>
 /// Where antibodies sit on one creature, and how hard it's shaking them.
-/// - Slots: latitude rings round the body in the frame it's shown in (Organism.Shown), from the top
+/// - Slots: latitude rings round the drawn body (BodyHull: its meshes, not its collider) in the frame it's
+///   shown in (Organism.Shown), from the top
 ///   down to <see cref="BottomCap"/> off its underside (that side is on the ground). Each antibody
 ///   lies with its arms along its ring and its stem out; rings are spaced for an antibody's width,
 ///   slots round a ring for its arm span, alternate rings staggered, so neighbours never overlap.
 ///   When a shell is full the next one out starts (over the first), up to <see cref="Layers"/>.
+///   Each hinge sits just off the farthest surface under its antibody, so they follow the body's real shape.
 ///   Every slot knows its wrap radius (hinge to centre, in antibody sizes): the shader bends the
 ///   antibody round that centre so the arms lie along the shell under it (the grip).
 /// - Shake: turning fast and sudden speed changes of the shown body (both low-passed, so frame jitter
 ///   and a single step don't count), past a threshold. Stuck antibodies wear their grip down by it
 ///   (Antibody).
 /// One per creature with antibodies on it, made on the first stick (<see cref="For"/>), updated once a
-/// frame by ImmuneSystem. Cost: layout once per creature (a few dozen slots); a claim walks the slots;
+/// frame by ImmuneSystem. Cost: layout once per creature (a few dozen slots x a hull footprint scan); a claim walks the slots;
 /// per frame O(1) per creature and per stuck antibody.
 /// </summary>
 public class AntibodyHold
@@ -79,36 +81,38 @@ public class AntibodyHold
     AntibodyHold(Organism o, float size)
     {
         organism = o;
-        Frame = o.Shown;
-        Collider c = o.GetComponentInChildren<Collider>();
-        float reach = 0.8f;
-        Vector3 centre = Frame.position;
-        if (c)
-        {
-            Bounds b = c.bounds;
-            reach = Mathf.Min(b.extents.x, Mathf.Min(b.extents.y, b.extents.z));
-            centre = b.center;
-        }
-        _centre = Quaternion.Inverse(Frame.rotation) * (centre - Frame.position);
+        BodyHull hull = BodyHull.For(o);
+        Frame = hull.Frame;
+        _centre = Quaternion.Inverse(Frame.rotation) * (hull.Centre - Frame.position);
         Vector3 up = Quaternion.Inverse(Frame.rotation) * (o.up.sqrMagnitude > 0.5f ? o.up : Frame.up);
-        _slots = Layout(reach, size, up.normalized);
+        _slots = Layout(hull, size, up.normalized);
     }
 
-    static Slot[] Layout(float reach, float size, Vector3 up)
+    // Slots follow the drawn body (BodyHull), not a sphere: each hinge sits just off the farthest surface under
+    // the antibody's footprint, rings stepped by the local radius.
+    static Slot[] Layout(BodyHull hull, float size, Vector3 up)
     {
         var slots = new List<Slot>();
         Vector3 e1 = Vector3.Cross(up, Mathf.Abs(up.y) < 0.9f ? Vector3.up : Vector3.right).normalized;
         Vector3 e2 = Vector3.Cross(up, e1);
         float maxPolar = (180f - BottomCap) * Mathf.Deg2Rad;
+        float span = size * 1.5f; // arm tip to arm tip laid along the ring
         for (int layer = 0; layer < Layers; layer++)
         {
-            float hinge = reach + size * (0.22f + 0.45f * layer); // hinge just off the shell below
-            float ringStep = size * 0.5f / hinge;                // an antibody's width between rings
-            float span = size * 1.5f;                            // arm tip to arm tip laid along the ring
-            for (int ring = 0; ring * ringStep <= maxPolar; ring++)
+            float lift = size * (0.22f + 0.45f * layer); // hinge just off the shell below
+            int ring = 0;
+            for (float polar = 0f; polar <= maxPolar; ring++)
             {
-                float polar = ring * ringStep;
-                int count = ring == 0 ? 1 : Mathf.Max(1, Mathf.FloorToInt(2f * Mathf.PI * hinge * Mathf.Sin(polar) / span));
+                // The ring's mean hinge radius sets its slot count and the step to the next ring.
+                float mean = 0f;
+                const int Probe = 12;
+                for (int k = 0; k < Probe; k++)
+                {
+                    float a = k * Mathf.PI * 2f / Probe;
+                    mean += hull.Radius(up * Mathf.Cos(polar) + (e1 * Mathf.Cos(a) + e2 * Mathf.Sin(a)) * Mathf.Sin(polar));
+                }
+                mean = mean / Probe + lift;
+                int count = ring == 0 ? 1 : Mathf.Max(1, Mathf.FloorToInt(2f * Mathf.PI * mean * Mathf.Sin(polar) / span));
                 float stagger = (ring % 2) * 0.5f + layer * 0.25f;
                 for (int k = 0; k < count; k++)
                 {
@@ -117,6 +121,8 @@ public class AntibodyHold
                     Vector3 dir = up * Mathf.Cos(polar) + side * Mathf.Sin(polar);
                     Vector3 along = ring == 0 ? side : Vector3.Cross(up, dir).normalized; // round the ring
                     Vector3 inward = -dir;
+                    float surface = hull.Radius(dir, size * 0.5f / Mathf.Max(mean, size));
+                    float hinge = surface + lift;
                     slots.Add(new Slot
                     {
                         dir = dir,
@@ -126,6 +132,7 @@ public class AntibodyHold
                         layer = layer,
                     });
                 }
+                polar += size * 0.5f / mean; // an antibody's width between rings
             }
         }
         return slots.ToArray();

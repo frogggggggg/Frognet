@@ -134,6 +134,7 @@ half4 frag(Varyings input, FRONT_FACE_TYPE face : FRONT_FACE_SEMANTIC) : SV_Targ
 #if defined(INVERT_BACKFACES)
     InvertSweepClip(input.positionWS, IS_FRONT_VFACE(face, true, false));
 #endif
+    STREAM_FADE_OBJECT(input.positionHCS);
     // Flip for back faces so Cull Off / Front light correctly.
     float3 geoNormal = normalize(input.normalWS) * IS_FRONT_VFACE(face, 1.0, -1.0);
 

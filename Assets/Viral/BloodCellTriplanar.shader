@@ -85,6 +85,7 @@ Shader "Custom/BloodCellTriplanar"
         LOD 300
 
         HLSLINCLUDE
+        #define STREAM_FADE_OBJECTS 1 // dissolve at the streaming edge (streamed cells only)
         #include "BloodCellCore.hlsl"
 
         // ---------------------------------------------------------------
@@ -124,11 +125,18 @@ Shader "Custom/BloodCellTriplanar"
         }
 
         // Screen-relative density: long edges near the camera subdivide most.
+        // Orthographic views (a directional light's shadow cascades; the gameplay camera is perspective, and focus
+        // mode's orthographic one sits far back where factors are low anyway) cap it hard: there the "camera" is
+        // the cascade's light view, a few metres from everything round the player, so every nearby patch (seen or
+        // not) went to full _TessMax, once per cascade. Profiled on a laptop iGPU: cell shadows cost ~14 ms of a
+        // ~24 ms frame. Shadows don't need the detail.
+        #define ORTHO_TESS_MAX 4.0
         float EdgeFactor(float3 p0WS, float3 p1WS)
         {
             float len  = distance(p0WS, p1WS);
             float dist = distance((p0WS + p1WS) * 0.5, GetCameraPositionWS());
-            return clamp(_TessDensity * len / max(dist, 0.001), 1.0, _TessMax);
+            float cap  = UNITY_MATRIX_P._m33 > 0.5 ? min(_TessMax, ORTHO_TESS_MAX) : _TessMax;
+            return clamp(_TessDensity * len / max(dist, 0.001), 1.0, cap);
         }
 
         // Furthest the live ripples can push a vertex: each wave is at most its decayed peak.

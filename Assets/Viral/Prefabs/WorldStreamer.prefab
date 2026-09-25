@@ -1,0 +1,158 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &1000000000000000001
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1000000000000000002}
+  - component: {fileID: 1000000000000000003}
+  - component: {fileID: 1000000000000000004}
+  - component: {fileID: 1000000000000000005}
+  m_Layer: 0
+  m_Name: WorldStreamer
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &1000000000000000002
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1000000000000000001}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1000000000000000003
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1000000000000000001}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: cb2bc459e9064dd1944bf3ab78203355, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+  seed: 0
+  layers:
+  - name: Cells
+    role: 1
+    prefabs:
+    - prefab: {fileID: 572331309885060373, guid: 5114e6e766d59a3459165df35539f351, type: 3}
+      weight: 1
+    perSector: {x: 10, y: 26}
+    followDensity: 1
+    sizing: 0
+    size: {x: 0.5, y: 2.5}
+    sizeSkew: 1.8
+    randomRotation: 1
+    massWithSize: 1
+    spacing: 5
+    anchor: 1
+    nearAnchors: 0
+    anchorHeight: {x: 3, y: 16}
+  - name: Resource chunks
+    role: 2
+    prefabs:
+    - prefab: {fileID: 1000000000000000001, guid: 7e641335debf4917a14b84d6147788c5, type: 3}
+      weight: 1.7
+    - prefab: {fileID: 1000000000000000001, guid: 00d3e26ca1d14658a3e219353985c016, type: 3}
+      weight: 1
+    perSector: {x: 10, y: 24}
+    followDensity: 0.6
+    sizing: 0
+    size: {x: 1, y: 1}
+    sizeSkew: 1.8
+    randomRotation: 1
+    massWithSize: 0
+    spacing: 1.5
+    anchor: 0
+    nearAnchors: 0.6
+    anchorHeight: {x: 3, y: 16}
+  - name: White blood cells
+    role: 3
+    prefabs:
+    - prefab: {fileID: 572331309885060373, guid: 64359c785a464680a3055dd621f052cf, type: 3}
+      weight: 1
+    perSector: {x: 0, y: 1.5}
+    followDensity: 0.8
+    sizing: 1
+    size: {x: 12, y: 16}
+    sizeSkew: 1
+    randomRotation: 0
+    massWithSize: 0
+    spacing: 4
+    anchor: 0
+    nearAnchors: 0
+    anchorHeight: {x: 3, y: 16}
+  - name: AI viruses
+    role: 0
+    prefabs:
+    - prefab: {fileID: 8123079523243951775, guid: 57eab9a3e4fa7f142a28fa060f32f17e, type: 3}
+      weight: 1
+    perSector: {x: 0, y: 0}
+    followDensity: 1
+    sizing: 0
+    size: {x: 1, y: 1}
+    sizeSkew: 1
+    randomRotation: 0
+    massWithSize: 0
+    spacing: 2
+    anchor: 0
+    nearAnchors: 0.5
+    anchorHeight: {x: 2, y: 6}
+  catalog: []
+  sectorSize: 200
+  loadDistance: 350
+  unloadDistance: 450
+  scanInterval: 0.25
+  regionSectors: 3
+  voidBelow: 0.2
+  homeDensity: 0.8
+  spawnBudgetMs: 2
+  sweepPerFrame: 128
+  maxUnloadsPerFrame: 24
+  rescanInterval: 2
+  blockingLayers:
+    serializedVersion: 2
+    m_Bits: 4294967295
+--- !u!114 &1000000000000000004
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1000000000000000001}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5b060e5a64554565aa9873c091c65823, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+  wallMaterial: {fileID: 2100000, guid: 922840b2d8e44a3f9507a1011e00b9c6, type: 2}
+--- !u!114 &1000000000000000005
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1000000000000000001}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 49ab5eee2f384aaa9df7b7cd66ffafc0, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+  shader: {fileID: 4800000, guid: c521b829bbed4d5c81ca6f65d74a7adb, type: 3}
+  cull: {fileID: 7200000, guid: 20b98e4c7e3c4ecd9f989a7572589217, type: 3}

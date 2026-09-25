@@ -159,6 +159,7 @@ public class ImmuneSystem : MonoBehaviour
         CellSignal c = CellSignal.For(cell);
         if (!c || c.Converted) return;
         c.Raise(signal, at);
+        Vessel.Alert(at, signal); // the stretch of the vessel it's in grows alert
         s.motes.Emit(at, normal, Spurt(signal * s.motes.perSignal, 1f));
     }
 
@@ -246,6 +247,7 @@ public class ImmuneSystem : MonoBehaviour
             float raised = (focus ? focusRate : moving ? walkRate : idleRate) * dt;
             Vector3 at = o.transform.position - o.up * o.grounded.surface.nav.hoverHeight;
             c.Raise(raised, at);
+            Vessel.Alert(at, raised);
             if (focus || moving) motes.Emit(at, o.up, Spurt(raised * motes.perSignal, focus ? 1f : 2f));
         }
     }
@@ -353,8 +355,13 @@ public class ImmuneSystem : MonoBehaviour
             {
                 Vector3 pos = a.transform.position;
                 int every = Mathf.Clamp(1 + (int)((pos - cam).magnitude / tickDistance), 1, 4);
-                if (!SimulationTicker.OnScreen(pos, antibodySize)) every *= 2;
-                if ((frame + i) % every != 0) continue;
+                bool seen = SimulationTicker.OnScreen(pos, antibodySize);
+                if (!seen) every *= 2;
+                if ((frame + i) % every != 0)
+                {
+                    if (seen) a.Carry(now); // moves every frame on screen; only thinking is LOD'd
+                    continue;
+                }
             }
             float dt = Mathf.Min(now - a.LastTick, 0.25f);
             a.LastTick = now;

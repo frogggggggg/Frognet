@@ -13,6 +13,7 @@
 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 #include "TriplanarCore.cginc"
 #include "RippleField.hlsl"
+#include "World/StreamFade.hlsl"
 
 CBUFFER_START(UnityPerMaterial)
     float4 _MainTex_ST;
@@ -302,6 +303,14 @@ void InvertSweepClip(float3 positionWS, bool front)
     #define INVERT_SWEEP_CLIP(positionWS)
 #endif
 
+// Streaming-edge dissolve for shaders drawing one renderer per object (cells define STREAM_FADE_OBJECTS; the legs,
+// drawn procedurally, don't).
+#if defined(STREAM_FADE_OBJECTS)
+    #define STREAM_FADE_OBJECT(positionHCS) StreamFadeObjectClip((positionHCS).xy)
+#else
+    #define STREAM_FADE_OBJECT(positionHCS)
+#endif
+
 // ---------------------------------------------------------------
 // Shared depth / depth-normals stages
 // ---------------------------------------------------------------
@@ -319,6 +328,7 @@ struct DepthVaryings
 half4 DepthFrag(DepthVaryings input INVERT_FACE_ARG) : SV_Target
 {
     INVERT_SWEEP_CLIP(input.positionWS);
+    STREAM_FADE_OBJECT(input.positionHCS);
     return input.positionHCS.z;
 }
 
@@ -334,6 +344,7 @@ struct NormalVaryings
 half4 DepthNormalsFrag(NormalVaryings input INVERT_FACE_ARG) : SV_Target
 {
     INVERT_SWEEP_CLIP(input.positionWS);
+    STREAM_FADE_OBJECT(input.positionHCS);
     float3 n = normalize(input.normalWS);
 #if defined(INVERT_BACKFACES)
     n *= IS_FRONT_VFACE(face, 1.0, -1.0); // a back face seen from inside faces the camera the other way
