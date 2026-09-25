@@ -2,10 +2,14 @@
 // (blue, magenta in the folds, teal on the tops), wiggling in the vertex stage:
 // - the arms flap about the hinge (together and against each other), bend out of the plane and twist;
 // - the stem sways; a wave crawls along every chain.
+// - stuck on a virus (grip): the arms open out nearly flat (_HugOpen), the stem flops over (_StemLean),
+//   then the whole antibody is bent round the virus's centre (wrap = hinge-to-centre distance, from
+//   AntibodyHold) both ways, so the arms follow its curve like fingers round a ball; a slow squeeze;
+//   the free flapping is damped so neighbours don't swing into each other.
 // Mesh: uv0.x = part (0 hinge, 1 stem, 2 left arm, 3 right arm), uv0.y = 0 at the hinge .. 1 at the tip.
 // Drawn only by ImmuneSystem, every antibody in one instanced call per LOD mesh: each instance's pose
 // and wiggle come from _Antibodies[_InstanceOffset + SV_InstanceID] (position + scale, rotation
-// quaternion, wiggle = seed, agitation (speed + size), grip (arms closed)).
+// quaternion, wiggle = seed, agitation (speed + size), grip 0..1, wrap (object units; 0 = none)).
 // Every pass deforms the same way, so depth, depth normals and outlines follow the wiggle.
 Shader "Custom/Antibody"
 {
@@ -17,7 +21,9 @@ Shader "Custom/Antibody"
         _Sway ("Stem Sway (deg)", Float) = 12
         _Wave ("Chain Wave", Float) = 0.025
         _Speed ("Speed", Float) = 2.2
-        _GripAngle ("Grip Angle (deg)", Float) = 28
+        _HugOpen ("Hug Arm Opening (deg)", Float) = 34
+        _StemLean ("Hug Stem Lean (deg)", Float) = 22
+        _Squeeze ("Hug Squeeze (deg)", Float) = 4
         _Rim ("Rim Glow", Color) = (0.55, 0.75, 1, 1)
         _Translucency ("Translucency", Range(0, 1)) = 0.45
         _Smoothness ("Smoothness", Range(0, 1)) = 0.75
@@ -32,7 +38,7 @@ Shader "Custom/Antibody"
 
         CBUFFER_START(UnityPerMaterial)
             float4 _Tint, _Rim;
-            float _Flap, _Bend, _Sway, _Wave, _Speed, _GripAngle, _Translucency, _Smoothness;
+            float _Flap, _Bend, _Sway, _Wave, _Speed, _HugOpen, _StemLean, _Squeeze, _Translucency, _Smoothness;
         CBUFFER_END
 
         struct Instance { float4 positionScale, rotation, wiggle; };
@@ -63,7 +69,7 @@ Shader "Custom/Antibody"
             if (part < 0.5) return; // the hinge stays put
             float seed = wiggle.x, agit = wiggle.y, grip = wiggle.z;
             float t = _Time.y * _Speed * (0.6 + 0.4 * agit) + seed * 17.0;
-            float amp = 0.5 + 0.5 * agit;
+            float amp = (0.5 + 0.5 * agit) * (1.0 - 0.75 * grip); // held on: small moves only
             float w = smoothstep(0.0, 1.0, uv.y);  // bends most at the tip
             const float D = 0.01745329;
 
@@ -74,16 +80,18 @@ Shader "Custom/Antibody"
                 float az = sin(t * 0.63 + 4.1) * _Sway * amp * D * w;
                 p = Turn(p, float3(1, 0, 0), ax); n = Turn(n, float3(1, 0, 0), ax);
                 p = Turn(p, float3(0, 0, 1), az); n = Turn(n, float3(0, 0, 1), az);
+                // Held on: flopped over to one side (by its seed), across the arms.
+                float lean = grip * _StemLean * D * (frac(seed * 3.7) < 0.5 ? -1.0 : 1.0);
+                p = Turn(p, float3(1, 0, 0), lean); n = Turn(n, float3(1, 0, 0), lean);
             }
             else
             {
                 float side = part < 2.5 ? 1.0 : -1.0; // left arm (part 2) leans -x
                 float3 axis = float3(-side * 0.7193, 0.6947, 0); // AntibodyMesh.ArmAngle (46 deg)
-                // Flap: in the Y's plane. Together (a sway) plus against each other (a clap), and the grip
-                // closes them toward the stem's axis.
+                // Flap: in the Y's plane. Together (a sway) plus against each other (a clap).
                 float clap = sin(t + seed * 3.0) * _Flap;
                 float sway = sin(t * 0.71 + 2.0) * _Flap * 0.5;
-                float flap = ((clap - grip * _GripAngle) * side + sway) * amp * D;
+                float flap = (clap * side + sway) * amp * D;
                 // Bend out of the plane (about the arm's in-plane normal) and twist about its own axis.
                 float bend = sin(t * 0.87 + side * 1.7) * _Bend * amp * D;
                 float twist = sin(t * 0.55 + side * 2.9) * 12.0 * amp * D;
@@ -91,10 +99,31 @@ Shader "Custom/Antibody"
                 p = Turn(p, axis, twist * w);          n = Turn(n, axis, twist * w);
                 p = Turn(p, across, bend * w);         n = Turn(n, across, bend * w);
                 p = Turn(p, float3(0, 0, 1), flap * w); n = Turn(n, float3(0, 0, 1), flap * w);
+                // Hug: the whole arm opened out nearly flat (Wrap then curves it onto the body), squeezing slowly.
+                float open = side * grip * (_HugOpen + sin(t * 0.9 + seed * 5.0) * _Squeeze) * D;
+                p = Turn(p, float3(0, 0, 1), open); n = Turn(n, float3(0, 0, 1), open);
             }
 
             // A wave crawling out along the chain, pushing the surface in and out.
             p += n * sin(uv.y * 14.0 - t * 2.3) * _Wave * amp * w;
+        }
+
+        // Held on: bend the antibody round the virus's centre, (0, wrap, 0) in object space (+y points in),
+        // both ways: distance across (x, then z) becomes arc length at the hinge's radius and depth (y)
+        // becomes radius, so anything laid flat at the hinge's height lies on a sphere round the body.
+        void Wrap(inout float3 p, inout float3 n, float wrap, float grip)
+        {
+            if (grip <= 0.0 || wrap <= 0.0) return;
+            float3 q = p, m = n;
+            float a = q.x / wrap, rho = wrap - q.y;
+            q = float3(sin(a) * rho, wrap - cos(a) * rho, q.z);
+            m = Turn(m, float3(0, 0, 1), a);
+            float b = q.z / wrap;
+            rho = wrap - q.y;
+            q = float3(q.x, wrap - cos(b) * rho, sin(b) * rho);
+            m = Turn(m, float3(1, 0, 0), -b);
+            p = lerp(p, q, grip);
+            n = normalize(lerp(n, m, grip));
         }
 
         float3 Rotate(float4 q, float3 v) { return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
@@ -104,6 +133,7 @@ Shader "Custom/Antibody"
             Instance inst = _Antibodies[_InstanceOffset + v.instanceID];
             float3 p = v.positionOS.xyz, n = v.normalOS;
             Wiggle(p, n, v.uv, inst.wiggle);
+            Wrap(p, n, inst.wiggle.w, inst.wiggle.z);
             normalWS = Rotate(inst.rotation, n); // uniform scale
             return inst.positionScale.xyz + Rotate(inst.rotation, p) * inst.positionScale.w;
         }

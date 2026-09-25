@@ -1,0 +1,68 @@
+// Bakes every near white blood cell's shape once a frame (WhiteBloodCells.Draw), so the draw passes (colour,
+// every shadow cascade, depth, depth normals) just read it instead of each rebuilding the whole shape, three
+// times over for its normal. Bake: one Shape per vertex. Normals: from the neighbours on the mesh's grid
+// (WhiteBloodCellMesh: rows of latitude round the reach axis, the seam column repeated, a pole at each end).
+// Ripples are added in the draw shader (they need the global ripple field, which compute doesn't see).
+#pragma kernel Bake
+#pragma kernel Normals
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+
+float _WbcTime; // Time.time: the draw shader's _Time.y in play mode
+#define WBC_TIME _WbcTime
+#include "ShrinkWrap.hlsl"
+#include "WhiteBloodCell.hlsl"
+
+struct Baked { float4 positionLump, mapMouth, normalTendril, mapTip; }; // = Custom/WhiteBloodCell's
+RWStructuredBuffer<Baked> _BakedOut;
+StructuredBuffer<float4> _Directions; // the mesh's vertices (unit directions in the reach frame), row by row
+uint _VertexCount, _RowLength, _Rows, _Count;
+
+[numthreads(64, 1, 1)]
+void Bake(uint3 id : SV_DispatchThreadID)
+{
+    uint vertex = id.x, cell = id.y;
+    if (vertex >= _VertexCount || cell >= _Count) return;
+    Instance inst = _Cells[cell];
+    Frame f = MakeFrame(inst);
+    float3 d = normalize(_Directions[vertex].xyz);
+    float lump, mouth, tendril;
+    float3 map;
+    float4 mapTip;
+    float3 p = Shape(f, d, lump, mouth, tendril, map, mapTip);
+
+    Baked b;
+    b.positionLump = float4(inst.positionRadius.xyz + ToWorld(f, p) * inst.positionRadius.w, lump);
+    b.mapMouth = float4(map * inst.positionRadius.w, mouth); // material maps (m), see Shape
+    b.normalTendril = float4(0.0, 0.0, 1.0, tendril);
+    b.mapTip = float4(mapTip.xyz * inst.positionRadius.w, mapTip.w);
+    _BakedOut[cell * _VertexCount + vertex] = b;
+}
+
+float3 At(uint base, uint row, uint column) { return _BakedOut[base + row * _RowLength + column].positionLump.xyz; }
+
+[numthreads(64, 1, 1)]
+void Normals(uint3 id : SV_DispatchThreadID)
+{
+    uint vertex = id.x, cell = id.y;
+    if (vertex >= _VertexCount || cell >= _Count) return;
+    uint base = cell * _VertexCount, row = vertex / _RowLength, column = vertex % _RowLength, segments = _RowLength - 1;
+
+    // Across the rows (away from the tip) x along them (round the axis) faces out, as on the sphere.
+    float3 n;
+    if (row == 0 || row == _Rows - 1)
+    {
+        // A pole: every vertex of its row is the same point, so use four quarters of the next row in.
+        uint r = row == 0 ? 1 : _Rows - 2, q = segments / 4;
+        n = cross(At(base, r, 2 * q) - At(base, r, 0), At(base, r, 3 * q) - At(base, r, q)) * (row == 0 ? 1.0 : -1.0);
+    }
+    else
+    {
+        uint before = column == 0 ? segments - 1 : column - 1, after = column == segments ? 1 : column + 1;
+        n = cross(At(base, row + 1, column) - At(base, row - 1, column), At(base, row, after) - At(base, row, before));
+    }
+
+    float4 nt = _BakedOut[base + vertex].normalTendril;
+    nt.xyz = dot(n, n) > 1e-14 ? normalize(n) : float3(0.0, 0.0, 1.0);
+    _BakedOut[base + vertex].normalTendril = nt;
+}

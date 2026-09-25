@@ -1,0 +1,99 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!21 &2100000
+Material:
+  serializedVersion: 8
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: WhiteBloodCell
+  m_Shader: {fileID: 4800000, guid: 7a778cb8a7664523aa88afbc420c599a, type: 3}
+  m_Parent: {fileID: 0}
+  m_ModifiedSerializedProperties: 0
+  m_ValidKeywords:
+  - _SHADING_CEL
+  m_InvalidKeywords: []
+  m_LightmapFlags: 4
+  m_EnableInstancingVariants: 0
+  m_DoubleSidedGI: 0
+  m_CustomRenderQueue: -1
+  stringTagMap: {}
+  disabledShaderPasses: []
+  m_LockedProperties: 
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs:
+    - _MainTex:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    m_Ints: []
+    m_Floats:
+    - _BandSoftness: 0.03
+    - _BlendSharpness: 6
+    - _BumpStrength: 1.6
+    - _ColorSteps: 1
+    - _Cup: 0.45
+    - _Detail: 1
+    - _DetailFadeEnd: 100
+    - _DetailFadeStart: 20
+    - _DetailStrength: 0
+    - _DistantBumpMultiplier: 0.24
+    - _DistantDetail: 0.32
+    - _DistantTextureDetailMultiplier: 0.15
+    - _FineLumps: 0.012
+    - _FineScale: 8
+    - _Flare: 2.6
+    - _Flow: 3
+    - _Gain: 0.42
+    - _GlossVariation: 0.14
+    - _Glossiness: 0
+    - _Lacunarity: 2.19
+    - _Lag: 0.4
+    - _LightBands: 2
+    - _Lip: 0.25
+    - _Lobes: 0.09
+    - _LumpScale: 2.6
+    - _Lumps: 0.05
+    - _MouthFoldDepth: 0.2
+    - _MouthFolds: 13
+    - _MouthGlow: 0
+    - _MouthWet: 0.85
+    - _NoiseScale: 1.3
+    - _OcclusionStrength: 1
+    - _Peristalsis: 0.14
+    - _Pull: 0.14
+    - _PulseAmount: 0.5
+    - _PulseSpeed: 1
+    - _PulseVariation: 2
+    - _RimPower: 2.6
+    - _RimSteps: 1
+    - _RippleAmplitude: 8
+    - _RippleDecay: 2
+    - _RippleInitialRadius: 1
+    - _RippleSpeed: 7
+    - _RippleWavelength: 10
+    - _RippleWidth: 4
+    - _Shading: 1
+    - _SpecThreshold: 0.55
+    - _Speed: 1
+    - _SpikeFlow: 1.4
+    - _SpikeScale: 4.2
+    - _SpikeSharpness: 1.68
+    - _SpikeWidth: 0.45
+    - _Spikes: 0.1
+    - _SubsurfaceStrength: 1.1
+    - _TendrilLength: 0.3
+    - _Tendrils: 2.6
+    - _ThinGlow: 0.6
+    - _Wobble: 0.06
+    m_Colors:
+    - _Color: {r: 1, g: 1, b: 1, a: 1}
+    - _DeepColor: {r: 1, g: 1, b: 1, a: 1}
+    - _MouthColor: {r: 1, g: 0.11492197, b: 0, a: 1}
+    - _MouthDeepColor: {r: 1, g: 0.029678324, b: 0, a: 1}
+    - _SpecTint: {r: 0.15, g: 0.13, b: 0.17, a: 1}
+    - _SubsurfaceColor: {r: 0.5235849, g: 0.63798505, b: 1, a: 1}
+  m_BuildTextureStacks: []
+  m_AllowLocking: 1

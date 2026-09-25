@@ -49,8 +49,10 @@ MonoBehaviour:
   size: {x: 12, y: 16}
   spawnClearance: 4
   respawnDelay: 1.5
-  material: {fileID: 0}
+  material: {fileID: 2100000, guid: 6f3f2de2ab834fe28cb428b697e389c9, type: 2}
   shader: {fileID: 4800000, guid: 7a778cb8a7664523aa88afbc420c599a, type: 3}
+  wrapShader: {fileID: 4800000, guid: e7ac85f30f82485787afeef67b665a08, type: 3}
+  bake: {fileID: 7200000, guid: 173faba0258243deac2e0d59e6fe5d2c, type: 3}
   lodDistance: 70
   drawDistance: 700
   tickDistance: 60

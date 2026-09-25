@@ -6,7 +6,7 @@ using Typed = TerminalUI.Typed;
 
 /// <summary>
 /// Bottom-right terminal panel listing the controls for what the player is doing right now
-/// (flying, on a surface, focus), retyping itself when that changes. H folds it to its title.
+/// (flying, on a surface, focus, seized by a white blood cell), retyping itself when that changes. H folds it to its title.
 /// Inputs are drawn as prompt icons like other games: keys in circles (pills when wide), mouse
 /// buttons as a little mouse with that button lit; a double click is the icon twice.
 ///
@@ -47,14 +47,20 @@ public class ControlsHint : MonoBehaviour
         new[] { "[W][A][S][D]", "CRAWL" }, new[] { "[MOUSE]", "LOOK" }, new[] { "[SPACE]", "JUMP" },
         new[] { "TAP [LMB]", "ANCHOR ROPE" }, new[] { "HOLD [LMB]", "PAY OUT ROPE" },
         new[] { "HOLD [RMB]", "REEL IN" }, new[] { "[RMB]", "CUT ROPE" }, new[] { "[RMB][RMB]", "TUG" },
-        new[] { "HOLD [E]", "DRILL IN: FOCUS" }, new[] { "TAP [E]", "INVENTORY" }, new[] { "[Q]", "COMMAND MODE" },
+        new[] { "HOLD [F]", "INJECT: FOCUS" }, new[] { "[E]", "INVENTORY" }, new[] { "[Q]", "COMMAND MODE" },
     };
     static readonly string[][] Focus =
     {
         new[] { "DRAG [LMB]", "LOOK" }, new[] { "[LMB] BASE", "ROPE MENU" },
         new[] { "[LMB] VIRUS", "GENOME" }, new[] { "[LMB] CORE", "EXTRACT" }, new[] { "[E]", "INVENTORY" },
-        new[] { "[ESC]", "CLOSE / LEAVE FOCUS" },
+        new[] { "DRAG [LMB] SLOT", "REARRANGE" }, new[] { "[F]", "LEAVE FOCUS" }, new[] { "[ESC]", "CLOSE / LEAVE FOCUS" },
         new[] { "[Q]", "COMMAND MODE" },
+    };
+    // A white blood cell's arm has hold of it (Intent.Seized): the one way out, so it can't be missed.
+    static readonly string[][] Seized =
+    {
+        new[] { "[MOUSE]", "AIM AWAY FROM IT" }, new[] { "[SPACE]", "BURST: TEAR FREE" }, // Burst goes where you look
+        new[] { "[W][A][S][D]", "SWIM AGAINST THE PULL" },
     };
     static readonly string[][] Command =
     {
@@ -66,6 +72,7 @@ public class ControlsHint : MonoBehaviour
     const float RowHeight = 24f, Top = 34f, Bottom = 10f, InputWidth = 132f, Pad = 16f, Icon = 20f, Gap = 3f;
 
     VirusMovement _player;
+    Organism _organism;
     string[][] _shownSet;
     bool _folded;
     float _nextSearch, _shownAt;
@@ -121,11 +128,13 @@ public class ControlsHint : MonoBehaviour
         {
             _nextSearch = Time.unscaledTime + 1f;
             _player = FindAnyObjectByType<VirusMovement>();
+            _organism = _player ? _player.GetComponent<Organism>() : null;
         }
         _canvas.enabled = _player;
         if (!_player) return;
 
-        string[][] set = CommandMode.Active ? Command : _player.IsFocusMode ? Focus : _player.IsGrounded ? Grounded : Flying;
+        string[][] set = CommandMode.Active ? Command : _organism && _organism.Holding(Intent.Seized) ? Seized
+                       : _player.IsFocusMode ? Focus : _player.IsGrounded ? Grounded : Flying;
         if (set != _shownSet) Show(set);
 
         float now = Time.unscaledTime;
@@ -149,7 +158,7 @@ public class ControlsHint : MonoBehaviour
         int rows = _folded ? 0 : set.Length;
         while (_rows.Count < rows) AddRow();
 
-        string mode = set == Command ? "COMMAND" : set == Focus ? "FOCUS" : set == Grounded ? "SURFACE" : "FLIGHT";
+        string mode = set == Command ? "COMMAND" : set == Seized ? "SEIZED" : set == Focus ? "FOCUS" : set == Grounded ? "SURFACE" : "FLIGHT";
         _title.Set("00 // CONTROLS  " + (_folded ? "[" + toggleKey.ToString().ToUpperInvariant() + "]" : mode));
         _title.start = _shownAt;
         for (int i = 0; i < _rows.Count; i++)

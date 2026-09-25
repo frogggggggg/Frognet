@@ -128,7 +128,7 @@ public class RopeAudio : MonoBehaviour
 
     void Update()
     {
-        if (!_oneShots || !_slime) Ready();
+        if (!_oneShots || !_slime || !s_slime || !s_slurp || !s_squeeze) Ready(); // clips can be unloaded under us
         if (!_hooked) Hook();
 
         // Speed arrives per physics step and jitters; ease it so everything glides.

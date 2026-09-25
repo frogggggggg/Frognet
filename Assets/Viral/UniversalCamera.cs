@@ -59,6 +59,26 @@ public class UniversalCamera : MonoBehaviour
     }
     static bool s_freeCursor;
 
+    /// <summary>
+    /// While set, a camera whose target is 'root' (or under it) follows 'standIn' instead, e.g. a swallowed
+    /// creature's last point at the surface, so the camera doesn't sink into the cell after it. null clears.
+    /// </summary>
+    public static void StandIn(Transform root, Transform standIn)
+    {
+        if (!root) return;
+        if (standIn) s_standIns[root] = standIn;
+        else s_standIns.Remove(root);
+    }
+    static readonly Dictionary<Transform, Transform> s_standIns = new Dictionary<Transform, Transform>();
+
+    static Transform Followed(Transform t)
+    {
+        if (!t || s_standIns.Count == 0) return t;
+        foreach (var kv in s_standIns)
+            if (kv.Key && kv.Value && (t == kv.Key || t.IsChildOf(kv.Key))) return kv.Value;
+        return t;
+    }
+
     public enum Phase { LateUpdate, Update, FixedUpdate }
 
     /// <summary>
@@ -997,6 +1017,8 @@ public class UniversalCamera : MonoBehaviour
         bool positionModifierSeen = false;
         bool rotationModifierSeen = false;
 
+        Transform followed = Followed(target);
+
         Vector3 nextPositionFeedback =
             frame.position;
 
@@ -1008,7 +1030,7 @@ public class UniversalCamera : MonoBehaviour
             var behaviour = list[i];
             if (behaviour == null || !behaviour.enabled) continue;
 
-            Transform resolved = behaviour.targetOverride ? behaviour.targetOverride : target;
+            Transform resolved = behaviour.targetOverride ? behaviour.targetOverride : followed;
 
             // Skip quietly rather than throwing: a target that spawns late is
             // normal, and an exception here would stall the whole list.

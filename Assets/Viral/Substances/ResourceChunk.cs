@@ -67,6 +67,8 @@ public class ResourceChunk : MonoBehaviour
     public Color Tint { get; private set; }
     /// <summary>Who's extracting it, if anyone.</summary>
     public VirusInventory Extractor { get; internal set; }
+    /// <summary>The body extracting it (it stops when that steps off).</summary>
+    public Organism ExtractorBody { get; internal set; }
     /// <summary>Extracting, eased 0..1 (the wobble swells and settles).</summary>
     public float Agitation { get; internal set; }
     /// <summary>Its core is pointed at (focus mode), eased 0..1.</summary>

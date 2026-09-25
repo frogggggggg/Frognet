@@ -2,15 +2,14 @@
 using UnityEngine.Events;
 using UnityEngine.EventSystems;
 using UnityEngine.InputSystem;
-using UnityEngine.InputSystem.Controls;
 
 /// <summary>
 /// Player controller for the virus: input -> Organism intent, plus camera
 /// modes, the grounded WorldButton, and focus events.
 ///
 /// WASD / stick: move relative to the camera. Space / South: jump on the
-/// ground, charge in the air. Hold the WorldButton (E): drill -> Focus.
-/// Escape: leave Focus.
+/// ground, charge in the air. Hold the WorldButton (F, its input action): drill -> Focus.
+/// F or Escape: leave Focus.
 ///
 /// Rope: LMB pays rope out (starting one if none is held: anchored under you on a
 /// surface, trailing a loose end in the air). On a surface LMB also raises the body,
@@ -22,12 +21,13 @@ using UnityEngine.InputSystem.Controls;
 ///
 /// Focus: hovering a rope's base grows it; clicking it opens a radial menu on it
 /// (RopeRadialMenu: straighten, length). Clicking the virus itself opens its head view
-/// (GenomeView: the DNA it carries, click one to inject it) with its stores beside it
-/// (InventoryView). Resource chunks in reach show their core (ResourceField): clicking one starts
-/// (or stops) extracting it into its VirusInventory. A click elsewhere or Escape closes whichever is open.
+/// (GenomeView: the DNA it carries and its stores, mounted round it; click a strand to inject it).
+/// Resource chunks in reach show their core (ResourceField): clicking one starts (or stops) extracting
+/// it into its VirusInventory, and opens the head view to show it flowing in. A click elsewhere or
+/// Escape closes whichever is open.
 ///
-/// Inventory: tapping E anywhere opens the same head view + stores (out of focus a strand click only
-/// loads it; the cursor is freed while it's open). Holding E on a surface still drills into focus.
+/// Inventory: the stores are always in the top-left corner (InventoryView); E anywhere opens the head
+/// view (out of focus a strand click only loads it; the cursor is freed while it's open).
 ///
 /// While the command mode is on (CommandMode, Q) the mouse belongs to it: no rope or
 /// focus clicks here, the keys still move.
@@ -48,6 +48,8 @@ public class VirusMovement : MonoBehaviour
 
     [Tooltip("Hold source for drilling. Shown only while grounded and not in Focus.")]
     public WorldButton groundedWorldButton;
+    [Min(0f), Tooltip("Seconds off the ground before the button hides (a brief hop or edge doesn't flicker it).")]
+    public float buttonGrace = 0.3f;
 
     [Tooltip("Rope spool driven by the mouse. Empty: found on this object or a child.")]
     public VirusRope rope;
@@ -59,10 +61,12 @@ public class VirusMovement : MonoBehaviour
     [Min(1f)] public float headPickRadius = 40f;
     [Tooltip("Focus: the head view a click on the virus opens. Empty: made on first use.")]
     public GenomeView headView;
-    [Tooltip("The stores panel shown beside the head view. Empty: made on first use.")]
+    [Tooltip("The stores readout in the top-left corner. Empty: made at start.")]
     public InventoryView inventoryView;
-    [Tooltip("Tap to open / close the inventory (held on a surface, it drills into focus: WorldButton).")]
+    [Tooltip("Opens / closes the head view (the inventory).")]
     public Key inventoryKey = Key.E;
+    [Tooltip("Leaves focus (entering it is the WorldButton's hold, bound to the same key in its input action).")]
+    public Key focusKey = Key.F;
     [Tooltip("Focus: the least distance (pixels) from a resource chunk's core that counts as clicking it.")]
     [Min(1f)] public float corePickRadius = 26f;
     [Min(0.05f), Tooltip("Seconds between two RMB clicks that count as a double click (a tug).")]
@@ -81,7 +85,6 @@ public class VirusMovement : MonoBehaviour
     bool _lmbConsumed; // this LMB press took a rope end: no paying out, raising or anchoring
     Genome _genome;
     VirusInventory _inventory;
-    float _inventoryKeyAt = float.NegativeInfinity;
     bool _freedCursor; // the open inventory freed the cursor (out of focus)
 
     public Organism Organism => _o ? _o : _o = GetComponent<Organism>();
@@ -106,12 +109,18 @@ public class VirusMovement : MonoBehaviour
         RefreshButton();
     }
 
+    void Start() => EnsureViews(); // the corner readout is always up
+
     void OnDisable()
     {
         UniversalCamera.PointerCaptured = false;
         if (_freedCursor && !CommandMode.Active) UniversalCamera.FreeCursor = false;
         _freedCursor = false;
-        if (rope) rope.HoveredBase = -1;
+        if (rope)
+        {
+            rope.HoveredBase = -1;
+            rope.ShowBaseCores = false;
+        }
         _pressedBase = -1;
     }
 
@@ -138,13 +147,15 @@ public class VirusMovement : MonoBehaviour
         bool coreCaptured = UpdateCores(focus && !commanding, hoveredBase >= 0 || headCaptured);
         UpdateCursor(focus);
         UniversalCamera.PointerCaptured = commanding || hoveredBase >= 0 || _pressedBase >= 0 || headCaptured || coreCaptured ||
-                                          ((MenuOpen || ViewOpen) && PointerOverUI());
+                                          headView && headView.Dragging || ((MenuOpen || ViewOpen) && PointerOverUI());
 
         if (IsFocusMode)
         {
             SetRope(false, false);
             if (rope) rope.PhantomEnd = -1;
-            if (!commanding && Keyboard.current != null && Keyboard.current.escapeKey.wasPressedThisFrame)
+            Keyboard k = commanding ? null : Keyboard.current;
+            if (k != null && k[focusKey].wasPressedThisFrame) ExitFocusMode();
+            else if (k != null && k.escapeKey.wasPressedThisFrame)
             {
                 if (MenuOpen) ropeMenu.Close(); // Escape closes the menu or head view first
                 else if (ViewOpen) headView.Close();
@@ -250,6 +261,7 @@ public class VirusMovement : MonoBehaviour
     int UpdateRopeBases(bool focus)
     {
         if (!rope) return -1;
+        rope.ShowBaseCores = focus; // a glowing core in each base says it can be clicked
         Mouse m = Mouse.current;
         bool held = m != null && m.leftButton.isPressed;
         bool clicked = m != null && m.leftButton.wasPressedThisFrame;
@@ -318,7 +330,7 @@ public class VirusMovement : MonoBehaviour
 
     // ---------------- inventory ----------------
 
-    // A tap of the key (released within clickTime) toggles it; held longer it's the drill's (WorldButton).
+    // The key toggles it (the drill into focus is F's now: WorldButton).
     void UpdateInventoryKey(bool focus, bool commanding)
     {
         Keyboard k = Keyboard.current;
@@ -328,15 +340,19 @@ public class VirusMovement : MonoBehaviour
             if (ViewOpen && !focus) headView.Close(); // the command mode takes the cursor
             return;
         }
-        KeyControl key = k[inventoryKey];
-        if (key.wasPressedThisFrame) _inventoryKeyAt = Time.unscaledTime;
-        if (key.wasReleasedThisFrame && Time.unscaledTime - _inventoryKeyAt <= clickTime) ToggleInventory();
+        if (k[inventoryKey].wasPressedThisFrame) ToggleInventory();
         if (!focus && ViewOpen && k.escapeKey.wasPressedThisFrame) headView.Close();
     }
 
     public void ToggleInventory()
     {
-        if (ViewOpen) { headView.Close(); return; }
+        if (ViewOpen) headView.Close();
+        else OpenInventory();
+    }
+
+    public void OpenInventory()
+    {
+        if (ViewOpen) return;
         Camera cam = ViewCamera;
         if (!cam) return;
         if (!_genome) _genome = Genome.Of(this);
@@ -350,7 +366,9 @@ public class VirusMovement : MonoBehaviour
     {
         if (!headView) headView = GenomeView.Create();
         if (!inventoryView) inventoryView = InventoryView.Create();
-        inventoryView.Bind(headView, Inventory);
+        headView.Inventory = Inventory;
+        if (!_genome) _genome = Genome.Of(this);
+        inventoryView.Bind(headView, Inventory, _genome);
     }
 
     // Out of focus the open inventory needs a pointer: freed while it's open (unless the command mode
@@ -365,7 +383,8 @@ public class VirusMovement : MonoBehaviour
     }
 
     // Focus: resource chunks in reach show their cores; pointing at one lights it, a click starts (or
-    // stops) extracting it. Rope bases and the head win. Returns whether the cursor is on a core.
+    // stops) extracting it (starting opens the head view, where it's seen flowing into its store).
+    // Rope bases and the head win. Returns whether the cursor is on a core.
     bool UpdateCores(bool focus, bool blocked)
     {
         if (!ResourceField.Any) return false;
@@ -376,7 +395,7 @@ public class VirusMovement : MonoBehaviour
             field.Hovered = null;
             return false;
         }
-        field.ShowCores(transform);
+        field.ShowCores(_o);
         Mouse m = Mouse.current;
         Camera cam = ViewCamera;
         if (m == null || !cam) return false;
@@ -384,7 +403,11 @@ public class VirusMovement : MonoBehaviour
         bool free = !blocked && !PointerOverUI() && (!m.leftButton.isPressed || clicked);
         ResourceChunk chunk = free ? field.CoreAt(cam, m.position.ReadValue(), corePickRadius) : null;
         field.Hovered = chunk;
-        if (chunk && clicked) field.ToggleExtract(chunk, Inventory);
+        if (chunk && clicked)
+        {
+            field.ToggleExtract(chunk, Inventory, _o);
+            if (chunk.Extractor == Inventory) OpenInventory();
+        }
         return chunk;
     }
 
@@ -403,8 +426,7 @@ public class VirusMovement : MonoBehaviour
     // The head view's sphere is asked directly: its click catcher is an invisible image, which the
     // EventSystem can skip (not drawn, so not hit), and a click on a strand then closed the view.
     bool PointerOverUI() => EventSystem.current && EventSystem.current.IsPointerOverGameObject()
-                            || ViewOpen && Mouse.current != null && (headView.Covers(Mouse.current.position.ReadValue()) ||
-                                                                     inventoryView && inventoryView.Covers(Mouse.current.position.ReadValue()));
+                            || ViewOpen && Mouse.current != null && headView.Covers(Mouse.current.position.ReadValue());
 
     static Vector2 ReadMove()
     {
@@ -472,13 +494,14 @@ public class VirusMovement : MonoBehaviour
     {
         WorldButton b = groundedWorldButton;
         if (!b) return;
-
-        bool rootOn = !b.visualRoot || b.visualRoot.activeSelf;
-        bool anyVisible = b.enabled || (b.visualRoot && b.visualRoot.activeSelf);
-
-        if (IsGrounded && !IsFocusMode) { if (!(b.enabled && rootOn)) b.Show(); }
-        else if (anyVisible) b.Hide();
+        bool grounded = IsGrounded;
+        if (grounded) _groundedAt = Time.unscaledTime;
+        // Off the ground for a moment (an edge, a hop) keeps it up: hiding re-popped it and reset the hold.
+        bool want = !IsFocusMode && (grounded || b.IsVisible && Time.unscaledTime - _groundedAt < buttonGrace);
+        if (want != b.IsVisible) b.SetVisible(want);
     }
+
+    float _groundedAt = -10f;
 
     /// <summary>Only on an actual change, so substate swaps don't restart rig transitions.</summary>
     void SetCameraMode(string mode)

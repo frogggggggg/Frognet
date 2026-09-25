@@ -1,461 +1,200 @@
 using UnityEngine;
 using UnityEngine.Events;
-using UnityEngine.UI;
-
-#if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
-#endif
+using UnityEngine.UI;
+using Typed = TerminalUI.Typed;
 
 /// <summary>
-/// World-space hold button.
+/// Hold prompt pinned over a point in the world (the focus drill above the player): a keycap with the
+/// bound key ("F", from the input action), a progress ring round it that fills while the key is held,
+/// a slowly turning dial outside that, and a typed label beside it ("HOLD // INJECT", then the progress
+/// while held), in the focus-mode terminal look (TerminalUI). Pops in when shown, fades out when
+/// hidden; the ring grows and shakes near the end, and bursts on completion. Drawn on its own
+/// screen-space canvas at the projected point, so it's always upright and crisp.
 ///
-/// - Can be enabled/disabled by another script.
-/// - Faces the camera while remaining upright relative to the camera.
-/// - Drives a UI Image as a radial hold-progress indicator.
-/// - Invokes a UnityEvent when the configured input has been held long enough.
-///
-/// Recommended hierarchy:
-///
-/// WorldButtonRoot     <- put this script here
-/// └── VisualRoot      <- World Space Canvas / graphics
-///     ├── Icon/Text
-///     └── RadialFill  <- UI Image assigned to radialImage
-///
-/// Another script can keep a reference to this component and call:
-///     worldButton.Show();
-///     worldButton.Hide();
-///
-/// Or simply:
-///     worldButton.enabled = true;
-///     worldButton.enabled = false;
+/// A new hold needs a fresh press: a key still down when it's shown (e.g. the press that left focus)
+/// doesn't start one. Show() / Hide() / SetVisible(); onCompleted fires once the hold is long enough.
+/// Builds itself; the old world-space visual (visualRoot) is switched off.
 /// </summary>
+[DefaultExecutionOrder(1000)] // LateUpdate after the ticker re-pins the player to its (moving) cell and the camera moves: else it stuttered
 public class WorldButton : MonoBehaviour
 {
-    public enum FollowOffsetSpace
-    {
-        World,
-        TargetLocal,
-        CameraLocal
-    }
+    public enum FollowOffsetSpace { World, TargetLocal, CameraLocal }
 
-    public enum BillboardMode
-    {
-        /// <summary>
-        /// Keeps the button parallel to the camera plane.
-        /// Usually the cleanest choice for readable world-space text.
-        /// </summary>
-        MatchCameraRotation,
-
-        /// <summary>
-        /// Points the button directly toward the camera position while using
-        /// the camera's up direction, so the text stays upright on screen.
-        /// </summary>
-        LookAtCamera
-    }
-
-    [Header("Visibility")]
-    [Tooltip("Optional child containing the visible Canvas/graphics. " +
-             "If assigned, enabling/disabling this component also shows/hides it.")]
+    [Tooltip("Old world-space visual: hidden (the button draws its own).")]
     public GameObject visualRoot;
 
-    [Tooltip("If true, the hold progress resets whenever this WorldButton is enabled.")]
-    public bool resetOnEnable = true;
-
     [Header("Follow")]
-    [Tooltip("Optional world point/object for this button to follow.")]
+    [Tooltip("World point / object the prompt hangs over.")]
     public Transform followPoint;
-
-    [Tooltip("Offset from Follow Point.")]
     public Vector3 followOffset = Vector3.zero;
-
-    [Tooltip("Space the Follow Offset is interpreted in.")]
     public FollowOffsetSpace followOffsetSpace = FollowOffsetSpace.World;
-
-    [Min(0f)]
-    [Tooltip("Seconds used to smooth following. 0 follows exactly.")]
-    public float followSmoothTime = 0f;
-
-    [Header("Camera Facing")]
-    [Tooltip("Optional camera override. If empty, Camera.main is used.")]
+    [Tooltip("Optional camera override. Empty: Camera.main.")]
     public Camera targetCamera;
 
-    public BillboardMode billboardMode = BillboardMode.MatchCameraRotation;
-
-    [Tooltip("Turn this on if your Canvas/text appears backwards.")]
-    public bool flip180 = false;
-
-    [Tooltip("If enabled, billboard rotation is applied in LateUpdate so it follows " +
-             "camera movement after the camera has finished moving for the frame.")]
-    public bool faceCamera = true;
-
-    [Header("Radial Fill")]
-    [Tooltip("UI Image used as the hold-progress circle.")]
-    public Image radialImage;
-
-    [Tooltip("Automatically configures the Image as Filled / Radial 360.")]
-    public bool autoConfigureRadialImage = true;
-
-    [Tooltip("Where the radial fill begins. 0=Bottom, 1=Right, 2=Top, 3=Left.")]
-    [Range(0, 3)]
-    public int radialOrigin = 2;
-
-    [Tooltip("Direction the radial fills.")]
-    public bool clockwise = true;
-
     [Header("Hold")]
-    [Min(0.01f)]
-    [Tooltip("How long the input must be held before On Completed fires.")]
+    [Min(0.01f), Tooltip("How long the input must be held before On Completed fires.")]
     public float holdSeconds = 1f;
-
-#if ENABLE_INPUT_SYSTEM
-    [Tooltip("Input System action to hold. Assign an InputActionReference in the Inspector, " +
-             "for example Interact, Submit, E, gamepad South, etc.")]
+    [Tooltip("Input action to hold; its binding is shown on the keycap.")]
     public InputActionReference holdAction;
-#endif
-
-#if ENABLE_LEGACY_INPUT_MANAGER
-    [Tooltip("Used only when the old Input Manager is enabled.")]
-    public KeyCode legacyHoldKey = KeyCode.E;
-#endif
-
-    [Tooltip("If the input is released before completion, progress returns to zero.")]
-    public bool resetOnRelease = true;
-
-    [Tooltip("If true, this button can only complete once each time it is enabled/shown.")]
+    [Tooltip("Used when there's no action.")]
+    public Key holdKey = Key.F;
+    [Tooltip("If true, this button can only complete once each time it is shown.")]
     public bool oneShotPerEnable = true;
 
-    [Tooltip("Disable this WorldButton after the hold completes.")]
-    public bool disableAfterComplete = false;
-
-    [Header("Hold Feedback")]
-    [Tooltip("Animate the visual while the button is being held.")]
-    public bool animateWhileHolding = true;
-
-    [Tooltip("Transform to animate. Leave empty to use Visual Root, then this transform as a fallback.")]
-    public Transform feedbackTransform;
-
-    [Range(1f, 1.5f)]
-    [Tooltip("Scale multiplier reached when the hold reaches 100%.")]
-    public float holdGrowMultiplier = 1.10f;
-
-    [Range(0f, 1f)]
-    [Tooltip("Normalized hold progress where shaking begins. 0.7 means shake during the final 30% of the hold.")]
-    public float shakeStartProgress = 0.70f;
-
-    [Min(0f)]
-    [Tooltip("Maximum local-space shake distance reached near completion.")]
-    public float shakeAmount = 0.035f;
-
-    [Min(0f)]
-    [Tooltip("Shake cycles per second while the hold is in the shake portion.")]
-    public float shakeFrequency = 14f;
-
-    [Header("Hold / Cancel Easing")]
-    [Range(0f, 1f)]
-    [Tooltip("Adds a subtle quadratic feel. 0 is linear, 1 is fully quadratic. " +
-             "Holding eases in; cancelling eases back out.")]
+    [Header("Look")]
+    public string label = "INJECT";
+    [Tooltip("Shown while held, with the progress.")]
+    public string holdingLabel = "DRILLING";
+    [Min(16f), Tooltip("Keycap size, in 1080p pixels.")]
+    public float size = 38f;
+    [Range(1f, 1.5f), Tooltip("Scale reached at 100%.")]
+    public float holdGrowMultiplier = 1.12f;
+    [Range(0f, 1f), Tooltip("Progress where shaking starts.")]
+    public float shakeStartProgress = 0.7f;
+    [Min(0f), Tooltip("Shake at completion, in 1080p pixels.")]
+    public float shakePixels = 2.5f;
+    [Min(0f)] public float shakeFrequency = 14f;
+    [Range(0f, 1f), Tooltip("0 linear, 1 quadratic: the ring fills slowly at first, then quicker.")]
     public float quadraticFeel = 0.35f;
-
-    [Tooltip("If released before completion, smoothly return the visual and radial fill instead of snapping.")]
-    public bool smoothReturnOnCancel = true;
-
-    [Min(0.01f)]
-    [Tooltip("Seconds for the button, shake offset, and radial fill to slide back after a cancelled hold.")]
+    [Min(0.01f), Tooltip("Seconds for the ring to drain after a let-go hold.")]
     public float cancelReturnDuration = 0.18f;
+    [Min(1f)] public float typeSpeed = 60f;
 
     [Header("Events")]
-    [Tooltip("Invoked once the input has been held for Hold Seconds. " +
-             "Drag another GameObject here and choose a public method from its script.")]
     public UnityEvent onCompleted;
-
-    [Tooltip("Optional event fired when a new hold begins.")]
     public UnityEvent onHoldStarted;
-
-    [Tooltip("Optional event fired when an incomplete hold is released.")]
     public UnityEvent onHoldCancelled;
 
     public float HoldProgress => holdSeconds <= 0f ? 1f : Mathf.Clamp01(_holdTime / holdSeconds);
     public bool IsCompleted => _completed;
     public bool IsHolding => _holding;
+    public bool IsVisible => _visible;
+    /// <summary>Every enabled button (HoldTickAudio reads them).</summary>
+    public static readonly System.Collections.Generic.List<WorldButton> All = new System.Collections.Generic.List<WorldButton>();
 
-    float _holdTime;
-    bool _holding;
-    bool _completed;
-    Vector3 _followVelocity;
+    float _holdTime, _fill, _drainFrom, _drainAt = -10f, _shownAt = -10f, _doneAt = -10f, _fade, _spin;
+    bool _holding, _completed, _visible = true, _armed, _enabledAction;
 
-    Transform _activeFeedbackTransform;
-    Vector3 _feedbackBaseLocalPosition;
-    Vector3 _feedbackBaseLocalScale;
-    bool _feedbackSeeded;
-
-    bool _returningFromCancel;
-    float _cancelReturnElapsed;
-    Vector3 _cancelStartLocalPosition;
-    Vector3 _cancelStartLocalScale;
-    float _cancelStartFill;
-
-#if ENABLE_INPUT_SYSTEM
-    bool _enabledActionHere;
-#endif
+    Canvas _canvas;
+    RectTransform _canvasRect, _root, _cap, _tag;
+    CanvasGroup _group;
+    Image _ring, _track, _dial, _burst, _capFill, _capFrame, _tagFill, _tagFrame;
+    Text _key;
+    Typed _text;
+    readonly System.Collections.Generic.List<Object> _made = new System.Collections.Generic.List<Object>();
 
     void Awake()
     {
-        ConfigureRadial();
-        SetFill(0f);
+        if (visualRoot) visualRoot.SetActive(false);
     }
 
     void OnEnable()
     {
-        if (visualRoot)
-            visualRoot.SetActive(true);
-
-        if (resetOnEnable)
-            ResetButton();
-
-        _followVelocity = Vector3.zero;
-        SeedFeedbackTransform();
-
-#if ENABLE_INPUT_SYSTEM
-        _enabledActionHere = false;
-
-        if (holdAction != null && holdAction.action != null && !holdAction.action.enabled)
+        All.Add(this);
+        _enabledAction = false;
+        if (holdAction && holdAction.action != null && !holdAction.action.enabled)
         {
             holdAction.action.Enable();
-            _enabledActionHere = true;
+            _enabledAction = true;
         }
-#endif
     }
 
     void OnDisable()
     {
-        _returningFromCancel = false;
-        RestoreFeedbackTransform();
-
-#if ENABLE_INPUT_SYSTEM
-        // Do not disable a shared action that some other system enabled.
-        if (_enabledActionHere && holdAction != null && holdAction.action != null)
-            holdAction.action.Disable();
-
-        _enabledActionHere = false;
-#endif
-
+        All.Remove(this);
+        if (_enabledAction && holdAction && holdAction.action != null) holdAction.action.Disable();
+        _enabledAction = false;
         _holding = false;
-
-        if (visualRoot)
-            visualRoot.SetActive(false);
+        if (_canvas) _canvas.enabled = false;
     }
 
-    void OnValidate()
+    void OnDestroy()
     {
-        holdSeconds = Mathf.Max(0.01f, holdSeconds);
-        radialOrigin = Mathf.Clamp(radialOrigin, 0, 3);
-        shakeStartProgress = Mathf.Clamp01(shakeStartProgress);
-        holdGrowMultiplier = Mathf.Max(1f, holdGrowMultiplier);
-        quadraticFeel = Mathf.Clamp01(quadraticFeel);
-        cancelReturnDuration = Mathf.Max(0.01f, cancelReturnDuration);
-
-        if (radialImage && autoConfigureRadialImage)
-        {
-            radialImage.type = Image.Type.Filled;
-            radialImage.fillMethod = Image.FillMethod.Radial360;
-            radialImage.fillOrigin = radialOrigin;
-            radialImage.fillClockwise = clockwise;
-        }
+        if (_canvas) Destroy(_canvas.gameObject);
+        foreach (Object o in _made) if (o) Destroy(o);
     }
+
+    public void Show()
+    {
+        if (!enabled) enabled = true;
+        if (visualRoot && visualRoot.activeSelf) visualRoot.SetActive(false);
+        if (!_visible && _fade <= 0f) _shownAt = Time.unscaledTime; // still fading out: carry on from there, no second pop
+        _visible = true;
+        ResetButton();
+    }
+
+    public void Hide()
+    {
+        _visible = false;
+        _holding = false;
+    }
+
+    public void SetVisible(bool visible)
+    {
+        if (visible) Show();
+        else Hide();
+    }
+
+    /// <summary>Clears the hold; the next one needs a fresh press.</summary>
+    public void ResetButton()
+    {
+        _holdTime = 0f;
+        _holding = _completed = false;
+        _armed = !Pressed();
+        _fill = 0f;
+        _drainAt = -10f;
+    }
+
+    public void ForceComplete()
+    {
+        if (!_completed) Complete();
+    }
+
+    bool Pressed()
+    {
+        if (holdAction && holdAction.action != null) return holdAction.action.IsPressed();
+        Keyboard k = Keyboard.current;
+        return k != null && holdKey != Key.None && k[holdKey].isPressed;
+    }
+
+    float Ease(float t) => Mathf.Lerp(t, t * t, quadraticFeel);
 
     void Update()
     {
-        // A completed one-shot waits until Show()/ResetButton()/re-enable.
-        if (_completed && oneShotPerEnable)
-            return;
+        if (!_visible) return;
+        bool pressed = Pressed();
+        if (!pressed) _armed = true;
+        if (_completed && oneShotPerEnable) return;
 
-        bool pressed = IsHoldPressed();
-
-        if (pressed)
+        if (pressed && _armed)
         {
-            // If the player presses again while a cancelled hold is easing back,
-            // start a fresh hold from the authored resting pose. This prevents the
-            // return animation and hold animation from fighting over the same transform.
-            if (_returningFromCancel)
-            {
-                _returningFromCancel = false;
-                RestoreFeedbackTransform();
-
-                if (resetOnRelease)
-                    SetFill(0f);
-            }
-
             if (!_holding)
             {
                 _holding = true;
-                SeedFeedbackTransform();
+                _drainAt = -10f;
                 onHoldStarted?.Invoke();
             }
-
             _holdTime += Time.unscaledDeltaTime;
-            float progress = HoldProgress;
-
-            // The timer stays exact, but the visible response has a subtle
-            // quadratic acceleration toward completion.
-            float visualProgress = HoldEase(progress);
-
-            SetFill(visualProgress);
-            ApplyHoldFeedback(progress, visualProgress);
-
-            if (!_completed && _holdTime >= holdSeconds)
-                Complete();
-        }
-        else
-        {
-            bool wasIncompleteHold = _holding && !_completed;
-
-            if (wasIncompleteHold)
-                onHoldCancelled?.Invoke();
-
-            _holding = false;
-
-            if (wasIncompleteHold && resetOnRelease)
-            {
-                _holdTime = 0f;
-
-                if (smoothReturnOnCancel)
-                    BeginCancelReturn();
-                else
-                {
-                    _returningFromCancel = false;
-                    SetFill(0f);
-                    RestoreFeedbackTransform();
-                }
-            }
-
-            if (_returningFromCancel)
-                UpdateCancelReturn();
-
-            // If repeats are allowed, releasing after completion arms it again.
-            if (_completed && !oneShotPerEnable)
-            {
-                _completed = false;
-                _holdTime = 0f;
-                _returningFromCancel = false;
-                SetFill(0f);
-                RestoreFeedbackTransform();
-            }
-        }
-    }
-
-    void LateUpdate()
-    {
-        Camera cam = ResolveCamera();
-
-        FollowPoint(cam);
-
-        if (!faceCamera || !cam)
+            _fill = Ease(HoldProgress);
+            if (!_completed && _holdTime >= holdSeconds) Complete();
             return;
-
-        Quaternion rotation;
-
-        if (billboardMode == BillboardMode.MatchCameraRotation)
-        {
-            // Keeps text perfectly level relative to the camera/screen.
-            rotation = cam.transform.rotation;
-        }
-        else
-        {
-            // World-space Canvas fronts commonly face opposite transform.forward,
-            // so forward points from the camera toward this object.
-            Vector3 forward = transform.position - cam.transform.position;
-
-            if (forward.sqrMagnitude < 0.000001f)
-                return;
-
-            rotation = Quaternion.LookRotation(forward.normalized, cam.transform.up);
         }
 
-        if (flip180)
-            rotation *= Quaternion.Euler(0f, 180f, 0f);
-
-        transform.rotation = rotation;
-    }
-
-
-    void FollowPoint(Camera cam)
-    {
-        if (!followPoint)
-            return;
-
-        Vector3 offset;
-
-        switch (followOffsetSpace)
+        if (_holding && !_completed)
         {
-            case FollowOffsetSpace.TargetLocal:
-                offset = followPoint.TransformVector(followOffset);
-                break;
-
-            case FollowOffsetSpace.CameraLocal:
-                offset = cam
-                    ? cam.transform.TransformVector(followOffset)
-                    : followOffset;
-                break;
-
-            default:
-                offset = followOffset;
-                break;
+            onHoldCancelled?.Invoke();
+            _drainFrom = _fill;
+            _drainAt = Time.unscaledTime;
         }
-
-        Vector3 desired = followPoint.position + offset;
-
-        if (followSmoothTime <= 0f)
+        _holding = false;
+        _holdTime = 0f;
+        if (_completed && !oneShotPerEnable) { _completed = false; _fill = 0f; }
+        if (_drainAt >= 0f)
         {
-            transform.position = desired;
-            _followVelocity = Vector3.zero;
+            float t = Mathf.Clamp01((Time.unscaledTime - _drainAt) / cancelReturnDuration);
+            _fill = Mathf.Lerp(_drainFrom, 0f, 1f - (1f - t) * (1f - t));
         }
-        else
-        {
-            transform.position = Vector3.SmoothDamp(
-                transform.position,
-                desired,
-                ref _followVelocity,
-                followSmoothTime);
-        }
-    }
-
-    Camera ResolveCamera()
-    {
-        if (targetCamera)
-            return targetCamera;
-
-        return Camera.main;
-    }
-
-    void ConfigureRadial()
-    {
-        if (!radialImage || !autoConfigureRadialImage)
-            return;
-
-        radialImage.type = Image.Type.Filled;
-        radialImage.fillMethod = Image.FillMethod.Radial360;
-        radialImage.fillOrigin = radialOrigin;
-        radialImage.fillClockwise = clockwise;
-    }
-
-    void SetFill(float amount)
-    {
-        if (radialImage)
-            radialImage.fillAmount = Mathf.Clamp01(amount);
-    }
-
-    bool IsHoldPressed()
-    {
-#if ENABLE_INPUT_SYSTEM
-        if (holdAction != null && holdAction.action != null)
-            return holdAction.action.IsPressed();
-#endif
-
-#if ENABLE_LEGACY_INPUT_MANAGER
-        return Input.GetKey(legacyHoldKey);
-#else
-        return false;
-#endif
     }
 
     void Complete()
@@ -463,229 +202,170 @@ public class WorldButton : MonoBehaviour
         _holdTime = holdSeconds;
         _completed = true;
         _holding = false;
-        _returningFromCancel = false;
-        SetFill(1f);
-
-        // Completion is intentionally a crisp snap, unlike a cancelled hold.
-        RestoreFeedbackTransform();
-
+        _fill = 1f;
+        _doneAt = Time.unscaledTime;
         onCompleted?.Invoke();
-
-        if (disableAfterComplete)
-            enabled = false;
     }
 
-    void SeedFeedbackTransform()
-    {
-        Transform wanted = feedbackTransform;
-        if (!wanted && visualRoot)
-            wanted = visualRoot.transform;
-        if (!wanted)
-            wanted = transform;
+    // ---------------- drawing ----------------
 
-        // Re-seed if the assigned feedback target changed.
-        if (_feedbackSeeded && _activeFeedbackTransform == wanted)
+    void LateUpdate()
+    {
+        float now = Time.unscaledTime, dt = Time.unscaledDeltaTime;
+        _fade = Mathf.MoveTowards(_fade, _visible ? 1f : 0f, dt / (_visible ? 0.12f : 0.2f));
+        if (_fade <= 0f)
+        {
+            if (_canvas && _canvas.enabled) _canvas.enabled = false;
             return;
-
-        _activeFeedbackTransform = wanted;
-
-        if (_activeFeedbackTransform)
-        {
-            _feedbackBaseLocalPosition = _activeFeedbackTransform.localPosition;
-            _feedbackBaseLocalScale = _activeFeedbackTransform.localScale;
-            _feedbackSeeded = true;
         }
-    }
+        if (!_canvas || _text == null) Build(); // a play-mode script reload drops the plain parts
+        Camera cam = targetCamera ? targetCamera : Camera.main;
+        if (!cam || !followPoint) { _canvas.enabled = false; return; }
 
-    void ApplyHoldFeedback(float rawProgress, float visualProgress)
-    {
-        if (!animateWhileHolding)
+        Vector3 offset = followOffsetSpace == FollowOffsetSpace.TargetLocal ? followPoint.TransformVector(followOffset)
+                       : followOffsetSpace == FollowOffsetSpace.CameraLocal ? cam.transform.TransformVector(followOffset)
+                       : followOffset;
+        transform.position = followPoint.position + offset;
+        Vector3 screen = cam.WorldToScreenPoint(transform.position);
+        if (screen.z <= 0f || !RectTransformUtility.ScreenPointToLocalPointInRectangle(_canvasRect, screen, null, out Vector2 at))
+        {
+            _canvas.enabled = false;
             return;
+        }
+        _canvas.enabled = true;
 
-        SeedFeedbackTransform();
-        if (!_activeFeedbackTransform)
-            return;
+        // Pop in, grow and shake as it fills, a burst when it completes.
+        float pop = BackOut(Mathf.Clamp01((now - _shownAt) / 0.28f));
+        float p = _fill;
+        float shake = p >= shakeStartProgress && _holding
+            ? Ease(Mathf.Clamp01((p - shakeStartProgress) / Mathf.Max(1f - shakeStartProgress, 1e-3f))) * shakePixels : 0f;
+        float phase = now * shakeFrequency * Mathf.PI * 2f;
+        _root.anchoredPosition = at + new Vector2(Mathf.Sin(phase), Mathf.Sin(phase * 1.37f + 1.1f)) * shake;
+        _root.localScale = Vector3.one * (Mathf.Lerp(0.6f, 1f, pop) * (_visible ? 1f : Mathf.Lerp(0.85f, 1f, _fade)));
+        _group.alpha = _fade;
+        _cap.localScale = Vector3.one * Mathf.Lerp(1f, holdGrowMultiplier, p);
 
-        rawProgress = Mathf.Clamp01(rawProgress);
-        visualProgress = Mathf.Clamp01(visualProgress);
+        Color line = TerminalUI.Line, live = TerminalUI.Live;
+        Color lit = Color.Lerp(line, live, p);
+        _ring.fillAmount = p;
+        _ring.color = lit;
+        _capFrame.color = Color.Lerp(new Color(line.r, line.g, line.b, 0.9f), live, p);
+        _key.color = Color.Lerp(TerminalUI.Text, live, p);
+        _spin += dt * Mathf.Lerp(18f, 400f, p * p);
+        _dial.rectTransform.localEulerAngles = new Vector3(0f, 0f, -_spin);
+        _dial.color = new Color(lit.r, lit.g, lit.b, Mathf.Lerp(0.3f, 0.8f, p));
 
-        // Scale follows the eased visual progress, giving the hold a slight
-        // "pressure building" feel instead of a perfectly linear growth.
-        float scaleMultiplier =
-            Mathf.Lerp(1f, holdGrowMultiplier, visualProgress);
-
-        _activeFeedbackTransform.localScale =
-            _feedbackBaseLocalScale * scaleMultiplier;
-
-        Vector3 shakeOffset = Vector3.zero;
-
-        // The shake threshold is based on real hold progress so the configured
-        // percentage corresponds directly to Hold Seconds.
-        if (shakeAmount > 0f && rawProgress >= shakeStartProgress)
+        float done = Mathf.Clamp01((now - _doneAt) / 0.4f);
+        _burst.enabled = _completed && done < 1f;
+        if (_burst.enabled)
         {
-            float shakeRange = Mathf.Max(1f - shakeStartProgress, 0.0001f);
-            float shakeStrength =
-                Mathf.Clamp01((rawProgress - shakeStartProgress) / shakeRange);
-
-            // Give shake strength the same subtle quadratic build-up.
-            shakeStrength = HoldEase(shakeStrength);
-
-            float phase = Time.unscaledTime * shakeFrequency * Mathf.PI * 2f;
-
-            // Different frequencies on X and Y avoid a perfectly circular wobble.
-            shakeOffset = new Vector3(
-                Mathf.Sin(phase),
-                Mathf.Sin(phase * 1.37f + 1.1f),
-                0f) * (shakeAmount * shakeStrength);
+            _burst.rectTransform.localScale = Vector3.one * Mathf.Lerp(1f, 2.4f, 1f - (1f - done) * (1f - done));
+            _burst.color = new Color(live.r, live.g, live.b, 1f - done);
         }
 
-        _activeFeedbackTransform.localPosition =
-            _feedbackBaseLocalPosition + shakeOffset;
+        // The label: "HOLD // INJECT", the progress while held, the label lit once done.
+        if (_completed) _text.Set(label, false);
+        else if (_holding) _text.Set(holdingLabel + "  " + Mathf.FloorToInt(HoldProgress * 100f).ToString("00") + "%", false);
+        else _text.Set("HOLD // " + label);
+        _text.Tick(now, typeSpeed);
+        _text.text.color = _completed || _holding ? live : TerminalUI.Text;
+        _tagFrame.color = _completed || _holding ? live : new Color(line.r, line.g, line.b, 0.8f);
+        _tag.sizeDelta = new Vector2(Mathf.Max(40f, _text.text.preferredWidth + 26f), 24f);
     }
 
-    float HoldEase(float t)
+    static float BackOut(float x)
     {
-        t = Mathf.Clamp01(t);
-
-        // Blend linear with t^2 so "Quadratic Feel" can stay subtle rather
-        // than forcing a strong ease curve.
-        float quadratic = t * t;
-        return Mathf.Lerp(t, quadratic, quadraticFeel);
+        const float c = 1.7f;
+        x -= 1f;
+        return 1f + (c + 1f) * x * x * x + c * x * x;
     }
 
-    float ReturnEase(float t)
+    void Build()
     {
-        t = Mathf.Clamp01(t);
+        if (_canvas) Destroy(_canvas.gameObject);
+        foreach (Object o in _made) if (o) Destroy(o);
+        _made.Clear();
 
-        // Quadratic ease-out: moves decisively toward rest, then settles.
-        float quadratic = 1f - (1f - t) * (1f - t);
-        return Mathf.Lerp(t, quadratic, quadraticFeel);
+        Font font = TerminalUI.Font(TerminalUI.DefaultFonts);
+        _canvas = TerminalUI.Canvas("World Button Canvas", transform, 570);
+        Destroy(_canvas.GetComponent<GraphicRaycaster>()); // read only
+        _canvasRect = (RectTransform)_canvas.transform;
+        _root = TerminalUI.Rect("Prompt", _canvasRect, Vector2.zero, Vector2.one * size);
+        _group = _root.gameObject.AddComponent<CanvasGroup>();
+        _group.blocksRaycasts = _group.interactable = false;
+
+        Sprite ring = Made(TerminalUI.RingSprite(7f)), dial = Made(TerminalUI.DialSprite(true));
+        Sprite disc = Made(TerminalUI.DiscSprite(false)), rim = Made(TerminalUI.DiscSprite(true));
+        Sprite chamfer = Made(TerminalUI.ChamferSprite(false)), frame = Made(TerminalUI.ChamferSprite(true));
+
+        _dial = Img("Dial", _root, dial, size * 2f, TerminalUI.Line);
+        _track = Img("Track", _root, ring, size * 1.5f, new Color(TerminalUI.Line.r, TerminalUI.Line.g, TerminalUI.Line.b, 0.18f));
+        _ring = Img("Progress", _root, ring, size * 1.5f, TerminalUI.Line);
+        _ring.type = Image.Type.Filled;
+        _ring.fillMethod = Image.FillMethod.Radial360;
+        _ring.fillOrigin = (int)Image.Origin360.Top;
+        _ring.fillClockwise = true;
+        _ring.fillAmount = 0f;
+        _burst = Img("Burst", _root, ring, size * 1.5f, TerminalUI.Live);
+        _burst.enabled = false;
+
+        _cap = TerminalUI.Rect("Keycap", _root, Vector2.zero, Vector2.one * size);
+        _capFill = Img("Fill", _cap, disc, size, TerminalUI.Panel);
+        _capFrame = Img("Frame", _cap, rim, size, TerminalUI.Line);
+        _key = TerminalUI.Graphic<Text>("Key", _cap, Vector2.zero, Vector2.one * size);
+        TerminalUI.Style(_key, font, Mathf.RoundToInt(size * 0.5f), TerminalUI.Text, TextAnchor.MiddleCenter);
+        _key.text = KeyName();
+
+        // The label: a chamfered tag to the right of the ring.
+        _tag = TerminalUI.Rect("Tag", _root, new Vector2(size * 1.05f, 0f), new Vector2(120f, 24f));
+        _tag.pivot = new Vector2(0f, 0.5f);
+        _tagFill = _tag.gameObject.AddComponent<Image>();
+        _tagFill.sprite = chamfer;
+        _tagFill.type = Image.Type.Sliced;
+        _tagFill.color = TerminalUI.Panel;
+        _tagFill.raycastTarget = false;
+        _tagFrame = TerminalUI.Graphic<Image>("Frame", _tag, Vector2.zero, Vector2.zero);
+        Stretch(_tagFrame.rectTransform);
+        _tagFrame.sprite = frame;
+        _tagFrame.type = Image.Type.Sliced;
+        _tagFrame.raycastTarget = false;
+        Text t = TerminalUI.Graphic<Text>("Label", _tag, Vector2.zero, Vector2.zero);
+        Stretch(t.rectTransform);
+        t.rectTransform.offsetMin = new Vector2(13f, 0f);
+        TerminalUI.Style(t, font, 13, TerminalUI.Text, TextAnchor.MiddleLeft);
+        _text = new Typed { text = t, start = Time.unscaledTime };
     }
 
-    void BeginCancelReturn()
+    string KeyName()
     {
-        SeedFeedbackTransform();
-
-        _returningFromCancel = true;
-        _cancelReturnElapsed = 0f;
-
-        if (_activeFeedbackTransform)
+        if (holdAction && holdAction.action != null)
         {
-            _cancelStartLocalPosition = _activeFeedbackTransform.localPosition;
-            _cancelStartLocalScale = _activeFeedbackTransform.localScale;
+            string s = holdAction.action.GetBindingDisplayString();
+            if (!string.IsNullOrEmpty(s)) return s.ToUpperInvariant();
         }
-
-        _cancelStartFill = radialImage ? radialImage.fillAmount : 0f;
+        return holdKey.ToString().ToUpperInvariant();
     }
 
-    void UpdateCancelReturn()
+    Sprite Made(Sprite s)
     {
-        if (!_returningFromCancel)
-            return;
-
-        _cancelReturnElapsed += Time.unscaledDeltaTime;
-
-        float t = cancelReturnDuration <= 0f
-            ? 1f
-            : Mathf.Clamp01(_cancelReturnElapsed / cancelReturnDuration);
-
-        float eased = ReturnEase(t);
-
-        if (_activeFeedbackTransform)
-        {
-            _activeFeedbackTransform.localPosition =
-                Vector3.LerpUnclamped(
-                    _cancelStartLocalPosition,
-                    _feedbackBaseLocalPosition,
-                    eased);
-
-            _activeFeedbackTransform.localScale =
-                Vector3.LerpUnclamped(
-                    _cancelStartLocalScale,
-                    _feedbackBaseLocalScale,
-                    eased);
-        }
-
-        if (radialImage)
-            radialImage.fillAmount =
-                Mathf.LerpUnclamped(_cancelStartFill, 0f, eased);
-
-        if (t >= 1f)
-        {
-            _returningFromCancel = false;
-            RestoreFeedbackTransform();
-            SetFill(0f);
-        }
+        _made.Add(s.texture);
+        _made.Add(s);
+        return s;
     }
 
-    void RestoreFeedbackTransform()
+    static Image Img(string name, RectTransform parent, Sprite sprite, float size, Color color)
     {
-        if (!_feedbackSeeded || !_activeFeedbackTransform)
-            return;
-
-        _activeFeedbackTransform.localPosition = _feedbackBaseLocalPosition;
-        _activeFeedbackTransform.localScale = _feedbackBaseLocalScale;
+        Image i = TerminalUI.Graphic<Image>(name, parent, Vector2.zero, Vector2.one * size);
+        i.sprite = sprite;
+        i.color = color;
+        i.raycastTarget = false;
+        return i;
     }
 
-    /// <summary>
-    /// Shows/enables the WorldButton. Intended to be called by another script
-    /// or from a UnityEvent.
-    /// </summary>
-    public void Show()
+    static void Stretch(RectTransform t)
     {
-        if (visualRoot)
-            visualRoot.SetActive(true);
-
-        if (!enabled)
-        {
-            enabled = true; // OnEnable handles reset/action setup.
-        }
-        else
-        {
-            ResetButton();
-        }
-    }
-
-    /// <summary>
-    /// Hides/disables the WorldButton. Intended to be called by another script
-    /// or from a UnityEvent.
-    /// </summary>
-    public void Hide()
-    {
-        enabled = false;
-
-        // OnDisable hides visualRoot when one is assigned. If no visual root is
-        // assigned, disabling only stops the behaviour and leaves this GameObject visible.
-    }
-
-    /// <summary>
-    /// Convenience method for scripts that already have a bool.
-    /// </summary>
-    public void SetVisible(bool visible)
-    {
-        if (visible) Show();
-        else Hide();
-    }
-
-    /// <summary>
-    /// Clears hold state and returns the radial image to zero.
-    /// </summary>
-    public void ResetButton()
-    {
-        _holdTime = 0f;
-        _holding = false;
-        _completed = false;
-        _returningFromCancel = false;
-        SetFill(0f);
-        RestoreFeedbackTransform();
-    }
-
-    /// <summary>
-    /// Immediately completes the button from another script.
-    /// </summary>
-    public void ForceComplete()
-    {
-        if (!_completed)
-            Complete();
+        t.anchorMin = Vector2.zero;
+        t.anchorMax = Vector2.one;
+        t.offsetMin = t.offsetMax = Vector2.zero;
     }
 }

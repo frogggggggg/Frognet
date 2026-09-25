@@ -197,6 +197,26 @@ public static class CommandBoard
         return g;
     }
 
+    /// <summary>The group already saved with exactly these members (same category), else a new one
+    /// saved from them (a line dragged straight onto things saves them on the way).</summary>
+    public static Group FindOrSave(List<Selectable> members)
+    {
+        members.RemoveAll(m => !m);
+        if (members.Count == 0) return null;
+        bool agents = members[0].category == Selectable.Category.Agent;
+        int count = agents ? Squads.Count : Tasks.Count;
+        for (int i = 0; i < count; i++)
+        {
+            Group g = agents ? Squads[i] : (Group)Tasks[i];
+            if (g.Count != members.Count) continue;
+            bool same = true;
+            foreach (Selectable m in members)
+                if (!g.members.Contains(m)) { same = false; break; }
+            if (same) return g;
+        }
+        return Save(members);
+    }
+
     /// <summary>The name the next group saved from these would get.</summary>
     public static string NextName(string baseName) =>
         baseName + " " + ((s_numbers.TryGetValue(baseName, out int n) ? n : 0) + 1);

@@ -6,10 +6,13 @@ using UnityEngine.Rendering;
 /// The body's defence. You don't fight directly, so this is what you evade and build against:
 /// - Watches viral activity: every virus (Organism) on a cell raises that cell's CellSignal (a little
 ///   while there, more while moving, a lot while in focus on it -- drilling in). Signals die away.
-/// - Signalling cells give off fumes (drawn here: one draw of GPU billboards, Hidden/SignalFume).
+/// - Alarmed cells let out warning motes (AlarmMotes): spurts where a virus lands (the LandAlarm effect),
+///   walks or drills in, a burst for a wrong gene, and a few round the hotspot while a cell is still
+///   calling. They say "something is coming".
 /// - Antibodies: an ambient population wanders the area; loud cells call more in from afar. They
 ///   follow the signal field to the loud cells, patrol over the activity and stick to viruses they
-///   see (Antibody). They're command-mode targets ("Antibodies").
+///   see (Antibody), in slots round the body (AntibodyHold), until shaken off. They're command-mode
+///   targets ("Antibodies").
 /// - A gene delivered into a cell (the head view's injection, <see cref="Deliver"/>) takes the cell
 ///   over if it's the one it answers to (<see cref="controlGene"/>): it stops signalling for good.
 ///   Any other gene sets its alarm off.
@@ -17,6 +20,7 @@ using UnityEngine.Rendering;
 /// Creates itself on play when the scene has cells (add one to the scene to tune it; disable it to
 /// switch the immune system off).
 /// </summary>
+[DefaultExecutionOrder(150)] // LateUpdate after the SimulationTicker's (0): stuck antibodies ride this frame's pose
 public class ImmuneSystem : MonoBehaviour
 {
     [Header("Signal")]
@@ -34,6 +38,8 @@ public class ImmuneSystem : MonoBehaviour
     public string controlGene = "INT-5";
     [Min(0f), Tooltip("Signal from injecting the wrong gene into a cell.")]
     public float wrongGeneBurst = 40f;
+    [Min(0f), Tooltip("Signal from a virus landing on a cell (at 10 m/s; scaled by impact speed).")]
+    public float landSignal = 2f;
 
     [Header("Antibodies")]
     [Min(0)] public int ambientCount = 24;
@@ -45,8 +51,14 @@ public class ImmuneSystem : MonoBehaviour
     [Min(0.1f)] public float antibodySize = 1.1f;
     [Min(0f)] public float speed = 4f;
     [Min(1f), Tooltip("Speed multiplier going for a virus.")]
-    public float chaseBoost = 1.8f;
+    public float chaseBoost = 3.5f;
     [Min(0.1f)] public float acceleration = 6f;
+    [Min(0.1f), Tooltip("Acceleration going for a virus: they dart in.")]
+    public float chaseAcceleration = 25f;
+    [Min(0f), Tooltip("How far ahead (seconds, capped) a chasing antibody aims along the virus's motion.")]
+    public float chaseLead = 0.6f;
+    [Min(0f), Tooltip("Within this of the virus a chasing antibody stops keeping clear of cells and dives in.")]
+    public float diveDistance = 5f;
     [Min(1f), Tooltip("The signal field's pull fades past this distance from a cell.")]
     public float pullFalloff = 40f;
     [Min(0.01f), Tooltip("Field strength that makes an antibody head for it flat out.")]
@@ -54,12 +66,12 @@ public class ImmuneSystem : MonoBehaviour
     [Min(1f), Tooltip("Within this of a loud cell's activity they stop and patrol it.")]
     public float patrolRange = 14f;
     [Min(0.5f), Tooltip("Height they circle at over the activity.")]
-    public float patrolHeight = 4f;
+    public float patrolHeight = 3f;
     [Min(1f), Tooltip("How far a patrolling antibody sees a virus (a drifting one: a third of this).")]
-    public float sightRange = 10f;
+    public float sightRange = 14f;
     [Range(0f, 1f), Tooltip("Chance it goes for a virus it sees (else it ignores that one for a while).")]
-    public float stickChance = 0.6f;
-    [Min(0f)] public float ignoreTime = 4f;
+    public float stickChance = 0.85f;
+    [Min(0f)] public float ignoreTime = 2f;
     [Min(0f), Tooltip("How close it gets before it grabs on.")]
     public float stickDistance = 0.6f;
     [Min(0f), Tooltip("Distance kept from cells' surfaces.")]
@@ -77,18 +89,24 @@ public class ImmuneSystem : MonoBehaviour
     [Min(1f), Tooltip("Antibodies tick every frame within this of the camera, then every 2..4 frames further out (x2 off screen). Stuck ones always tick.")]
     public float tickDistance = 40f;
 
-    [Header("Fumes")]
-    [Min(0f), Tooltip("Puffs per second per unit of signal.")]
-    public float fumeRate = 0.35f;
-    [Range(64, 8192)] public int maxPuffs = 2048;
-    public Vector2 puffLife = new Vector2(3f, 5.5f);
-    public Vector2 puffSize = new Vector2(0.6f, 3.2f);
-    [Min(0f), Tooltip("Rise speed off the cell.")]
-    public float riseSpeed = 0.9f;
-    public Color fumeColor = new Color(0.78f, 0.95f, 0.32f, 0.35f);
-    public Color fumeCore = new Color(1f, 0.92f, 0.55f, 0.5f);
-    [Tooltip("Hidden/SignalFume. Found by name when empty (editor only: keep it assigned for builds).")]
-    public Shader fumeShader;
+    [Header("Holding on")]
+    [Min(0.01f), Tooltip("Seconds a stuck antibody takes to climb from where it touched onto its slot.")]
+    public float settleTime = 0.35f;
+    [Tooltip("Grip of each stuck antibody (random in this range), in seconds of full shaking.")]
+    public Vector2 gripHealth = new Vector2(2.5f, 6f);
+    [Min(0f), Tooltip("Grip won back per second while not being shaken.")]
+    public float regrip = 0.25f;
+    [Tooltip("Turning (degrees/s) that starts shaking antibodies loose, and what counts as full shaking.")]
+    public Vector2 shakeTurn = new Vector2(300f, 1000f);
+    [Tooltip("Acceleration (m/s^2) that starts shaking them loose, and what counts as full shaking.")]
+    public Vector2 shakeJolt = new Vector2(30f, 120f);
+    [Min(0f), Tooltip("Speed a shaken-off antibody is flung away at (on top of the body's).")]
+    public float flingSpeed = 5f;
+    [Min(0f), Tooltip("Seconds a shaken-off antibody leaves that virus alone.")]
+    public float shakenIgnore = 3f;
+
+    [Header("Warning motes")]
+    public AlarmMotes motes = new AlarmMotes();
 
     readonly List<Antibody> _antibodies = new List<Antibody>();
     Mesh _nearMesh, _farMesh;
@@ -104,21 +122,6 @@ public class ImmuneSystem : MonoBehaviour
     float _nextActivity, _lastActivity;
     readonly Dictionary<CellSignal, float> _owed = new Dictionary<CellSignal, float>();
 
-    struct Puff
-    {
-        public Vector3 position, velocity;
-        public float age, life, seed;
-    }
-    Puff[] _puffs;
-    int _puffCount, _puffNext;
-    Vector4[] _puffA, _puffB;
-    GraphicsBuffer _bufferA, _bufferB;
-    Material _fumeMat;
-    MaterialPropertyBlock _props;
-
-    static readonly int PuffAId = Shader.PropertyToID("_PuffA"), PuffBId = Shader.PropertyToID("_PuffB"),
-                        ColorId = Shader.PropertyToID("_FumeColor"), CoreId = Shader.PropertyToID("_FumeCore");
-
     static ImmuneSystem s_instance;
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
@@ -130,13 +133,47 @@ public class ImmuneSystem : MonoBehaviour
     }
 
     /// <summary>A gene delivered into a cell (the head view's injection): the right one takes it
-    /// over, any other sets it off.</summary>
-    public static void Deliver(Transform cell, Genome.Gene gene)
+    /// over, any other sets it off. True if the cell is ours now.</summary>
+    public static bool Deliver(Transform cell, Genome.Gene gene)
     {
         CellSignal c = CellSignal.For(cell);
-        if (!c || gene == null) return;
+        if (!c || gene == null) return false;
         ImmuneSystem s = s_instance;
+        bool wasOurs = c.Converted;
         c.Inject(gene, s ? s.controlGene : "INT-5", s ? s.wrongGeneBurst : 40f);
+        if (s && !c.Converted && !wasOurs) // the wrong gene: a big spurt of alarm from the wound
+        {
+            Vector3 centre = c.Centre(out float _);
+            Vector3 at = c.Hotspot;
+            s.motes.Emit(at, at - centre, Spurt(s.wrongGeneBurst * s.motes.perSignal, 1f));
+        }
+        return c.Converted;
+    }
+
+    /// <summary>Activity on a cell at 'at' (world, on its surface, 'normal' out of it): raises its
+    /// signal by 'signal' and spurts warning motes out of it there. No-op off cells and on ones you own.</summary>
+    public static void Alarm(Transform cell, Vector3 at, Vector3 normal, float signal)
+    {
+        ImmuneSystem s = s_instance;
+        if (!s || !s.isActiveAndEnabled || signal <= 0f) return;
+        CellSignal c = CellSignal.For(cell);
+        if (!c || c.Converted) return;
+        c.Raise(signal, at);
+        s.motes.Emit(at, normal, Spurt(signal * s.motes.perSignal, 1f));
+    }
+
+    /// <summary>A virus touched down on 'cell' at 'speed' (the LandAlarm effect).</summary>
+    public static void Landed(Transform cell, Vector3 at, Vector3 normal, float speed)
+    {
+        if (s_instance) Alarm(cell, at, normal, s_instance.landSignal * Mathf.Clamp(speed / 10f, 0.3f, 2f));
+    }
+
+    // 'amount' motes as whole spurts of 'size': rounded at random so the rate averages out.
+    static int Spurt(float amount, float size)
+    {
+        float n = amount / size;
+        int whole = (int)n;
+        return Mathf.RoundToInt((whole + (Random.value < n - whole ? 1 : 0)) * size);
     }
 
     /// <summary>Antibodies stuck on 'o' are destroyed with it (a white blood cell swallowing it).</summary>
@@ -157,18 +194,16 @@ public class ImmuneSystem : MonoBehaviour
 
     void OnDestroy()
     {
-        _bufferA?.Release();
-        _bufferB?.Release();
+        motes.Release();
         _instanceBuffer?.Release();
         if (_nearMesh) Destroy(_nearMesh);
         if (_farMesh) Destroy(_farMesh);
         if (_ownMaterial) Destroy(_ownMaterial);
-        if (_fumeMat) Destroy(_fumeMat);
     }
 
     void Update()
     {
-        float dt = Time.deltaTime, now = Time.time;
+        float now = Time.time;
 
         // Activity -> signals, ten times a second.
         if (now >= _nextActivity)
@@ -183,20 +218,53 @@ public class ImmuneSystem : MonoBehaviour
 
         _antibodies.RemoveAll(a => !a);
         TickAntibodies(now);
-        DrawAntibodies();
-
-        Fumes(dt);
+        Calling(Time.deltaTime);
     }
 
+    // After every creature has moved and turned this frame: stuck antibodies ride them, then draw.
+    void LateUpdate()
+    {
+        float dt = Time.deltaTime;
+        _antibodies.RemoveAll(a => !a); // again: some die after Update (eaten with their virus), and the draw reads each one's transform
+        AntibodyHold.UpdateAll(dt, shakeTurn, shakeJolt);
+        foreach (Antibody a in _antibodies)
+            if (a && a.Current == Antibody.State.Stuck) a.Follow(this, dt);
+        DrawAntibodies();
+        motes.Draw();
+    }
+
+    // Viruses on cells raise their signal; walking and drilling in spurt warning motes out from under
+    // them (sitting still is quiet to look at).
     void Activity(float dt)
     {
         foreach (Organism o in Organism.All)
         {
             if (!o.OnSurface) continue;
             CellSignal c = CellSignal.For(o.Surface);
-            if (!c) continue;
-            float rate = o.InState(o.grounded.focus) ? focusRate : o.Move.sqrMagnitude > 0.01f ? walkRate : idleRate;
-            c.Raise(rate * dt, o.transform.position);
+            if (!c || c.Converted) continue;
+            bool focus = o.InState(o.grounded.focus), moving = o.Move.sqrMagnitude > 0.01f;
+            float raised = (focus ? focusRate : moving ? walkRate : idleRate) * dt;
+            Vector3 at = o.transform.position - o.up * o.grounded.surface.nav.hoverHeight;
+            c.Raise(raised, at);
+            if (focus || moving) motes.Emit(at, o.up, Spurt(raised * motes.perSignal, focus ? 1f : 2f));
+        }
+    }
+
+    // Cells still calling keep letting a few motes out round their hotspot.
+    void Calling(float dt)
+    {
+        foreach (CellSignal c in CellSignal.All)
+        {
+            if (c.Signal < callThreshold) continue;
+            int n = c.Emit(c.Signal * motes.calling, dt);
+            if (n == 0) continue;
+            Vector3 centre = c.Centre(out float _);
+            Vector3 spot = c.Hotspot, up = (spot - centre).normalized;
+            for (int i = 0; i < n; i++)
+            {
+                Vector3 dir = Quaternion.AngleAxis(Random.Range(0f, 25f), Random.onUnitSphere) * up;
+                motes.Emit(centre + dir * (spot - centre).magnitude, dir, 1);
+            }
         }
     }
 
@@ -272,7 +340,8 @@ public class ImmuneSystem : MonoBehaviour
     }
 
     // Simulation LOD, like SimulationTicker: far and off-screen antibodies tick every few frames, staggered,
-    // with the skipped time handed back as dt (capped). Stuck ones ride a virus, so they tick every frame.
+    // with the skipped time handed back as dt (capped). Stuck ones tick every frame (a cheap check that
+    // the virus is still there); LateUpdate poses them.
     void TickAntibodies(float now)
     {
         Vector3 cam = SimulationTicker.CameraPosition;
@@ -361,97 +430,5 @@ public class ImmuneSystem : MonoBehaviour
         if (!shader) return null;
         _ownMaterial = new Material(shader) { name = "Antibody", hideFlags = HideFlags.DontSave };
         return _ownMaterial;
-    }
-
-    // ---------------- fumes ----------------
-
-    // Puffs rise off each signalling cell around its activity, as many as its signal, swelling and
-    // fading as they go; drawn as one batch of soft billboards.
-    void Fumes(float dt)
-    {
-        if (_puffs == null || _puffs.Length != maxPuffs)
-        {
-            _puffs = new Puff[maxPuffs];
-            _puffA = new Vector4[maxPuffs];
-            _puffB = new Vector4[maxPuffs];
-            _puffCount = _puffNext = 0;
-        }
-
-        foreach (CellSignal c in CellSignal.All)
-        {
-            if (c.Signal < 0.5f) continue;
-            int n = c.Emit(c.Signal * fumeRate, dt);
-            if (n == 0) continue;
-            Vector3 centre = c.Centre(out float _);
-            Vector3 spot = c.Hotspot - centre;
-            float reach = spot.magnitude;
-            if (reach < 1e-3f) continue;
-            for (int i = 0; i < n; i++)
-            {
-                // Somewhere round the hotspot on the surface, rising off it.
-                Vector3 dir = Quaternion.AngleAxis(Random.Range(0f, 35f), Random.onUnitSphere) * (spot / reach);
-                ref Puff p = ref _puffs[_puffNext];
-                p.position = centre + dir * reach;
-                p.velocity = dir * riseSpeed * Random.Range(0.6f, 1.3f) + Random.insideUnitSphere * 0.25f;
-                p.age = 0f;
-                p.life = Random.Range(puffLife.x, puffLife.y);
-                p.seed = Random.value;
-                _puffNext = (_puffNext + 1) % maxPuffs; // the oldest gives way
-                _puffCount = Mathf.Min(_puffCount + 1, maxPuffs);
-            }
-        }
-
-        int live = 0;
-        float t = Time.time;
-        for (int i = 0; i < _puffCount; i++)
-        {
-            ref Puff p = ref _puffs[i];
-            if (p.age >= p.life) continue;
-            p.age += dt;
-            // A lazy curl so the plume wavers.
-            p.velocity += new Vector3(Mathf.Sin(t * 0.7f + p.seed * 40f), Mathf.Sin(t * 0.5f + p.seed * 17f), Mathf.Cos(t * 0.6f + p.seed * 29f)) * (0.15f * dt);
-            p.velocity *= 1f - 0.25f * dt;
-            p.position += p.velocity * dt;
-            float k = p.age / p.life;
-            float alpha = Mathf.Clamp01(k / 0.15f) * (1f - k) * (1f - k);
-            _puffA[live] = new Vector4(p.position.x, p.position.y, p.position.z, Mathf.Lerp(puffSize.x, puffSize.y, Mathf.Sqrt(k)));
-            _puffB[live] = new Vector4(alpha, p.seed, k, 0f);
-            live++;
-        }
-        if (live == 0 || !Ready()) return;
-
-        _bufferA.SetData(_puffA, 0, 0, live);
-        _bufferB.SetData(_puffB, 0, 0, live);
-        _props.SetBuffer(PuffAId, _bufferA);
-        _props.SetBuffer(PuffBId, _bufferB);
-        _props.SetColor(ColorId, fumeColor);
-        _props.SetColor(CoreId, fumeCore);
-        var rp = new RenderParams(_fumeMat)
-        {
-            matProps = _props,
-            worldBounds = new Bounds(Vector3.zero, Vector3.one * 100000f),
-            shadowCastingMode = ShadowCastingMode.Off,
-            receiveShadows = false,
-        };
-        Graphics.RenderPrimitives(rp, MeshTopology.Triangles, live * 6);
-    }
-
-    bool Ready()
-    {
-        _props ??= new MaterialPropertyBlock(); // plain fields: remade after a play-mode script reload
-        if (_bufferA == null || _bufferA.count != maxPuffs)
-        {
-            _bufferA?.Release();
-            _bufferB?.Release();
-            _bufferA = new GraphicsBuffer(GraphicsBuffer.Target.Structured, maxPuffs, 16);
-            _bufferB = new GraphicsBuffer(GraphicsBuffer.Target.Structured, maxPuffs, 16);
-        }
-        if (!_fumeMat)
-        {
-            Shader s = fumeShader ? fumeShader : Shader.Find("Hidden/SignalFume");
-            if (!s) return false;
-            _fumeMat = new Material(s) { name = "Signal Fume", hideFlags = HideFlags.DontSave };
-        }
-        return true;
     }
 }

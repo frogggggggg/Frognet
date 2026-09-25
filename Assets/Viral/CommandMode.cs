@@ -22,7 +22,10 @@ using Job = CommandBoard.Job;
 ///   them in the world and on the board, and the link menu opens on it, every choice on show and read
 ///   top to bottom: the job across the top (attack / extract / move to, the one in force lit, greyed
 ///   where the targets don't allow it), split / one at a time across the middle, unlink at the bottom,
-///   "SQUAD > TASK" over it. Click a line or the squad's tag / node to open it again (the tag again:
+///   "SQUAD > TASK" over it. A line can also be dropped straight on a thing in the world (and dragged
+///   from a selected agent: the selected agents): what it's dropped on, and the dragged-from agents, are
+///   saved as groups on the way (the rest of the selection of its kind with it if it's selected; a group
+///   of exactly those already saved is reused). Click a line or the squad's tag / node to open it again (the tag again:
 ///   the squad's next link). Drag a task onto a task to chain them: squads done with the
 ///   first go on to the next (CommandBoard). Right click a line removes it.
 /// - The tasking web along the bottom: every group a node, laid out again on every change (flow left
@@ -82,7 +85,9 @@ public class CommandMode : MonoBehaviour
     float _nextScan;
 
     // The current press: where, and what it started on.
-    enum Press { None, World, Menu, Group, Close, Line } // Group: a board node or world tag; Close: a tag's X
+    // Group: a board node or world tag; Close: a tag's X; Agents: a selected agent in the world (a drag
+    // from it links the selected agents straight onto something).
+    enum Press { None, World, Menu, Group, Close, Line, Agents }
     Press _press;
     Vector2 _pressAt;
     bool _dragging;
@@ -272,14 +277,16 @@ public class CommandMode : MonoBehaviour
         Edge edge = default;
         if (radial == null && group == null)
             onLine = overBoard ? EdgeAt(_edges, at - BoardOrigin, out edge) : EdgeAt(_worldEdges, at, out edge);
-        _hovered = radial == null && !overBoard && tag == null && !onLine && _press != Press.Group ? Pick(mouse) : null;
+        _hovered = radial == null && !overBoard && tag == null && !onLine ? Pick(mouse) : null;
 
         if (m.leftButton.wasPressedThisFrame)
         {
             _pressAt = mouse;
             _dragging = false;
             _press = radial != null ? Press.Menu : onX ? Press.Close : group != null ? Press.Group
-                   : onLine ? Press.Line : overBoard ? Press.None : Press.World;
+                   : onLine ? Press.Line : overBoard ? Press.None
+                   : _hovered && _hovered.category == Selectable.Category.Agent && _selection.Contains(_hovered) ? Press.Agents
+                   : Press.World;
             _pressRadial = radial;
             _pressEntry = entry;
             _pressGroup = group;
@@ -287,7 +294,7 @@ public class CommandMode : MonoBehaviour
             _pressEdge = edge;
         }
         if (_press != Press.None && m.leftButton.isPressed && !_dragging && (mouse - _pressAt).magnitude > dragThreshold)
-            _dragging = _press == Press.World || _press == Press.Group;
+            _dragging = _press == Press.World || _press == Press.Group || _press == Press.Agents;
 
         if (m.leftButton.wasReleasedThisFrame)
         {
@@ -299,8 +306,12 @@ public class CommandMode : MonoBehaviour
                 case Press.Close:
                     if (onX && tag.group == _pressGroup) CommandBoard.Remove(_pressGroup);
                     break;
+                case Press.Agents:
+                    if (!_dragging) goto case Press.World;
+                    Drop(CommandBoard.FindOrSave(SelectedOf(Selectable.Category.Agent, null)), group);
+                    break;
                 case Press.Group:
-                    if (_dragging) LinkDrop(_pressGroup, group);
+                    if (_dragging) Drop(_pressGroup, group);
                     else if (group != null && group == _pressGroup)
                     {
                         // A squad: its link's menu (again: the next link's). A task: its members.
@@ -795,6 +806,31 @@ public class CommandMode : MonoBehaviour
         else if (from is CommandBoard.Task a && to is CommandBoard.Task b) CommandBoard.Chain(a, b);
     }
 
+    // A link line let go: on a group (tag or node) as LinkDrop; on a thing in the world, that thing is
+    // saved on the way (with the rest of the selection of its kind if it's selected; an existing group
+    // of exactly those is reused) and linked to: agents onto a target, a task onto an agent, a task
+    // onto a target chains them.
+    void Drop(CommandBoard.Group from, CommandBoard.Group onto)
+    {
+        if (from == null) return;
+        if (onto != null) { LinkDrop(from, onto); return; }
+        Selectable thing = _hovered;
+        if (!thing) return;
+        if (from is CommandBoard.Squad && thing.category == Selectable.Category.Agent) return; // agents onto agents
+        if (from.members.Contains(thing)) return;
+        List<Selectable> members = _selection.Contains(thing) ? SelectedOf(thing.category, thing.kind) : new List<Selectable> { thing };
+        LinkDrop(from, CommandBoard.FindOrSave(members));
+    }
+
+    // The selected things of a category (and kind, unless null).
+    List<Selectable> SelectedOf(Selectable.Category category, string kind)
+    {
+        var list = new List<Selectable>();
+        foreach (Selectable s in _selection)
+            if (s && s.category == category && (kind == null || s.kind == kind)) list.Add(s);
+        return list;
+    }
+
     void RemoveEdge(Edge e)
     {
         if (e.link != null) CommandBoard.Disconnect(e.link);
@@ -1088,18 +1124,27 @@ public class CommandMode : MonoBehaviour
             SetActive(_dots[i], false);
         }
 
-        // Linking: a line from the pressed group (its world tag if the drag started there) to the cursor.
+        // Linking: a line from the pressed group (its world tag if the drag started there), or from the
+        // middle of the selected agents, to the cursor; lit while it's over something it would link to.
         bool linking = false;
         Vector2 start = default;
+        Color color = selected;
         if (_press == Press.Group && _dragging)
         {
             Tag tag = _pressOnTag ? TagOf(_pressGroup) : null;
             Chip chip = _pressOnTag ? null : ChipOf(_pressGroup);
             if (tag != null && tag.shown) { start = tag.rect.anchoredPosition; linking = true; }
             else if (chip != null) { start = chip.rect.anchoredPosition + BoardOrigin; linking = true; }
+            color = _pressGroup.color;
         }
+        else if (_press == Press.Agents && _dragging)
+            linking = CentreOnCanvas(SelectedOf(Selectable.Category.Agent, null), 0f, out start);
         _dragLine.gameObject.SetActive(linking);
-        if (linking) Line(_dragLine, start, ToCanvas(mouse), 2f, _pressGroup.color);
+        if (!linking) return;
+        bool fromAgents = _press == Press.Agents || _pressGroup is CommandBoard.Squad;
+        bool onto = hover != null && hover != _pressGroup
+                    || _hovered && !(fromAgents && _hovered.category == Selectable.Category.Agent);
+        Line(_dragLine, start, ToCanvas(mouse), onto ? 3f : 2f, onto ? live : color);
     }
 
     // ---------------- world tags ----------------
@@ -1316,7 +1361,7 @@ public class CommandMode : MonoBehaviour
         Text legend = BoardText("Legend", new Vector2(-16f, -16f), 10, new Color(text.r, text.g, text.b, 0.45f), TextAnchor.MiddleRight);
         legend.text = "DRAG  AGENTS > TARGETS: LINK   TASK > TASK: THEN";
         _boardHint = BoardText("Hint", new Vector2(0f, 0f), 11, new Color(text.r, text.g, text.b, 0.5f), TextAnchor.MiddleCenter);
-        _boardHint.text = "SELECT AGENTS AND TARGETS, SAVE THEM FROM THE MENU";
+        _boardHint.text = "SELECT AGENTS, DRAG FROM THEM ONTO A TARGET";
 
         // Radial menus, over the board.
         _pick = NewRadial("Selection Menu");

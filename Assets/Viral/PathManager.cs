@@ -62,20 +62,25 @@ public class PathManager : MonoBehaviour
     public void Rescan()
     {
         lt.Clear(); lb.Clear(); ll.Clear(); lr.Clear(); lg.Clear();
-        var creatures = new Dictionary<Organism, List<Collider>>();
+        // Merged into one sphere each: a creature's colliders (oneSpherePerCreature), and a Surface's (a concave
+        // cell's collider is many convex pieces, Surface.Collider.cs).
+        var merged = new Dictionary<Component, List<Collider>>();
         foreach (var c in FindObjectsByType<Collider>(FindObjectsSortMode.None))
         {
             if (!c.enabled || c.isTrigger || (obstacleLayers.value & (1 << c.gameObject.layer)) == 0) continue;
             Organism o = c.GetComponentInParent<Organism>();
             if (o && ignoreOrganisms) continue;
-            if (o && oneSpherePerCreature)
+            Component owner = o ? (oneSpherePerCreature ? o : null) : c.GetComponentInParent<Surface>();
+            if (owner)
             {
-                if (!creatures.TryGetValue(o, out var list)) creatures.Add(o, list = new List<Collider>());
+                if (!merged.TryGetValue(owner, out var list)) merged.Add(owner, list = new List<Collider>());
                 list.Add(c);
             }
             else AddCollider(c);
         }
-        foreach (var kv in creatures) AddCreature(kv.Key, kv.Value);
+        foreach (var kv in merged)
+            if (kv.Value.Count == 1 && !(kv.Key is Organism)) AddCollider(kv.Value[0]);
+            else AddMerged(kv.Key.transform, kv.Value);
 
         n = lt.Count; tr = lt.ToArray(); rb = lb.ToArray(); loc = ll.ToArray(); rad = lr.ToArray(); grp = lg.ToArray();
         off = new Vector3[n]; wr = new float[n]; moving = new bool[n];
@@ -124,11 +129,11 @@ public class PathManager : MonoBehaviour
 
     static float MaxScale(Transform t) { var s = t.lossyScale; return Mathf.Max(Mathf.Abs(s.x), Mathf.Abs(s.y), Mathf.Abs(s.z)); }
 
-    // One sphere around all of a creature's colliders: their bounding spheres merged.
-    void AddCreature(Organism o, List<Collider> colliders)
+    // One sphere around all of a creature's (or a Surface's) colliders: their bounding spheres merged.
+    void AddMerged(Transform owner, List<Collider> colliders)
     {
         var body = colliders[0].attachedRigidbody;
-        Transform t = body ? body.transform : o.transform;
+        Transform t = body ? body.transform : owner;
 
         Vector3 centre = Vector3.zero;
         var spheres = new (Vector3 c, float r)[colliders.Count];

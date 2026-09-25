@@ -5,7 +5,7 @@ using UnityEngine;
 /// A cell's alarm: how loudly it's calling the immune system. Viral activity on it raises the
 /// signal (ImmuneSystem: a virus on it a little, a virus in focus on it -- drilling in -- a lot) and
 /// it dies away on its own. Loud cells pull antibodies toward them (<see cref="Pull"/>, a simple
-/// gravity field) and give off fumes.
+/// gravity field) and let out warning motes.
 ///
 /// A cell stops signalling for good once it's yours: inject the gene it answers to
 /// (<see cref="Inject"/>, from the head view's injection). The wrong gene sets it off instead.
@@ -31,7 +31,7 @@ public class CellSignal : MonoBehaviour, ICompletable
 
     Renderer _renderer;
     Vector3 _hotspot;
-    float _emit; // fumes owed (ImmuneSystem)
+    float _emit; // warning motes owed (ImmuneSystem)
 
     void OnEnable() => All.Add(this);
     void OnDisable() => All.Remove(this);
@@ -90,7 +90,7 @@ public class CellSignal : MonoBehaviour, ICompletable
         return b.center;
     }
 
-    /// <summary>Owed fumes (ImmuneSystem): adds 'rate * dt', returns how many whole puffs to emit.</summary>
+    /// <summary>Owed motes (ImmuneSystem): adds 'rate * dt', returns how many whole ones to let out.</summary>
     public int Emit(float rate, float dt)
     {
         _emit += rate * dt;

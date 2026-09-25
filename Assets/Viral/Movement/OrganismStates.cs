@@ -10,6 +10,8 @@ public static class Intent
     public const string Tether = "Tether";                 // hold: raise; quick tap slams
     public const string Drill = "Drill";                   // hold, value = progress 0-1
     public const string Focus = "Focus";                   // press to request, hold to stay
+    public const string Inject = "Inject";                 // press (in focus): the body pumps down onto the drill
+    public const string Seized = "Seized";                 // hold: something has hold of it (a white cell's arm); it can't land
 }
 
 public enum Phase { Update, Late, Fixed }
@@ -187,6 +189,7 @@ public class Landing : OrganismState
     [Tooltip("Seconds after touchdown before crawling.")] public float duration = 0.25f;
     public Ripple ripple = new Ripple();
     public ImpactSound sound = new ImpactSound();
+    public LandAlarm alarm = new LandAlarm();
     public SnapRotation snap = new SnapRotation();
     public override bool When() => Parent.TimeInState < duration;
 }
@@ -211,6 +214,7 @@ public class Focus : OrganismState
 {
     public Halt halt = new Halt();
     public SnapRotation snap = new SnapRotation();
+    public Pump pump = new Pump();
     public override bool When() => Held(Intent.Focus);
 }
 

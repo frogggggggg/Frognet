@@ -9,8 +9,12 @@ using UnityEngine;
 /// - Patrol: close to a signalling cell it circles over the activity there, looking around.
 /// - Chase: it saw a virus (only while patrolling a signalling cell, or very close) and chose to go
 ///   for it (ImmuneSystem.stickChance; if not, it ignores that one for a while).
-/// - Stuck: it reached the virus and holds on, arms first, riding along until the virus is gone.
-///   <see cref="StuckOn"/> counts them per virus (for effects to come).
+/// - Stuck: it reached the virus and holds on: it claims the free slot nearest where it touched (an
+///   AntibodyHold per creature: rings round the body, a second shell over the first when full), climbs
+///   onto it and hugs the body, riding the shown body (turns, lean, bob) until the virus is gone or
+///   shakes it off: every stuck antibody has a random grip that quick turns and jolts wear down
+///   (AntibodyHold.Shake); it loosens and lifts as it goes, then is flung off and leaves that virus alone
+///   for a while. <see cref="StuckOn"/> counts them per virus.
 /// Looks: ImmuneSystem draws every antibody in one instanced call (AntibodyMesh, Custom/Antibody, which
 /// wiggles it); this only keeps its <see cref="Wiggle"/> (seed, agitation by state, grip).
 /// </summary>
@@ -25,8 +29,14 @@ public class Antibody : MonoBehaviour
     float _seed, _nextLook, _spin;
     Organism _ignored;
     float _ignoredUntil;
-    Vector3 _stuckLocal;
-    Quaternion _stuckRotation;
+    Vector3 _preyLast, _preyVelocity; // chase: where the prey was, and how it's moving (smoothed)
+
+    // Stuck: the slot it holds, where it climbed on from (hold frame), its grip.
+    AntibodyHold _hold;
+    int _slot = -1;
+    Vector3 _fromLocal;
+    Quaternion _fromRotation;
+    float _settle, _health, _healthMax, _wrap;
 
     float _agitation = 0.5f, _grip;
 
@@ -34,13 +44,11 @@ public class Antibody : MonoBehaviour
     public float LastTick { get; set; }
 
     /// <summary>Per-instance shader data: seed, agitation (calm drifting .. frantic chasing), grip (arms
-    /// clamped while stuck).</summary>
-    public Vector4 Wiggle => new Vector4(_seed, _agitation, _grip, 0f);
-
-    static readonly Dictionary<Organism, int> s_stuck = new Dictionary<Organism, int>();
+    /// wrapped round the body while stuck), wrap (hinge-to-centre in antibody sizes: what it bends round).</summary>
+    public Vector4 Wiggle => new Vector4(_seed, _agitation, _grip, _wrap);
 
     /// <summary>How many antibodies are holding on to this creature.</summary>
-    public static int StuckOn(Organism o) => o && s_stuck.TryGetValue(o, out int n) ? n : 0;
+    public static int StuckOn(Organism o) => AntibodyHold.CountOn(o);
 
     void Awake() => _seed = Random.value * 100f;
 
@@ -48,9 +56,9 @@ public class Antibody : MonoBehaviour
 
     public void Tick(ImmuneSystem s, float dt, float now)
     {
-        float agitation = Current switch { State.Patrol => 0.8f, State.Chase => 1.6f, State.Stuck => 1.2f, _ => 0.5f };
+        float agitation = Current switch { State.Patrol => 0.8f, State.Chase => 1.6f, State.Stuck => 1f, _ => 0.5f };
         _agitation = Mathf.MoveTowards(_agitation, agitation, dt * 1.5f);
-        _grip = Mathf.MoveTowards(_grip, Current == State.Stuck ? 1f : 0f, dt * 4f);
+        if (Current != State.Stuck) _grip = Mathf.MoveTowards(_grip, 0f, dt * 4f);
 
         if (Current == State.Stuck)
         {
@@ -58,11 +66,8 @@ public class Antibody : MonoBehaviour
             {
                 Unstick();
                 Current = State.Drift;
-                return;
             }
-            Transform t = Prey.transform;
-            transform.SetPositionAndRotation(t.TransformPoint(_stuckLocal), t.rotation * _stuckRotation);
-            return;
+            return; // posed by Follow, after the creature has moved
         }
 
         Vector3 pos = transform.position;
@@ -73,7 +78,8 @@ public class Antibody : MonoBehaviour
         }
 
         Vector3 desire;
-        float speed = s.speed;
+        float speed = s.speed, accel = s.acceleration;
+        bool dive = false;
         if (Current == State.Chase)
         {
             if (!Prey || !Prey.isActiveAndEnabled || (Prey.transform.position - pos).magnitude > s.sightRange * 2f)
@@ -84,20 +90,28 @@ public class Antibody : MonoBehaviour
             }
             else
             {
-                Vector3 to = Prey.transform.position - pos;
-                if (to.magnitude <= Reach(Prey) + s.stickDistance)
+                Vector3 at = Prey.transform.position;
+                Vector3 to = at - pos;
+                float dist = to.magnitude;
+                if (dist <= Reach(Prey) + s.stickDistance)
                 {
                     Stick(s);
                     return;
                 }
-                desire = to.normalized;
+                // Aim where it's going (a crawling virus kinematic on a cell has no Rigidbody velocity: measured).
+                if (dt > 1e-4f) _preyVelocity = Vector3.Lerp(_preyVelocity, (at - _preyLast) / dt, 1f - Mathf.Exp(-6f * dt));
+                _preyLast = at;
                 speed *= s.chaseBoost;
+                float lead = Mathf.Min(s.chaseLead, dist / Mathf.Max(speed, 0.1f));
+                desire = (to + _preyVelocity * lead).normalized;
+                accel = s.chaseAcceleration;
+                dive = dist < s.diveDistance; // close: straight in, however near the cell
             }
         }
         else desire = Wander(s, pos, now);
 
-        desire += Avoid(s, pos);
-        _velocity = Vector3.MoveTowards(_velocity, Vector3.ClampMagnitude(desire, 1f) * speed, s.acceleration * dt);
+        if (!dive) desire += Avoid(s, pos);
+        _velocity = Vector3.MoveTowards(_velocity, Vector3.ClampMagnitude(desire, 1f) * speed, accel * dt);
         pos += _velocity * dt;
 
         // Tumble along, turning to face where it's going.
@@ -165,12 +179,10 @@ public class Antibody : MonoBehaviour
         {
             Current = State.Chase;
             Prey = seen;
+            _preyLast = seen.transform.position;
+            _preyVelocity = Vector3.zero;
         }
-        else
-        {
-            _ignored = seen;
-            _ignoredUntil = now + s.ignoreTime;
-        }
+        else Ignore(seen, now + s.ignoreTime);
     }
 
     // Keep out of the cells (their inner sphere; a little closer while chasing, to reach viruses on them).
@@ -189,28 +201,90 @@ public class Antibody : MonoBehaviour
         return push;
     }
 
-    // Grab on: arms toward the creature's middle, sat on its outside.
+    // Grab on: claim the free slot nearest where it touched and start climbing onto it. A creature
+    // already covered all round is left alone for a while.
     void Stick(ImmuneSystem s)
     {
-        Transform t = Prey.transform;
-        Vector3 out_ = transform.position - t.position;
-        out_ = out_.sqrMagnitude > 1e-6f ? out_.normalized : Random.onUnitSphere;
-        Vector3 at = t.position + out_ * (Reach(Prey) + s.antibodySize * 0.4f);
-        Quaternion rot = Quaternion.FromToRotation(Vector3.up, -out_) * Quaternion.AngleAxis(Random.value * 360f, Vector3.up);
-        _stuckLocal = t.InverseTransformPoint(at);
-        _stuckRotation = Quaternion.Inverse(t.rotation) * rot;
-        transform.SetPositionAndRotation(at, rot);
+        AntibodyHold hold = AntibodyHold.For(Prey, s.antibodySize);
+        int slot = hold.Claim(transform.position);
+        if (slot < 0)
+        {
+            Ignore(Prey, Time.time + s.ignoreTime);
+            Current = State.Drift;
+            Prey = null;
+            return;
+        }
+        _hold = hold;
+        _slot = slot;
+        _fromLocal = hold.ToLocal(transform.position);
+        _fromRotation = Quaternion.Inverse(hold.Frame.rotation) * transform.rotation;
+        _settle = 0f;
+        _wrap = hold.Wrap(slot);
+        _healthMax = _health = Random.Range(s.gripHealth.x, s.gripHealth.y);
         Current = State.Stuck;
         _velocity = Vector3.zero;
-        s_stuck[Prey] = StuckOn(Prey) + 1;
+    }
+
+    /// <summary>Stuck: ride the creature (ImmuneSystem.LateUpdate, once it has moved this frame), climb
+    /// onto the slot, and lose grip while it's shaken; flung off when the grip is gone.</summary>
+    public void Follow(ImmuneSystem s, float dt)
+    {
+        if (Current != State.Stuck || _hold == null || !_hold.Frame) return;
+        float shake = _hold.Shake;
+        // Worn down by shaking; held still it slowly takes hold again, so it takes a real effort.
+        _health = shake > 0.02f ? _health - shake * dt : Mathf.Min(_healthMax, _health + s.regrip * dt);
+        if (_health <= 0f)
+        {
+            ShakeOff(s);
+            return;
+        }
+
+        // Loosening: arms open, it lifts off and rattles as the grip goes (so you can see it working).
+        float hold = Mathf.Clamp01(_health / Mathf.Max(_healthMax, 1e-3f));
+        float shaken = Mathf.Min(shake, 1f);
+        _grip = Mathf.MoveTowards(_grip, Mathf.Lerp(0.35f, 1f, hold), dt * 4f);
+        _agitation = Mathf.Max(_agitation, 1f + 1.5f * shaken);
+        float size = transform.lossyScale.x, loose = 1f - hold;
+        float lift = size * loose * (0.3f * Mathf.Min(shake * 2f, 1f) + 0.06f * shaken * Mathf.Sin(Time.time * 40f + _seed));
+
+        _hold.Pose(_slot, lift, out Vector3 pos, out Quaternion rot);
+        if (_settle < 1f)
+        {
+            // Climb from where it touched round to its slot (an arc round the centre, not through it).
+            _settle = Mathf.Min(1f, _settle + dt / Mathf.Max(s.settleTime, 1e-3f));
+            float k = _settle * _settle * (3f - 2f * _settle);
+            pos = _hold.ToWorld(Vector3.Slerp(_fromLocal, _hold.SlotLocal(_slot, lift), k));
+            rot = Quaternion.Slerp(_hold.Frame.rotation * _fromRotation, rot, k);
+        }
+        transform.SetPositionAndRotation(pos, rot);
+    }
+
+    // Grip gone: flung off the way the body was going, and it leaves that creature be for a while.
+    void ShakeOff(ImmuneSystem s)
+    {
+        Organism prey = Prey;
+        Vector3 away = transform.position - (prey ? prey.transform.position : transform.position);
+        away = away.sqrMagnitude > 1e-6f ? away.normalized : Random.onUnitSphere;
+        Vector3 carried = _hold != null ? _hold.Velocity : Vector3.zero;
+        Unstick();
+        Current = State.Drift;
+        Prey = null;
+        Ignore(prey, Time.time + s.shakenIgnore);
+        _velocity = carried + (away + Random.insideUnitSphere * 0.4f) * s.flingSpeed;
+        _agitation = 2f;
+    }
+
+    void Ignore(Organism o, float until)
+    {
+        _ignored = o;
+        _ignoredUntil = until;
     }
 
     void Unstick()
     {
-        if (Current != State.Stuck || !Prey) return;
-        int n = StuckOn(Prey) - 1;
-        if (n > 0) s_stuck[Prey] = n;
-        else s_stuck.Remove(Prey);
+        _hold?.Release(_slot);
+        _hold = null;
+        _slot = -1; // _wrap stays: it unbends as the grip eases off
     }
 
     // How far a creature's outside is from its middle (its colliders, else a guess).

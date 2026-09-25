@@ -194,6 +194,19 @@ public static class TerminalUI
         return Sprite.Create(tex, new Rect(0, 0, S, S), new Vector2(0.5f, 0.5f), 100f);
     }
 
+    // A ring 'width' texels thick (of 128 across): hold-progress rings (Image.Type.Filled, Radial360).
+    public static Sprite RingSprite(float width)
+    {
+        const int S = 128;
+        const float c = S * 0.5f;
+        Texture2D tex = Paint(S, (x, y) =>
+        {
+            float r = Mathf.Sqrt((x - c) * (x - c) + (y - c) * (y - c));
+            return r < c - 1f && r > c - 1f - width ? 1f : 0f;
+        });
+        return Sprite.Create(tex, new Rect(0, 0, S, S), new Vector2(0.5f, 0.5f), 100f);
+    }
+
     // Input prompt outline: a circle that 9-slices into a pill for wide keys (SPACE, ESC).
     public static Sprite PillSprite()
     {

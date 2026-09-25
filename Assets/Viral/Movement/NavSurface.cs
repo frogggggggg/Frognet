@@ -55,13 +55,18 @@ public class NavSurface
 
     public bool Accepts(GameObject go) => (layers.value & (1 << go.layer)) != 0;
 
+    /// <summary>How far the last refused TryAttach's contact was from the walk mesh (world units; infinity = no graph).</summary>
+    public float LastMiss { get; private set; }
+
     public bool TryAttach(Vector3 point, Vector3 up, Surface on, Vector3 forward)
     {
+        LastMiss = float.PositiveInfinity;
         if (!on || on.Graph == null || AstarPath.active == null) return false;
 
         NN.graphMask = on.Mask; // every graph sits at the origin of its own space: only ask this one
         NNInfo hit = AstarPath.active.GetNearest(on.ToGraph(point), NN);
-        if (hit.node == null || Vector3.Distance(point, on.ToWorld(hit.position)) > snapDistance)
+        if (hit.node != null) LastMiss = Vector3.Distance(point, on.ToWorld(hit.position));
+        if (hit.node == null || LastMiss > snapDistance)
             return false; // GetNearest always finds something; distance decides
 
         Surface = on;
@@ -91,12 +96,45 @@ public class NavSurface
         // one it points off the new face, into the air: the step projected back to where we stood, so we
         // never walked, so the roll never wore off: stuck on every cube edge. Step along the real face.
         Vector3 up = SurfaceNormal;
-        Vector3 ahead = Vector3.ProjectOnPlane(Quaternion.FromToRotation(Normal, up) * Heading, up);
-        if (ahead.sqrMagnitude < 1e-8f) ahead = Heading;
-        Vector3 from = ToWorld(_pos);
-        ahead = ahead.normalized * distance;
+        Vector3 dir = Vector3.ProjectOnPlane(Quaternion.FromToRotation(Normal, up) * Heading, up);
+        dir = dir.sqrMagnitude > 1e-8f ? dir.normalized : Heading;
 
-        // Straight ahead first: on a flat or round surface it projects back to the same step.
+        // Walk on the facets themselves: the heading (tangent to the smooth surface) is turned onto the facet
+        // we're on and stepped in its plane, in steps no longer than the facet, carried along the smooth
+        // normal from one to the next. A step along the smooth tangent left the facet's plane and snapping it
+        // back pulled it sideways, a different way on every facet: walking along a curved rim zig-zagged.
+        for (int i = 0; i < MaxSubsteps && distance > 1e-5f; i++)
+        {
+            if (!(_node is TriangleMeshNode tri)) return false;
+            Vector3 face = FaceNormal(tri);
+            face = face.sqrMagnitude > 1e-12f ? face.normalized * _side : up;
+            Vector3 ahead = Vector3.ProjectOnPlane(Quaternion.FromToRotation(up, face) * dir, face);
+            ahead = ahead.sqrMagnitude > 1e-8f ? ahead.normalized : dir;
+
+            float step = i == MaxSubsteps - 1 ? distance : Mathf.Min(distance, 0.5f * ShortestEdge(tri));
+            if (!Step(ahead * step, face, out float m)) return moved > 0f;
+            moved += m;
+            distance -= step;
+            if (distance <= 1e-5f) break;
+
+            Smooth(out Vector3 next); // the smooth normal here, to carry the heading on (parallel transport)
+            dir = Vector3.ProjectOnPlane(Quaternion.FromToRotation(up, next) * dir, next).normalized;
+            up = next;
+        }
+        _walked += moved;
+        return true;
+    }
+
+    const int MaxSubsteps = 4;
+
+    // One step along 'ahead' (in the facet's plane). False = no graph.
+    bool Step(Vector3 ahead, Vector3 face, out float moved)
+    {
+        moved = 0f;
+        float distance = ahead.magnitude;
+        Vector3 from = ToWorld(_pos);
+
+        // Straight ahead first: inside the facet it lands exactly there.
         NNInfo hit = AstarPath.active.GetNearest(ToGraph(from + ahead), NN);
         if (hit.node == null) return false;
         float d = Vector3.Distance(from, ToWorld(hit.position));
@@ -105,10 +143,9 @@ public class NavSurface
         // around the corner is nearest (straight ahead is equally near both and sticks),
         // or up a wall at a concave one. Down is the face's own normal: the smoothed one
         // leans off the facet and would push sideways. Only here, never on open ground.
-        // (0.75: a step along the smoothed tangent already projects a little short on a facet.)
         if (d < distance * 0.75f)
         {
-            Vector3 down = (_node is TriangleMeshNode tri ? FaceNormal(tri).normalized * _side : Normal) * -distance;
+            Vector3 down = face * -distance;
             for (int side = 0; side < 2; side++)
             {
                 NNInfo alt = AstarPath.active.GetNearest(ToGraph(from + ahead + (side == 0 ? down : -down)), NN);
@@ -118,11 +155,16 @@ public class NavSurface
             }
         }
 
-        moved = Vector3.Distance(from, ToWorld(hit.position)); // through the current transform: cell motion isn't counted
-        _walked += moved;
+        moved = d; // through the current transform: cell motion isn't counted
         _pos = hit.position;
         _node = hit.node;
         return true;
+    }
+
+    float ShortestEdge(TriangleMeshNode tri)
+    {
+        Vector3 a = ToWorld((Vector3)tri.GetVertex(0)), b = ToWorld((Vector3)tri.GetVertex(1)), c = ToWorld((Vector3)tri.GetVertex(2));
+        return Mathf.Sqrt(Mathf.Min((b - a).sqrMagnitude, Mathf.Min((c - b).sqrMagnitude, (a - c).sqrMagnitude)));
     }
 
     /// <summary>World pose for the current frame, riding the cell's current transform.</summary>
@@ -192,7 +234,9 @@ public class NavSurface
         Vector3 pb = FromCorner(_pos, b, cb, out Vector3 nb);
         Vector3 pc = FromCorner(_pos, c, cc, out Vector3 nc);
 
-        Vector3 smoothed = Surface.ToWorldNormal(w.x * na + w.y * nb + w.z * nc);
+        // The arcs' own normals only meet at the triangle's edges (a new turn rate per triangle: a sway): the
+        // distance-blended one turns smoothly across them.
+        Vector3 smoothed = Surface.ToWorldNormal(Surface.SmoothNormal(tri, _pos, out Vector3 blended) ? blended : w.x * na + w.y * nb + w.z * nc);
         if (smoothed.sqrMagnitude > 1e-8f) normal = smoothed * _side;
         return w.x * pa + w.y * pb + w.z * pc;
     }

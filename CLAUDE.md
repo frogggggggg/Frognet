@@ -39,8 +39,12 @@ Unity is usually open on this project, so a second Editor instance can't be laun
   and the same file list. **Leave out `Assets/Command.cs`, `Entity.cs` and `Map.cs`**
   (old project, types missing outside Unity): their type-lookup errors stop the compiler before flow
   analysis, which hid a real CS0165 (unassigned variable) in new code. Expect 0 errors.
-- **Shaders:** can't be compiled outside Unity. Unity imports on focus and writes errors to
-  `~/AppData/Local/Unity/Editor/Editor.log`; grep it for `Shader error`. That log is also the
+- **Shaders:** `python Tools/hlslc.py` compiles them outside Unity with Windows' `d3dcompiler_47.dll`
+  (D3DCompile, includes inlined from `Library/PackageCache`, Unity's backwards-compatibility flag, D3D11 defines):
+  `shader <file.shader> <pass name> <vs> <ps> [KEYWORD...]` (the HLSLINCLUDE + that pass, default variant plus the
+  keywords given) or `compute <file.compute> <kernel>`. Real fxc errors, including clashes with SRP names (it caught
+  a `Sq` that SRP's Common.hlsl already defines). Run it on every pass after shader edits. Unity also imports on focus
+  and writes errors to `~/AppData/Local/Unity/Editor/Editor.log`; grep it for `Shader error`. That log is also the
   fastest way to find runtime exceptions the user hasn't mentioned.
 - Nothing here has been run in play mode by Claude. Say so when reporting.
 - **Sounds:** synthesized clips can be rendered to WAV outside Unity: compile the scripts as above
@@ -76,6 +80,8 @@ Knows nothing about input, cameras, UI.
   rotation. `Rotate` eases an un-leaned `_base` so the lean never feeds back into control; the
   lean is updated once per Tick (SnapRotation calls Rotate again in LateTick). VirusMovement
   feeds it `VirusRope.LeanRequest` (mouth dir -> rope 2 m along) while reeling/paying out/slurping.
+- `Restrain(rotation, maxAngle)` / `ClearRestraint()`: something holds the body (a white cell's bite); whatever
+  the states aim for (`TargetRotation`), the rotation used stays within maxAngle of it (`Wanted`).
 - `keepUpright`, `Face(dir)`, `Rotate(t)`, `SetExternalRotation(bool)` (rope torque),
   `BodyOffset` (visual lift along `up`).
 - **Rotation gotcha:** if `body` is empty *or* the Rigidbody's own object, rotation goes
@@ -92,12 +98,14 @@ Effects time themselves with absolute `Time.time`, so they survive being ticked 
 ```
 Flying    (leadAxis) -> Still [Coast], Moving [Thrust], Charging [Burst]
 Grounded  [Kinematic, Ground] -> Still, Moving [Crawl], Landing [Ripple, SnapRotation],
-          Tethering [TapSlam], Drilling [HoldSlam], Focus [Halt, SnapRotation]
+          Tethering [TapSlam], Drilling [HoldSlam], Focus [Halt, SnapRotation, Pump]
 Jumping   [Launch]   (outranks Grounded)
 ```
 `TapSlam` (rope tap) and `HoldSlam` (focus inject) each ripple the cell through
 `Ground.RippleCell(speed)`; their `rippleSpeed` is scaled against the cell's
-`referenceSpeed` (100 in this scene, so defaults are 60 / 150).
+`referenceSpeed` (100 in this scene, so defaults are 60 / 150). `Pump` (focus, `Intent.Inject` press): the body
+draws up and slams down like a plunger (`ImpactDelay` = lift + slam), with the landing thump at the bottom
+(`soundSpeed`); GenomeView's injection presses it.
 
 ### SimulationTicker (`Movement/SimulationTicker.cs`)
 One loop for every Organism (+ brain) and SpiderLegWalker instead of thousands of Unity
@@ -109,7 +117,11 @@ use it instead of `Camera.main` in anything per-object. Profiler markers: `Simul
 
 ### VirusMovement (`Movement/VirusMovement.cs`)
 Player controller only: input -> intent, camera modes, WorldButton, focus, rope mouse control,
-rope-base hover/click in focus mode. Ground movement is screen-relative using the camera's
+rope-base hover/click in focus mode. Keys: **F** held on a surface = the WorldButton's hold (its input action
+`Player/Inject` in `virus.inputactions`, bound to F) -> focus; F pressed in focus leaves it (`focusKey`); **E**
+toggles the head view (`inventoryKey`, on press). `WorldButton` is a screen-space terminal prompt (keycap with the
+bound key, filling ring, dial, typed "HOLD // INJECT" tag) over `followPoint`; `Show/Hide` fade it (`IsVisible`,
+not `enabled`); a new hold needs a fresh press. The scene's old world-space visual (`visualRoot`) is switched off. Ground movement is screen-relative using the camera's
 right projected on the surface (NOT `Cross(normal, forward)`, which flips on the far side).
 
 ### VirusAI (`Movement/VirusAI.cs`)
@@ -182,7 +194,10 @@ with no per-object code. Legs/rope/body opt in with `_FollowRipples`.
 
 ### Rope (`VirusRope.cs`)
 XPBD rope, no input of its own. `PlaceAnchor()`, `reel`, `feed`. Breaks on *sustained* tension
-(`breakDelay`), not spikes. Either anchored end is a "base": hover grows it, clicking toggles
+(`breakDelay`), not spikes. Either anchored end is a "base" (in focus mode it shows a glowing core,
+`DrawBaseCores`, drawn by `Custom/ResourceCore` like a chunk's so it reads as clickable: `TerminalUI` cyan,
+acid green straightened, blood red cauterizing; hidden behind cells by a raycast per base every 0.15 s;
+`baseCoreSize`, `ShowBaseCores` set by VirusMovement): hover grows it, clicking toggles
 **straighten** for the whole rope. Straight with two bases = a rigid rod of the rope's own
 length, welded square to both surfaces (`rodStrength`), which moves and turns the planets to
 fit and doesn't snap; rods sharing bodies settle as a network. Rope forces treat the body the
@@ -233,6 +248,8 @@ body radii): keep it out of the solver.
 Modular rig (behaviour list per mode). Added: **transition momentum** — on a mode switch the
 pose difference decays on a damped spring seeded with the camera's own velocity, so it carries
 its motion instead of easing from a standstill (`transitionMomentum`, `transitionDamping`).
+`UniversalCamera.StandIn(root, standIn)`: a camera whose target is `root` or under it follows `standIn` instead
+(WhiteBloodCells pins a swallowed creature's camera at the cell's surface, never deeper, so it doesn't sink in and clip).
 `SpeedFOV` measures speed against the movement's top speed, but that reference only rises as fast
 as the body really speeds up (a Burst raised it instantly and the FOV dipped). `UniversalCamera.PointerCaptured` lets gameplay own the pointer (rope bases) so drag-to-look
 ignores that click.
@@ -245,11 +262,28 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
   built on first use in mesh-local space (scaled up to 100 units for A*'s mm precision) and
   shared by every Surface with that mesh; queries go through the renderer's Transform, so
   any position/rotation/scale works without a rebuild. Creates the AstarPath if missing.
-  Meshes need Read/Write for builds. Replaced `NavmeshGraphBinder` (same script GUID).
+  Meshes need Read/Write (even in the editor: without it A* reads no triangles and nothing lands). Replaced `NavmeshGraphBinder` (same script GUID).
   Per corner it stores a smoothed normal + directional curvature (least-squares fit, so a
-  cylinder is straight along its axis). On Awake it swaps
+  cylinder is straight along its axis). The crawler's *normal* is `SmoothNormal`: those corner normals blended
+  by distance (a (1 - d²/r²)² bump per vertex per smoothing group, r = its mean edge; ~15 samples per triangle,
+  listed once per graph), not by barycentric weights, which turn at a new rate on every triangle: on the red cell
+  that was a ±1.5° sway per triangle between dimple and rim, and the camera copied it (±0.3° now, measured
+  offline on the mesh). On Awake it swaps
   the MeshFilter to a shared copy with a crack-free displacement direction in UV3 (angle-
   weighted average of all faces at a position); `BloodCellTriplanar` displaces along it.
+  **Concave collider** (`Surface.Collider.cs`): a dynamic body only takes convex MeshColliders, and the red blood
+  cell's hull lidded both dimples (legs raycast colliders, so they stood on the lid above the body, and the body
+  sank into it and shoved its own cell = the jitter). On Awake a convex MeshCollider over a concave mesh is replaced
+  by child convex pieces: the solid cut into boxes, the worst box halved (longest side) until each piece's hull sits
+  within `colliderTolerance` (x mesh size) of the surface, measured along the surface normal via the support
+  function (an incremental hull broke on the cut faces' coplanar points; "every point behind every face plane"
+  over-measured ~4x), capped at `colliderPieces` (48). Built once per mesh (~0.1 s), shared + pre-baked; logs the
+  count. The cell mesh (bloodcell.blend "Icosphere", 1280 tris): 48 pieces, lid 15.8% -> 1.6% of its size
+  (checked in Blender against the real mesh). `Surface.Colliders` = its solid colliders; `ClosestPoint` over them
+  (VirusAI uses it). Anything iterating a cell's colliders must treat pieces as one body: PathManager merges them
+  into one sphere, WhiteBloodCell takes one push per body and one pick per Surface; query buffers were raised
+  (legs 16 hits, rope 256 overlaps / 16 hits, WBC 256). **Ground ignores collisions with the surface it's attached
+  to** (`Physics.IgnoreCollision`, restored on leaving): the body follows the walk mesh, never the collider.
 - `NavSurface.cs`: attachment to a Surface's graph (graph space). Works on any shape:
   lifts along per-corner arcs by directional curvature (round on spheres, straight along
   cylinders, flat on flat faces; groups split
@@ -261,7 +295,10 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
   rotates the heading from the shown frame onto the real face before stepping: stepping along the
   shown tangent just past an edge pointed off the new face, projected back to the same spot, walked
   0, so the roll never wore off and crawlers stuck on every cube edge. `ToShown` maps a real-face
-  direction into the shown frame (what `Move` should be in).
+  direction into the shown frame (what `Move` should be in). Steps are taken **in the facet's plane**: the smooth
+  heading is turned onto the facet (FromTo smooth normal -> face normal), sub-stepped at <= half its shortest edge
+  (max 4), carried on by the smooth normal between sub-steps. Stepping along the smooth tangent left the facet and
+  GetNearest pulled it back sideways, differently per facet: walking along the low-poly rim zig-zagged.
 - `SpawnManager.cs` (Assets/): fills a ball around itself with weighted prefabs, no overlaps. Sizes vary:
   `sizeRange` (0.5-2.5x the prefab's scale; replaced `scaleRange`, which the scene had at 1-1) skewed small
   (`sizeSkew`), Rigidbody mass x size^3 (`massWithSize`).
@@ -300,27 +337,62 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
   plain bounds box, and the bubble's head circle didn't meet the real ball).
   Growing only the crystal (a shader-side attempt) changed nothing visible.
   In focus mode a click on the head (VirusMovement: `headPickRadius` or its on-screen size; a rope base
-  wins) opens `GenomeView`: a tube grows out of the ball on screen and swells into a big sphere off to one
-  side (`sideAngle` off the virus's up, the side that fits the screen, never over the virus; `rise`,
-  `neckWidth`), flaring out of the head and pinched into the sphere like a drop. One outline runs round
-  head + tube + sphere; on the head only a ring at its edge is filled, the real ball shows through. Focus mode's own colours (the sweep material's `_FillColor` / `_HighlightColor`, read live:
-  `matchFocusSweep`). One full-screen UI image, `Hidden/GenomeBubble` (head circle + tube capsule + sphere
-  smooth-unioned as a distance field in canvas units). Inside, the DNA is a flat, simple, saturated 2D
-  diagram (`Hidden/GenomeStrand`, vertex colours, ortho, command buffer into an MSAA render texture): each
-  gene a double helix running from a dot on the outline in toward the middle like a spoke (`strandLength`;
-  spaced round from the tube's mouth so it falls midway between two),
-  A-T / G-C rungs colour-coded, the code label just outside the outline. Still (no scrolling); pointing at
-  one makes it jiggle (`jiggle`, a damped wave out from the outline). Strands grow in as it opens; picking
-  is by angle. One `Helix` builder draws a strand along any spine (straight spoke, or a path).
-  **Injection test:** clicking a strand selects it and slides it along a canvas path (its spoke, across to
-  the tube's mouth, down the tube into the ball, through the body, down `InjectionDrill.Span` to the tip)
-  like a rope pulled through, shrinking and funnelling toward the tube's width (`injectDuration`; `headShare` of it to reach the head, the
-  rest down the virus and drill, the strand shrunk to fit that leg -- by distance alone that leg was a few
-  pixels and flashed by, so it seemed to vanish; never under
-  `minInjectWidth` px: the tube can be a few pixels, and sized to it exactly the strand vanished), drawn like the sphere's strands (command buffer into a screen-sized render texture, a full-screen RawImage; a
-  `UIShape` UI mesh never showed, removed); at the drill tip `InjectionDrill.Deliver()` ripples the
-  cell and `Genome.Injected` fires; then the strand grows back in the sphere. Escape or a click elsewhere closes it (plays
-  backwards); the rope menu and it close each other.
+  wins), or E anywhere, opens `GenomeView`: a tube grows out of the ball on screen and swells into a big sphere
+  off to one side (`sideAngle` off the virus's up, the side that fits the screen, picked **once per opening**
+  and then kept as an offset from the head, eased (`follow`): it used to be re-aimed every frame and swung
+  left/right as the virus turned; `rise`, `neckWidth`), flaring out of the head and pinched into the sphere like
+  a drop. One outline runs round head + tube + sphere; on the head only a ring at its edge is filled, the real
+  ball shows through. Focus mode's own colours (the sweep material's `_FillColor` / `_HighlightColor`, read
+  live: `matchFocusSweep`). One full-screen UI image, `Hidden/GenomeBubble` (head circle + tube capsule +
+  sphere smooth-unioned as a distance field in canvas units). **Mounts:** round the inside of the outline sit
+  the head's mounts, `VirusInventory.ring` (DNA slots = a Genome gene or empty, store slots = a
+  `VirusInventory.slots` bar; they share `maxSlots`), evenly spaced from the tube's mouth (midway between two),
+  each on a white base (outline colour) growing in from the outline. DNA = a flat saturated double helix
+  running in like a spoke (`strandLength`), A-T / G-C rungs colour-coded; stores = an outlined bar filling from
+  the base inward in the substance's colour (lip at the front, quarter ticks, flashes as it fills); empty DNA
+  = dashes. Labels just outside the outline. All one mesh (`Hidden/GenomeStrand`, vertex colours with the
+  dim / highlight baked in, ortho, command buffer into an MSAA render texture). Drag a mount round the ring
+  (`dragThreshold`): the others reflow live (`reflowTime`), it snaps into its slot on release. A free mount
+  shows as "+" (LMB: add a store slot, RMB: a DNA slot); RMB on an empty mount frees it. Pointing at one
+  jiggles it; picking is by angle. One `Helix` builder draws a strand along any spine (straight spoke, or a path).
+  **Injection:** clicking a strand selects it and slides it along a canvas path (its spoke, across to the
+  tube's mouth, down the tube into the ball, through the body, down `InjectionDrill.Span` to the tip) like a
+  rope pulled through, shrinking and funnelling toward the tube's width (never under `minInjectWidth` px).
+  Legs, each eased (expo in-out): into the head (`toHeadTime`), on to the top of the drill (`toDrillTime`), a
+  creeping pause there (`drillPause`), then `Intent.Inject` makes the virus pump (Focus's `Pump`; the strand is
+  pulled back a little as the body rises). The drill often projects to a few pixels (it points into the planet,
+  away from the focus camera), so the strand keeps a set length for that leg (sized to the drill it became a dot
+  and the shot was invisible) and at the slam (a white pulse ring at the drill's top) it shoots down the drill (cubic out, `zoomTime`,
+  a fading streak behind it, thinning toward the tip); at the
+  tip (a burst of rings in the gene's colour) `InjectionDrill.Deliver()` ripples the cell and `Genome.Injected` fires; the gene is **used up** (one use for now: `Genome.Consume` + `VirusInventory.GeneRemoved`, its mount stays an empty DNA slot for crafting a new one).
+  **Synthesizer** (`Crafting.cs` on the virus, made on demand; recipes = cost substances by name -> a gene, or a
+  substance when `liquid`): a hub in the sphere's middle (`hubSize`, dial turning) with a nozzle reaching flush to the
+  mounts' inner ends. Click the hub: the mounts pull back toward the outline (`menuStrands`, via `Len`: every
+  strand / bar / pick / flow length goes through it) and the recipes pop out in rings filling the sphere (`optionSize`,
+  shrunk to fit, then paged with the mouse wheel, page dots in the hub); each disc shows its `Crafting.Glyph` (a flat
+  icon per recipe, told apart by shape, drawn by `DrawGlyph`) and cost pips lit for what you have;
+  pointing at one shows on the bars what it would use (`Crafting.Plan`: last slot first) as stripes crawling toward the
+  hub, boxed green (can make) / red (can't), and what it's short of as red dashes past the fill of that substance's
+  store (`_short`; a pattern, not a shade: a dimmer fill read as more level). Can't make = dark disc, grey, red slash,
+  missing cost pips as hollow red rings; can = disc tinted its colour with a breathing green ring. Short or no
+  free DNA slot (a free mount becomes one) = can't. Making it: the nozzle turns to each store (`turnTime`), sucks its share
+  (`suckTime`, `VirusInventory.TakeFrom` as it goes, drops down the spoke, the hub fills with the mix), turns to the
+  output and pushes the strand out into it (`dispenseTime`, `Look.dispenseAt`, eased in and out; after a job the
+  nozzle's idle drift starts where it stopped: it used to whip to its old idle angle as the strand landed). Shut mid-way: finished at once
+  (`FinishCraft`). No mount can be freed (RMB) while a job runs.
+  **Extraction flow:** while a chunk is extracted into this virus (`ResourceField.Extracting`), drops of its
+  colour flow from the chunk on screen into the head, up the tube, across to its store's bar
+  (`VirusInventory.SlotFor`) and down into the fill (`flowSpeed`, `flowSpacing`, `flowSize`). Chunk -> head is *timed*
+  (`crossSpeed`, clamped to `crossTime`) on a Hermite curve (leaves slowly, rushes, meets `flowSpeed` at the head), then
+  paced; drops are placed by age, so a new stream's front grows out on the same curve (timed from the click). No
+  sideways wobble (the user found it springy). Drops share a trunk (chunk -> head -> tube -> into the sphere) and pick their
+  branch as they pass its end: the store current *then* (`Stream.targets` / `since`), so when a bar fills, drops
+  already past the branch still land in it while new ones turn off into the next bar's mouth (swinging the line
+  over looked like a spill). Bars show their amount delayed by the flow's travel time (`Look.delay`, a
+  (time, amount) history), so they only rise as drops land; labels read the delayed value. Travelling
+  strand + flows share one canvas-sized overlay texture (only while something moves; a `UIShape` UI mesh never
+  showed). Starting an extraction opens the view. Escape or a click elsewhere closes it (plays backwards); the
+  rope menu and it close each other.
 - **Command mode (RTS)**: `CommandMode.cs` + `CommandBoard.cs` + `Selectable.cs`. Q toggles
   (`toggleKey`; Escape leaves): `UniversalCamera.FreeCursor` unlocks/shows the cursor whatever the camera mode says (look
   that needs a locked cursor stops), `CommandMode.Active` makes VirusMovement drop its mouse handling (keys
@@ -340,6 +412,10 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
   the middle of *all* its members, off-screen ones included, kept on screen; overlapping tags pushed apart): click
   selects the members, X or RMB removes the group. Clicking a *squad's* tag (or node) opens its link menu instead (again: its
   next link; no links: a hint to drag it onto targets).
+  **Drag straight onto things:** a link line can be dropped on anything in the world, and dragged from a *selected*
+  agent (`Press.Agents`; a press on anything else still box-selects): the dropped-on thing (with the rest of the
+  selection of its kind, if it's selected) and the dragged agents are saved on the way (`CommandBoard.FindOrSave`
+  reuses a group with exactly those members). Squad -> target links, task -> agent links, task -> target chains.
   **Links** (`CommandBoard.Link`: squad, task, `job`, `oneAtATime`): drag a squad onto a task (tags or board
   nodes, either way round) -> `Connect` (default job: extract, else attack, else move) and the **link menu**
   (`_linkMenu`, compact radial laid out in rows (`LinkSlot`), read top to bottom like a form,
@@ -363,7 +439,8 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
   (chase the player). All hit-testing is in screen space in CommandMode, not the EventSystem.
 - **Immune system** (the game's idea: you never attack directly, so evasion and defence matter):
   `ImmuneSystem.cs` (manager, creates itself when the scene has Surfaces) + `CellSignal.cs` (per cell, added
-  on demand by `CellSignal.For(transform)`) + `Antibody.cs` + `SignalFume.shader`. Ten times a second every
+  on demand by `CellSignal.For(transform)`) + `Antibody.cs` + `AntibodyHold.cs` + `AlarmMotes.cs` /
+  `AlarmMote.shader`. Ten times a second every
   `Organism.All` on a cell raises that cell's signal (`idleRate` / `walkRate` / `focusRate`, around a moving
   `Hotspot`); signals halve every `halfLife`. `CellSignal.Pull` = a simple gravity field toward loud cells
   (strength / (1 + (d/falloff)^2)). Antibodies (command-mode targets "Antibodies", ticked in one loop by the
@@ -372,16 +449,40 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
   hinge blob; Worley beads displaced along the normal; vertex colours blue / magenta folds / teal patches,
   alpha = fold occlusion; uv0 = part + hinge-to-tip) at two details (near beaded, far ~500 verts,
   `lodDistance`). `Custom/Antibody` wiggles it in every pass (arms flap/clap/bend/twist about the hinge,
-  stem sways, a wave crawls along the chains; grip closes the arms) and shades it glassy (wrap diffuse,
+  stem sways, a wave crawls along the chains; grip opens the arms nearly flat (`_HugOpen`), flops the stem
+  over (`_StemLean`), then `Wrap` bends the whole antibody round the virus's centre both ways (wiggle.w = hinge
+  to centre in antibody sizes, from `AntibodyHold.Wrap`) so the arms follow its curve; free flapping damped) and shades it glassy (wrap diffuse,
   back-light, rim). Drawn only by `ImmuneSystem.DrawAntibodies`: frustum + `drawDistance` culled, one
   `RenderMeshPrimitives` per LOD from one buffer (pose + `Antibody.Wiggle` = seed, agitation by state,
-  grip). Each antibody keeps a `forceRenderingOff` MeshRenderer with the far mesh only for Selectable's box.
+  grip, hug). Each antibody keeps a `forceRenderingOff` MeshRenderer with the far mesh only for Selectable's box.
   Behaviour: Drift along the pull + noise -> Patrol (circle over a
-  loud cell's hotspot) -> Chase a virus they see (`stickChance`, else ignore it a while) -> Stuck (ride at
-  a local offset, arms in; `Antibody.StuckOn(organism)` counts them, no effect yet). `ambientCount` wander
-  from the start; loud cells call more in from `arriveDistance` (`reinforceRate`, capped). Fumes: CPU
-  puffs (ring buffer) rising round each loud cell's hotspot, two GraphicsBuffers, one
-  `Graphics.RenderPrimitives` of billboards. A gene delivered by the head view's injection goes to
+  loud cell's hotspot) -> Chase a virus they see (`stickChance`, else ignore it a while; chase = `chaseBoost` x speed, 14 m/s, faster
+  than a crawl (8) but not a flight (30), darting (`chaseAcceleration`), aimed `chaseLead` s ahead along the
+  virus's measured motion, and within `diveDistance` they stop keeping clear of cells and dive in: slower
+  than a crawling virus they used to hover above it and only stick when it stopped) -> Stuck.
+  **Holding on** (`AntibodyHold`, one per creature with antibodies on it): slots in latitude rings round the
+  creature's *shown* body (`Organism.Shown`: the turned, leaned, lifted visual, so they ride its animation),
+  top down to 55° off its underside (the ground side), rings an antibody's width apart, slots round a ring an
+  arm span apart, alternate rings staggered, each lying arms-along-its-ring: no overlaps with each other or the
+  body; full -> a second / third shell over the first (else it gives up on that virus). A stuck antibody takes
+  the free slot nearest where it touched (so they spread round from the approach side) and climbs there
+  (`settleTime`). Posed in ImmuneSystem's LateUpdate (execution order 150, after the ticker) so they don't
+  trail a frame. **Shaking off:** the hold measures the shown body's turn rate and acceleration past
+  `shakeTurn` / `shakeJolt` thresholds (both low-passed ~0.1 s so jitter / single steps don't count; capped
+  1.5); each antibody has a random `gripHealth` (seconds of full shaking) that wears down, and slowly comes back
+  while not shaken (`regrip`). As it wears it loosens visibly (arms open, lifts, rattles), then is flung
+  off (`flingSpeed` + the body's velocity) and ignores that virus for `shakenIgnore`. `StuckOn` = the hold's
+  count. `ambientCount` wander
+  from the start; loud cells call more in from `arriveDistance` (`reinforceRate`, capped).
+  **Warning motes** (`AlarmMotes`, replaced the green fumes): small glowing amber motes spurting out of the cell
+  (a hormone / alarm) where a virus lands (`LandAlarm` effect on Landing -> `ImmuneSystem.Landed`,
+  `landSignal` x impact speed), walks, or drills in (`Activity`, `perSignal` motes per unit of signal raised;
+  sitting still is quiet), a big spurt for a wrong gene, and a trickle round a loud cell's hotspot while it
+  still calls (`calling`). `ImmuneSystem.Alarm(cell, point, normal, signal)` raises + emits: use it for new
+  noisy actions. GPU-animated: the CPU only writes new motes' birth data into a ring buffer (one upload per
+  frame); `Hidden/AlarmMote` moves (exponential spurt + drift + wander), stretches along motion, throbs and
+  fades them; one `RenderPrimitives`. Emission off screen / past `drawDistance` is dropped.
+  A gene delivered by the head view's injection goes to
   `ImmuneSystem.Deliver(drill.Cell, gene)`: `controlGene` (default INT-5, or the cell's own) converts the
   cell (silent for good), any other gene bursts its signal (`wrongGeneBurst`).
 - **Audio** (`Assets/Viral/Audio`): clips are built once at load into float buffers and shared.
@@ -473,6 +574,36 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
     `numpy` + `miniaudio`, samples in `samples/<instrument>/` next to it (download commands at the
     top of the script), and the output path as its argument. The user rejected generated "random
     sparse" piano phrases over a noise bed: they wanted "an actual good sounding background".
+  - `WhiteBloodCellAudio.cs` (creates itself on play) listens to WhiteBloodCells' events (`Noticed`, `Engulfing`,
+    `Gulped`, `TornFree`, `Merging` (+ inward speed), `Absorbed`, `Respawned`): tritone swell when one hunts the
+    player, deep gulp on the grab, small gulps while reeling, a "thwup" + rising bubbles + faint E6/B6 glint when you
+    tear free, a drop-into-a-pool plop + jelly wobble on merging (louder/lower the harder), a sinking wash + dark
+    tritone when absorbed, a rising wash + D6/A6 shimmer on respawn. Loops: the 2 nearest cells within
+    `presenceRange` churn (low surging brown noise, breath, deep blubs; louder hunting / holding, lower for bigger
+    cells), and a gripping cell adds a rubbery strain loop scaled by `WhiteBloodCell.Tension`. The user found some of these
+    obnoxious, so repeats are throttled: the hunt swell at most every `noticeCooldown` (12 s, and never twice in a row from
+    one cell), reeling gulps at most every `smallGulpGap` (2.2 s, mostly wet swallow, the tone just a hint), anything
+    happening to a catch that isn't the player at `otherPreyVolume`; the strain loop is darker (<= 950 Hz) with slower tugs. Scan O(cells) every
+    `scanInterval`. `Synth.Shimmer` (moved from FocusSound) is the shared glassy tone.
+  - `InjectionAudio.cs` (creates itself on play, 2D): the strand being *pulled through*, not a reward (the user: a first
+    pass of per-stage plups / gulps / rising shimmers was "too much unlockable satisfying", didn't match the DNA moving).
+    Two loops follow `GenomeView.InjectSpeed` (strand speed, sphere radii / s) so the sound starts, rushes and stops with
+    the strand: a dry stick-slip friction rub, and soft muffled rung ticks whose loop pitch (= tick rate) tracks the speed;
+    past `GenomeView.Injection`'s `IntoTube` both tighten. One-shots only for mechanical moments: an unclip off the mount
+    (`Started`) and a muffled stop at the tip (`Delivered`); the slam is the normal landing thump (`Pump.soundSpeed` ->
+    `CreatureAudio.Impact`, the user wants the usual slam sound there). No notes. `ImmuneSystem.Deliver`
+    returns whether the cell was taken over (passed with `Delivered`, unused by the sound). `Synth.Glide` (moved from
+    WhiteBloodCellAudio) is shared.
+  - `CraftAudio.cs` (creates itself on play, 2D) listens to `GenomeView.Synthesis` (`CraftStage`: MenuOpened / Closed,
+    Pointed, Refused, PageTurned, Started, Docked, Dispensing, Made) + `GenomeView.Drawing` (loop while sucking a store):
+    rising / falling D6 E6 A6 glassy arpeggio for the recipe menu, a soft pluck per recipe (pentatonic step by name
+    hash), a dull tritone "bup-bup" when refused, a suction plup on start, a wet latch click per store, a straw-suck
+    loop, a squeeze on dispense, a bloo + two-note shimmer when made. `Synth.Grain` / `Synth.Lowpass` (moved from
+    InjectionAudio) are shared.
+  - `HoldTickAudio.cs` (creates itself on play): a dense quiet ratchet of tiny dry clicks while a `WorldButton`
+    (static `All`) is held, ~22/s -> ~45/s (interval 0.045 -> 0.022 s, +-15% uneven) and pitch 1 -> 1.25 as it fills
+    (the user: dense clicks like other games' hold prompts; a slow tick / tock read as a time bomb), scheduled on the DSP clock (PlayScheduled,
+    0.12 s ahead) so the rhythm is even; stops (scheduled ticks cancelled) on let-go or completion.
   - Any clip can be replaced by assigning a recorded one.
 - **Resources + inventory** (`Assets/Viral/Substances`; prefabs `GlucoseChunk`, `ProteinChunk`, `ResourceField`
   in `Prefabs/`: new objects / enemies / pickups go there as prefabs). `Substance` = name / code / colour (slots
@@ -499,29 +630,48 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
   breathing wobble, and as it drains lumpy deformation + squash pulses, in the vertex stage; no GPU motion, the pose
   must match what's walked). In editor play with no field in the scene, `Bootstrap` instantiates
   the prefab (logs it); builds need the prefab in the scene. Focus mode: `VirusMovement.UpdateCores` calls
-  `ShowCores`; chunks within `extractRange` show a core (`Custom/ResourceCore`, Overlay+10, ZTest Always, only
-  inside the sweep like the drill x-ray; hidden behind cells by a CPU raycast per chunk every `sightInterval`);
-  a click toggles extraction into `VirusInventory` (renamed: the old project owns `Inventory`): a dust stream
+  `ShowCores`; only the chunk the virus stands on shows a core (`Custom/ResourceCore`, Overlay+10, ZTest Always, only
+  inside the sweep like the drill x-ray; the user: no extracting from a chunk you're not on, so `extractRange` is gone);
+  a click toggles extraction (stops when that body steps off: `ExtractorBody`) into `VirusInventory` (renamed: the old project owns `Inventory`): a dust stream
   flows in, it shrinks (`CurrentRadius`) and deforms, and past `poofAt` it bursts (`DustClouds.Burst`) and is
   destroyed. Labels beside hovered / extracting cores. `DustClouds`: generic analytic GPU puffs (burst / stream
   along a curve), CPU only writes new ones into a ring buffer; Overlay+5 so they show over the focus sweep.
-  `VirusInventory`: `slotCount` slots, each one substance up to `capacity`. **E tap** (released within
-  `clickTime`; held on a surface it still drills) toggles the head view (`GenomeView`) anywhere, and
-  `InventoryView` (slot bars, "05 // STORES") follows it beside the sphere (`GenomeView.Placement`). Out of
+  `VirusInventory`: `slotCount` store slots, each one substance up to `capacity`, plus the head's `ring`
+  (`Ring(genes)` reconciles it; `AddMount` / `RemoveMount` (empty only) / `MoveMount`). **E** toggles the head
+  view (`GenomeView`, the stores are bars on its ring) anywhere. `InventoryView` is the always-on top-left
+  mini head: a small plain disc (cyan rim) with the same ring in the same order (DNA as short ladders, the loaded
+  one lit; stores as bars), "05 // HEAD" + the loaded strand beside it; read only, one `FlatMesh` into a 256px
+  texture; folded away while the head view is open. `FlatMesh` = the shared flat-shape builder (Quad, Taper,
+  Disc, Ring, Apply) both views draw with (Hidden/GenomeStrand). Out of
   focus the cursor is freed (`UniversalCamera.FreeCursor`), the rope ignores the mouse, and a strand click only
   loads the gene (`GenomeView.CanInject`). `ResourceAudio`: start "plup", drain loop, breathy bubbly poof with
   a faint E6/B6 shimmer.
 - **White blood cells** (`WhiteBloodCell.cs` per cell, `WhiteBloodCells.cs` manager, `WhiteBloodCellMesh.cs`,
-  `Custom/WhiteBloodCell`; prefabs `WhiteBloodCell` (the cell) + `WhiteBloodCells` (manager: count, sizes, shader),
+  `Custom/WhiteBloodCell` with its editable material `Assets/Viral/WhiteBloodCell.mat` (assigned on the manager prefab); prefabs `WhiteBloodCell` (the cell) + `WhiteBloodCells` (manager: count, sizes, shader),
   editor auto-adds the manager prefab if the scene has none). Phagocytes: they only eat pathogens. A walkable ball
   (Surface with `isCell` off: no signal, not a "Cell" target; kinematic Rigidbody, sphere collider, never
   turns so standing viruses don't spin; its MeshRenderer is `forceRenderingOff`, only the walkable mesh + command
   box "White Cell"). Exactly one absorbing **spot**, the tip of a pseudopod (`Spot`, `Reach`): it swings over the
-  body or out along a stretched arm at `spotSpeed` (pulls the arm in to swing far; won't extend through another
-  cell), and anything the mouth really touches (`Touching`: within `mouthSize` across, up to its size + `touchMargin`
+  body or out along a stretched arm (pulls the arm in to swing far; won't extend through another cell). The arm
+  is **sprung**, not tweened: angle and length each follow a damped spring (`spotSpring` Hz, `spotDamping`), capped at
+  `spotSpeed` / `extendSpeed`, sub-stepped at 30 Hz for long dts; the spot's velocity (`Sway`) bows the arm behind it
+  in the shader. Anything the mouth really touches (`Touching`: within `mouthSize` across, up to its size + `touchMargin`
   in front) is swallowed: flying, on another cell, or on this one (the spot then crawls across the body after you). States: Patrol (crawl to a nearby cell, louder
   CellSignal = likelier) -> Examine (spot feels over that cell) -> Hunt (a virus within `senseRange` of its
-  surface, + `antibodyRange` per antibody stuck on it (`Antibody.StuckOn`), or touching it) -> Engulf -> Digest.
+  surface, + `antibodyRange` per antibody stuck on it (`Antibody.StuckOn`), or touching it) -> **Grip** -> Engulf -> Digest.
+  Targeting in a crowd: it commits to its prey for `commitTime`, then only switches for one `switchMargin` better
+  (or one crawling on its body; it used to flip between viruses every think and the arm swung back and forth); skips
+  viruses another cell grips; `sharePenalty` per other cell already after a virus (hunter counts kept by `Prey`'s
+  setter, O(1)) spreads a group over a crowd instead of piling on the nearest.
+  Grip is physics, not an animation: `WhiteBloodCells.Grip` plucks the catch off its surface and holds
+  `Intent.Seized` on it (Ground won't land it), and it stays a live body with its own controls; every physics step
+  `WhiteBloodCell.Pull` accelerates it toward the reel point (`gripStiffness`, capped `gripStrength`, damped mostly
+  along the arm), the reel winds in at `reelSpeed` only while the catch keeps up, and the mouth stays on it (the arm
+  stretches after it). Dragged `breakStretch` past the hold (a Burst can; plain Thrust at up to 80 m/s² can't) it
+  tears free (`regrabDelay`).
+  The catch keeps the orientation it was bitten in, relative to the arm's frame (`ArmFrame`: reach + carried side),
+  turning with the arm; it can only turn `gripTurn` degrees from that (`Organism.Restrain`, cleared by `Release`). At the body it's Captured and **merged**, like a drop into a pool (the user: not carried into the cell, no jumps, "dynamic merging between what it eats and itself"): picked up where and as fast as it is (`_held` / `_heldVel` in the cell's rotation frame), it settles on a spring (`mergeSpring`) half out of the surface where it touched, then sinks under and shrinks over `swallowTime`; it splats and jiggles on a squash spring (kicked by how hard it came in), applied through a temporary pivot it's parented to (`WhiteBloodCells.Hold(o, pos, scale, axis, height)`, volume kept; `Unpivot` at Finish), so its own mesh flattens. The arm just follows it; the mouth never jumps onto a catch (`AimAt` eases `_aimSlack` away). Shader: `MergeShape` (instance `merge`: blob radius, centre distance along the reach, neck softness, squash) -> `MergeInto` in WhiteBloodCell.hlsl: the surface is the smooth union (polynomial smin) of the body and an ellipsoid blob a little inside the catch, found per vertex by sphere tracing inward along its ray from the centre (<= 16 steps, only near the blob), so the neck climbs its sides and widens until the body closes over it; maps shift with the surface. The lips' wrap melts away over the first quarter. (The tip-only wrap used for this first was a pinched, streaky bulge beside the catch.)
+  `Engulfing` fires at the grip, so the gulp sound plays on the grab.
   Crawl is amoeboid (surging speed, eased), pushed off other colliders (one overlap per think). Swallowing
   (`WhiteBloodCells.Capture/Hold/Finish`): the victim is detached, its Organism, VirusAI, legs and colliders
   switched off, stuck antibodies destroyed (`ImmuneSystem.EatStuck`), settled in the mouth, the lips wrap round it (`Mood.y`, prey radius in `Mood.w`), the arm pulls it back, it
@@ -531,18 +681,56 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
   gulp). **Look:** all in the vertex stage, every pass: the mesh is a unit sphere in the *reach frame* (+Z = the
   spot, rings packed in the cap `CapAngle` = shader `CAP_ANGLE`); membrane sampled in the *body* frame so it stays
   put while the spot slides: soft undulation + ruffles (ridged value noise in patches, like the micrograph look;
-  Worley popcorn lumps were rejected as "balls"), fine creases per pixel from the noise's analytic gradient;
-  leading-edge lobes + tapered tail from its velocity. The cap is a surface of revolution: radius = smooth max of
-  the body's section and a round-tipped, irregular, meandering finger's (pinned at both ends so the mouth stays on
-  the spot), so it grows out of the body with a fillet. Mouth: irregular breathing rim, ruffled lip, drifting
-  wisps (hunger); wrapping folds the tip into an outer + inner layer round the prey, lips meeting at uneven pace.
+  Worley popcorn lumps were rejected as "balls"), **spikes** (Worley thorns, 27-cell search, each growing / retracting
+  on its own beat and curling along a drifting flow + trailing the crawl: "more spiky and flowy"), rolling swells,
+  fine creases per pixel from the noise's analytic gradient; leading-edge lobes + tapered tail from its velocity.
+  Spikes / ruffles fade out toward `lodDistance` (per-instance `lod.x`) so the far mesh doesn't pop. The arm is the
+  **body stretched** (the user: "literally stretching a part of its body"): the cap becomes a round tip + a tube
+  flaring back into the body (`_Flare`, meets it exactly at the cap rim), the body's front slides after it (`_Pull`).
+  **Material maps** (membrane geometry + pixel lumps): where the surface really is, never where a point started (that
+  smeared the arm and the wrap into stretched streaks, rejected): `map` fixed to the body (the arm slides out through
+  it), `mapTip` fixed to the tip (mouth and wrap skin keep their pattern as it reaches), cross-faded along the arm by
+  evaluating both and blending the *results* (contrast kept by 1/sqrt(a^2+(1-a)^2) in the fragment); blending the
+  coordinates would stretch again. Costs a second Membrane / SurfaceHeight only in that band. It bows
+  behind the spot's motion (`_Lag`), meanders when slack, and under grip tension thins with swallowing waves running
+  to the body (`_Peristalsis`). **Shape lives in `WhiteBloodCell.hlsl`**, shared: near cells are baked once a frame by
+  `WhiteBloodCellBake.compute` (one Shape per vertex, then normals from the mesh grid's neighbours; the bake reads
+  the material's shape floats, copied each frame, and `_WbcTime` = Time.time) into one buffer that every pass reads
+  (`_UseBaked`); before, each pass rebuilt it 3x per vertex (finite-difference normals) in every pass incl. each shadow
+  cascade. Far cells still shape in the vertex stage (cheap: no spikes / ruffles). Ripples go on in the draw vertex
+  stage either way (compute doesn't see the global ripple field), the normal bent by two taps. Spikes search the 8
+  nearest lattice cells, not 27 (exact for `_SpikeWidth` <= 0.5). Baked record = 4 float4s (64 B: position+lump, map+mouth, normal+tendril, mapTip). Instance = 9 float4s, 144 B (+ `side`: the reach frame's x axis, parallel-transported with the arm on the CPU (`WhiteBloodCell.Track`); picking it from a fixed body axis flipped it 90° whenever the arm swung near that axis and every arm-local feature (wisps, lip, meander, mouth folds) jumped. Crawl lobes likewise wander round the lead by a body-frame noise vector, no basis. `merge`, `sway` = spot velocity / tension, `extra` = LOD fade, gape,
+  squeeze). **Lit as one of the red cells' family** (the user: it looked flat and didn't match): includes
+  `BloodCellCore` (`_SPACE_WORLD`, lumps on the material maps, in metres) and shades with
+  `CellShade` (cel bands, hard highlight, rim subsurface, fluctuation), white / lilac instead of red / navy; the **inside of the mouth is its own material** (the user didn't want it the membrane's): `MouthShade` in the shader, wet flesh with radial folds wandering into a dark throat, swallowing rings running in, glossy highlight, wrapped flesh lighting in the same bands (`_MouthColor` / `_MouthDeepColor` / `_MouthWet` / `_MouthFolds` / `_MouthFoldDepth`), polar coords round the mouth from the instance, bump from screen derivatives (so evaluated without a branch); its own
+  settings are plain uniforms outside `UnityPerMaterial` (the core owns it), and its LOD flag is `_LodDetail`
+  (`_Detail` is the core's fine-detail). **The bite** (the user wanted the wrap "nice and satisfying"): springs, not
+  eases. `Bite()` in WhiteBloodCell: the mouth gapes open as prey nears (`gapeRange`: lips peel back, mouth widens);
+  on the grab the lip spring is flung shut (`lipSpring`, `lipDamping`) and bounces off closed, a squeeze spring is
+  kicked (`biteSqueeze`) and jiggles the wrapped mouth tighter and looser; a smaller gulp kick every `gulpInterval`
+  while reeling, a last one at the swallow; the lips pucker into folds where they meet. The wrap (the user: the first try "basically makes a big bulge": a
+  double-layer ball round the catch's centre on a swollen tip) is a **thin skin**, as a phagocyte does it: the arm
+  necks down to a throat just behind the catch (`tipD` from the hull's back), and from it a skin (hull + ~12% of the
+  catch's size) creeps forward over the catch's *real* shape (`ShrinkWrap`: its farthest surface per direction from
+  the mouth, captured each frame); the rim is a rounded lip rolling onto the catch, ahead of it a lining tucked under
+  the catch's uncovered front (so the catch shows there); the rim closes at uneven pace. The hull is filtered like skin
+  (`Hull`: five taps ~0.18 rad apart, each cut to the lowest + 15% of the catch's size, misses count as the lowest):
+  thin parts (legs, crystal points) made sharp stretched needles. Mouth at rest: irregular
+  breathing rim, ruffled lip, drifting wisps (hunger).
   Rides `RippleField` (impacts publish there: the cell's hidden renderer gets the material, which carries the
   `_Ripple*` settings). Normals by finite differences, ripples included.
-  One `RenderMeshPrimitives` per LOD (near ~8.6k verts with ruffles, far ~800 without). Cost per cell: a think
+  One `RenderMeshPrimitives` per LOD (near ~15.6k verts with spikes and ruffles, far ~1k without). Cost per cell: a think
   every `thinkInterval` = `WhiteBloodCells.Near` (organism grid rebuilt at most once a frame, O(organisms)) +
   one overlap query; idle far / off-screen cells tick every 2..8 frames.
+- `ShrinkWrap.cs` + `ShrinkWrap.hlsl` + `Hidden/ShrinkWrapCapture`: generic "wrap round a thing's real shape".
+  Per slot (8), the farthest surface distance from a centre in every world direction (star-shaped outer hull) as a
+  dual-paraboloid pair in one RHalf Tex2DArray (48x48, slice slot*2 = +Z, +1 = -Z). Capture draws the object's
+  Mesh/SkinnedMeshRenderers (`maxExtent` filters out e.g. a trailing rope) with BlendOp Max, placing vertices by the
+  same `ShrinkWrapUV` the reader uses, so orientation can't mismatch; triangles reaching 53° past a hemisphere's
+  edge are dropped there (the other has them). `Begin` / `Capture` / `Submit` each frame; unused slots are freed.
+  Cost: 2 draws per renderer per captured object per frame. Used by WhiteBloodCells (grip / swallow).
 - `ControlsHint.cs`: bottom-right terminal panel with the controls for the current mode (flight /
-  surface / focus; lists are data at the top: "[RMB][RMB]" = two prompt icons, plain words are tags),
+  surface / focus / seized by a white cell (`Intent.Seized`: aim away + Burst to tear free); lists are data at the top: "[RMB][RMB]" = two prompt icons, plain words are tags),
   retyped on change, H folds it. Inputs are game-style prompts (TerminalUI.PillSprite: circle / pill keycaps;
   MouseSprite: a mouse with the button lit). Creates itself on play.
 - `HoloMap.cs` + `HoloMap.shader` / `HoloMapScreen.shader`: hologram map, top-right. Draws real
@@ -576,6 +764,8 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
 - **Global shader arrays lock their size** at first `SetGlobalVectorArray` for the editor
   session. Growing one means renaming the property.
 - URP drives `_Time.y` from `Time.time` in play mode (not `timeSinceLevelLoad`).
+- **`atan2(0, 0)` is NaN on D3D.** A mesh pole (every vertex there has xy = 0) put a NaN vertex in the white
+  cell's mouth and the fan round it vanished (a hole). Guard any atan2 of a direction that can be on the axis.
 - `UNITY_ANY_INSTANCING_ENABLED` is always *defined* (0 or 1) — test its value, or use
   `UNITY_PROCEDURAL_INSTANCING_ENABLED`.
 - Unity UI draws a material's **first pass only**.
@@ -601,9 +791,9 @@ grown to keep the target in frame; backs off so the planet isn't near-clipped.
   thousands); past ~10k give them a spatial grid and step them in a TransformAccessArray job. Kinematic chunks don't
   collide with each other (a bump can push one into another), and a rope-dragged cell stops dead against one.
   PathManager sizes MeshCollider obstacles by bounds (a bit big for chunks). Its prefab isn't in `Viral.unity` yet (editor auto-adds it).
-- For builds, keep these assigned (Shader.Find only saves the editor): `WhiteBloodCells.shader` (set in its prefab; the prefab must be in the scene), `SpiderLegWalker.legShader`,
+- For builds, keep these assigned (Shader.Find only saves the editor): `WhiteBloodCells.shader`, `.wrapShader` (Hidden/ShrinkWrapCapture) and `.bake` (WhiteBloodCellBake.compute; all set in its prefab; the prefab must be in the scene), `SpiderLegWalker.legShader`,
   `HoloMap` shaders, `TransparentDepthForPostFeature.shader`, `AmbientParticles.shader`,
-  `VirusRope.phantomMaterial` (else it needs URP Unlit in the build), `ImmuneSystem.fumeShader` (Hidden/SignalFume) and `antibodyShader` (Custom/Antibody; else no antibodies drawn), `GenomeView` shaders (Hidden/GenomeBubble, Hidden/GenomeStrand: add a GenomeView to the scene with them assigned and set it as VirusMovement's `headView`), `VirusRope.bloodMaterial`
+  `VirusRope.phantomMaterial` (else it needs URP Unlit in the build), `ImmuneSystem.motes.shader` (Hidden/AlarmMote), `VirusRope.baseCoreShader` (Custom/ResourceCore) and `antibodyShader` (Custom/Antibody; else no antibodies drawn), `GenomeView` shaders (Hidden/GenomeBubble, Hidden/GenomeStrand: add a GenomeView to the scene with them assigned and set it as VirusMovement's `headView`), `VirusRope.bloodMaterial`
   (a `Custom/RopeBlood` material; else found by name, no beads without it).
 - Inspector values reset in an earlier refactor: check Organism > Grounded > surface >
   `hoverHeight` (>= collider radius), snap distance, layers, Flying lead axis.

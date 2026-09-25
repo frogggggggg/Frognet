@@ -1,25 +1,32 @@
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.UI;
 using Typed = TerminalUI.Typed;
+using Kind = VirusInventory.Kind;
+using Mount = VirusInventory.Mount;
+using static FlatMesh;
 
 /// <summary>
-/// The stores half of the inventory: beside the head view's DNA sphere (GenomeView), a terminal
-/// panel with a bar per VirusInventory slot, each filled in its substance's colour ("GLU // GLUCOSE
-/// 42 / 100", or EMPTY). It opens and closes with the sphere, on whichever side of it is away from the
-/// head and fits the screen. Bars ease to their amounts and flash as they fill (extraction).
-/// VirusMovement opens the sphere (E anywhere, or a click on the head in focus mode) and binds this
-/// to it. Builds itself; nothing to set up.
+/// The head at a glance, in the top-left corner: a small, plainer version of the head view's sphere
+/// (GenomeView). A dark disc with a thin cyan rim and the same mounts in the same order round its
+/// inside: DNA slots as short ladders in the gene's colour (the loaded one lit), store slots as bars
+/// filling from the rim in their substance's colour (flashing as they fill), empty slots as a dash.
+/// Beside it: the loaded strand and the key that opens the full view. Always up; it folds away while
+/// the head view is open (the full sphere shows the same thing). Read only: it never takes a click.
+///
+/// One small mesh (FlatMesh, Hidden/GenomeStrand) drawn into a 256px MSAA texture by a command
+/// buffer while it's shown. VirusMovement binds it. Builds itself; nothing to set up.
 /// </summary>
-[DefaultExecutionOrder(100)] // after GenomeView has placed the sphere this frame
+[DefaultExecutionOrder(100)] // after GenomeView this frame
 public class InventoryView : MonoBehaviour
 {
-    [Min(120f), Tooltip("Panel width, in 1080p pixels.")]
-    public float width = 320f;
-    [Min(16f)] public float rowHeight = 34f;
-    [Min(0f), Tooltip("Gap between the sphere and the panel, in 1080p pixels (the strand codes sit in it).")]
-    public float gap = 70f;
+    [Min(40f), Tooltip("Circle diameter, in 1080p pixels.")]
+    public float size = 150f;
+    [Tooltip("Distance from the top-left corner, in 1080p pixels.")]
+    public Vector2 margin = new Vector2(24f, 24f);
     [Min(1f)] public float typeSpeed = 110f;
+    [Range(128, 1024)] public int resolution = 256;
 
     [Header("Colours")]
     public Color panel = TerminalUI.Panel;
@@ -30,46 +37,43 @@ public class InventoryView : MonoBehaviour
     [Header("Type")]
     public Font font;
     public string[] terminalFonts = TerminalUI.DefaultFonts;
+    [Tooltip("Hidden/GenomeStrand. Empty: the head view's, else found by name (editor only).")]
+    public Shader strandShader;
 
-    const float Header = 34f, Pad = 12f;
+    const float Rim = 0.86f, Length = 0.5f; // where the mounts start and how far in they reach (radii)
 
     GenomeView _view;
     VirusInventory _inventory;
-    float _side;       // +1 right of the sphere, -1 left; chosen once per opening
-    bool _wasOpen;
+    Genome _genome;
+    float _shown;
+    bool _wasShown;
+
+    // Per mount: the bar's shown fill and when it last grew (its flash); angles ease to their places.
+    class Look { public float angle = float.NaN, fill, last, flashAt = -10f; }
+    readonly Dictionary<Mount, Look> _looks = new Dictionary<Mount, Look>();
 
     Canvas _canvas;
-    RectTransform _canvasRect, _panel;
+    RectTransform _canvasRect, _root;
     CanvasGroup _group;
+    RawImage _image;
     Font _font;
-    Typed _title;
-    RawImage _scan;
-    readonly List<Row> _rows = new List<Row>();
-    readonly List<Object> _made = new List<Object>();
-    Sprite _fillSprite, _frameSprite;
-
-    class Row
-    {
-        public RectTransform root;
-        public Image fill, frame, flash;
-        public Typed name;
-        public Text amount;
-        public float shown, last, flashAt = -10f;
-    }
+    Typed _title, _loaded, _hint;
+    Material _material;
+    Mesh _mesh;
+    RenderTexture _texture, _display;
+    // Not kept by a play-mode script reload: remade on use.
+    CommandBuffer _commands;
+    MaterialPropertyBlock _props;
 
     public static InventoryView Create() => new GameObject("Inventory View").AddComponent<InventoryView>();
 
-    /// <summary>Shows 'inventory' beside 'view' whenever that's open.</summary>
-    public void Bind(GenomeView view, VirusInventory inventory)
+    /// <summary>Shows 'inventory' and 'genome' in the corner, folded away while 'view' (the full head) is open.</summary>
+    public void Bind(GenomeView view, VirusInventory inventory, Genome genome)
     {
         _view = view;
         _inventory = inventory;
+        _genome = genome;
     }
-
-    public bool IsOpen => _canvas && _canvas.enabled && _group.alpha > 0f;
-
-    /// <summary>Whether a screen point is on the panel (a click there is the inventory's, not the world's).</summary>
-    public bool Covers(Vector2 screen) => IsOpen && RectTransformUtility.RectangleContainsScreenPoint(_panel, screen, null);
 
     void LateUpdate()
     {
@@ -77,192 +81,212 @@ public class InventoryView : MonoBehaviour
         {
             Destroy(_canvas.gameObject);
             _canvas = null;
-            _rows.Clear();
         }
-        bool open = _view && _inventory && _view.IsOpen;
-        bool placed = _view && _inventory && _view.Placement(out _, out _, out _);
-        if (!open && !placed)
+        if (!_inventory || !_genome)
         {
             if (_canvas && _canvas.enabled) _canvas.enabled = false;
-            _wasOpen = false;
             return;
         }
-        if (!_canvas) Build();
-        _canvas.enabled = true;
-        float now = Time.unscaledTime;
+        if (!_canvas && !Build()) return;
+        float now = Time.unscaledTime, dt = Time.unscaledDeltaTime;
 
-        // Opens after the sphere has swelled, closes before it shrinks.
-        _view.Placement(out Vector2 sphere, out float radius, out Vector2 head);
-        float k = Mathf.Clamp01((_view.Shown - 0.55f) / 0.45f);
+        // Folds away (shrinking into its corner) as the head view opens, back when it closes.
+        bool want = !(_view && (_view.IsOpen || _view.Shown > 0.5f)) && !CommandMode.Active;
+        _shown = Mathf.MoveTowards(_shown, want ? 1f : 0f, dt / 0.25f);
+        if (want && !_wasShown) _title.start = _loaded.start = _hint.start = now;
+        _wasShown = want;
+        _canvas.enabled = _shown > 0f;
+        if (_shown <= 0f) return;
+        float k = _shown * _shown * (3f - 2f * _shown);
         _group.alpha = k;
-        _group.blocksRaycasts = k > 0.5f && open;
-        if (open && !_wasOpen)
-        {
-            _side = 0f;
-            _title.start = now;
-            foreach (Row r in _rows) r.name.start = now;
-        }
-        _wasOpen = open;
+        _root.localScale = Vector3.one * Mathf.Lerp(0.6f, 1f, k);
 
-        IReadOnlyList<VirusInventory.Slot> slots = _inventory.Slots;
-        while (_rows.Count < slots.Count) AddRow();
-        for (int i = 0; i < _rows.Count; i++) _rows[i].root.gameObject.SetActive(i < slots.Count);
-
-        // Size, then place beside the sphere: away from the head, else whichever side fits.
-        float h = Header + slots.Count * rowHeight + Pad;
-        _panel.sizeDelta = new Vector2(width, h);
-        Rect area = _canvasRect.rect;
-        if (_side == 0f)
-        {
-            _side = sphere.x >= head.x ? 1f : -1f;
-            float x = sphere.x + _side * (radius + gap + width * 0.5f);
-            if (x + width * 0.5f > area.width - 16f || x - width * 0.5f < 16f) _side = -_side;
-        }
-        float px = sphere.x + _side * (radius + gap + width * 0.5f);
-        px = Mathf.Clamp(px, width * 0.5f + 16f, Mathf.Max(width * 0.5f + 16f, area.width - width * 0.5f - 16f));
-        float py = Mathf.Clamp(sphere.y, h * 0.5f + 16f, Mathf.Max(h * 0.5f + 16f, area.height - h * 0.5f - 16f));
-        _panel.anchoredPosition = new Vector2(px, py);
-        _panel.localScale = new Vector3(Mathf.Lerp(0.85f, 1f, k), Mathf.Lerp(0.3f, 1f, Smooth(k)), 1f);
-
+        Genome.Gene gene = _genome.SelectedGene;
+        _loaded.Set(gene != null ? gene.code + " LOADED" : "NO STRAND");
+        _loaded.text.color = gene != null ? gene.color : new Color(line.r, line.g, line.b, 0.6f);
         _title.Tick(now, typeSpeed);
-        float capacity = Mathf.Max(_inventory.capacity, 1e-3f);
-        for (int i = 0; i < slots.Count; i++) Refresh(_rows[i], slots[i], i, capacity, now);
+        _loaded.Tick(now, typeSpeed);
+        _hint.Tick(now, typeSpeed);
 
-        Rect uv = _scan.uvRect;
-        uv.y = -now * 0.6f;
-        _scan.uvRect = uv;
+        Draw(now, dt, k);
     }
 
-    void Refresh(Row r, VirusInventory.Slot slot, int index, float capacity, float now)
+    void Draw(float now, float dt, float reveal)
     {
-        bool empty = slot.Empty;
-        float target = empty ? 0f : Mathf.Clamp01(slot.amount / capacity);
-        if (slot.amount > r.last + 1e-3f) r.flashAt = now; // filling
-        r.last = empty ? 0f : slot.amount;
-        r.shown = Mathf.MoveTowards(Mathf.Lerp(r.shown, target, 1f - Mathf.Exp(-Time.unscaledDeltaTime * 10f)), target, Time.unscaledDeltaTime * 0.05f);
+        IReadOnlyList<Mount> ring = _inventory.Ring(_genome.genes.Count);
+        int n = Mathf.Max(ring.Count, 1);
+        float gap = 360f / n, ease = 1f - Mathf.Exp(-dt * 12f);
+        float half = Mathf.Min(0.07f, Mathf.PI * (Rim - Length) / n * 0.75f); // mount half width
 
-        Color c = empty ? line : slot.color;
-        RectTransform f = r.fill.rectTransform;
-        f.anchorMax = new Vector2(Mathf.Max(r.shown, 0.001f), 1f);
-        r.fill.enabled = r.shown > 0.002f;
-        r.fill.color = new Color(c.r, c.g, c.b, 0.75f);
-        float flash = Mathf.Clamp01(1f - (now - r.flashAt) / 0.35f);
-        r.flash.color = new Color(1f, 1f, 1f, flash * 0.35f);
-        r.flash.rectTransform.anchorMax = f.anchorMax;
-        r.frame.color = empty ? new Color(line.r, line.g, line.b, 0.35f) : new Color(c.r, c.g, c.b, 0.9f);
+        FlatMesh.Clear();
+        Disc(Vector2.zero, 0.985f, new Color(panel.r, panel.g, panel.b, 1f), 64);
+        Ring(Vector2.zero, 0.955f, 0.035f, line);
+        Ring(Vector2.zero, Rim - Length - 0.08f, 0.012f, new Color(line.r, line.g, line.b, 0.25f), 48); // inner guide
 
-        r.name.Set(empty ? "S" + (index + 1) + "  --  EMPTY" : "S" + (index + 1) + "  " + slot.code + " // " + slot.substance);
-        r.name.text.color = empty ? new Color(text.r, text.g, text.b, 0.45f) : text;
-        r.name.Tick(now, typeSpeed);
-        r.amount.text = empty ? "" : Mathf.FloorToInt(slot.amount) + " / " + Mathf.RoundToInt(capacity);
-        r.amount.color = slot.amount >= capacity - 0.01f ? live : text;
+        int selected = _genome.Selected;
+        for (int i = 0; i < ring.Count; i++)
+        {
+            Mount m = ring[i];
+            if (!_looks.TryGetValue(m, out Look l)) _looks[m] = l = new Look();
+            float target = (i + 0.5f) * gap;
+            l.angle = float.IsNaN(l.angle) ? target : l.angle + Mathf.DeltaAngle(l.angle, target) * ease;
+            float a = (l.angle - 90f) * Mathf.Deg2Rad; // the gap between the first and last at the bottom
+            Vector2 dir = new Vector2(Mathf.Cos(a), Mathf.Sin(a));
+            Vector2 across = new Vector2(-dir.y, dir.x), root = dir * Rim;
+            float len = Length * reveal;
+
+            Taper(dir * 0.95f, root, half * 1.5f, half * 1.1f, line); // its base on the rim
+
+            if (m.kind == Kind.Gene)
+            {
+                if (m.index < 0 || m.index >= _genome.genes.Count)
+                {
+                    Color dim = new Color(line.r, line.g, line.b, 0.3f);
+                    Quad(root - dir * 0.05f, root - dir * (len * 0.6f), 0.03f, dim, dim);
+                    continue;
+                }
+                // A ladder: two rails and a few rungs, in the gene's colour; the loaded one lit, the rest dimmed.
+                Color c = Saturated(_genome.genes[m.index].color);
+                float b = selected < 0 ? 0.9f : m.index == selected ? 1.25f + 0.2f * Mathf.Sin(now * 5f) : 0.45f;
+                c = new Color(c.r * b, c.g * b, c.b * b, 1f);
+                Vector2 end = root - dir * len;
+                Quad(root + across * half * 0.8f, end + across * half * 0.8f, 0.022f, c, c);
+                Quad(root - across * half * 0.8f, end - across * half * 0.8f, 0.022f, c, c);
+                for (float s = 0.08f; s < len - 0.03f; s += 0.1f)
+                {
+                    Vector2 p = root - dir * s;
+                    Quad(p + across * half * 0.8f, p - across * half * 0.8f, 0.03f, c, c);
+                }
+                continue;
+            }
+
+            VirusInventory.Slot slot = m.index >= 0 && m.index < _inventory.slots.Count ? _inventory.slots[m.index] : null;
+            bool empty = slot == null || slot.Empty;
+            float amount = empty ? 0f : slot.amount;
+            if (amount > l.last + 1e-3f) l.flashAt = now;
+            l.last = amount;
+            float want = Mathf.Clamp01(amount / Mathf.Max(_inventory.capacity, 1e-3f));
+            l.fill = Mathf.MoveTowards(Mathf.Lerp(l.fill, want, ease), want, dt * 0.05f);
+
+            Color sc = empty ? line : Saturated(slot.color);
+            Color frame = empty ? new Color(line.r, line.g, line.b, 0.35f) : new Color(sc.r, sc.g, sc.b, 0.9f);
+            Vector2 inner = root - dir * len;
+            Quad(root + across * half, inner + across * half, 0.02f, frame, frame);
+            Quad(root - across * half, inner - across * half, 0.02f, frame, frame);
+            Quad(inner + across * (half + 0.01f), inner - across * (half + 0.01f), 0.02f, frame, frame);
+            if (empty || l.fill <= 0.002f) continue;
+            float flash = Mathf.Clamp01(1f - (now - l.flashAt) / 0.35f);
+            float f = 0.8f + 0.5f * flash;
+            Color fill = new Color(sc.r * f, sc.g * f, sc.b * f, 0.9f);
+            Quad(root, root - dir * (len * l.fill), 2f * half - 0.04f, fill, fill);
+        }
+
+        if (!_mesh)
+        {
+            _mesh = new Mesh { name = "Head Readout", hideFlags = HideFlags.DontSave };
+            _mesh.MarkDynamic();
+        }
+        Apply(_mesh);
+        Ready();
+        _props.SetColor("_Color", new Color(1f, 1f, 1f, 0f));
+        _commands.Clear();
+        _commands.SetRenderTarget(_texture);
+        _commands.ClearRenderTarget(false, true, Color.clear);
+        _commands.SetViewProjectionMatrices(Matrix4x4.identity, Matrix4x4.Ortho(-1f, 1f, -1f, 1f, -1f, 1f));
+        _commands.DrawMesh(_mesh, Matrix4x4.identity, _material, 0, 0, _props);
+        _commands.Blit(_texture, _display); // resolve the antialiasing
+        Graphics.ExecuteCommandBuffer(_commands);
     }
 
-    static float Smooth(float x) => x * x * (3f - 2f * x);
+    static Color Saturated(Color c)
+    {
+        Color.RGBToHSV(c, out float h, out float s, out float v);
+        return Color.HSVToRGB(h, Mathf.Max(s, 0.85f), 1f);
+    }
 
     // ---------------- building ----------------
 
-    void Build()
+    bool Build()
     {
+        Shader shader = strandShader ? strandShader : _view && _view.strandShader ? _view.strandShader : Shader.Find("Hidden/GenomeStrand");
+        if (!shader)
+        {
+            Debug.LogError("InventoryView: assign Hidden/GenomeStrand.", this);
+            enabled = false;
+            return false;
+        }
+        _material = new Material(shader) { hideFlags = HideFlags.DontSave };
         _font = font ? font : TerminalUI.Font(terminalFonts);
-        _canvas = TerminalUI.Canvas("Inventory Canvas", transform, 591); // over the head view's sphere
+        _canvas = TerminalUI.Canvas("Inventory Canvas", transform, 560);
+        Destroy(_canvas.GetComponent<GraphicRaycaster>()); // read only, never eats clicks
         _canvasRect = (RectTransform)_canvas.transform;
-        _group = _canvas.gameObject.AddComponent<CanvasGroup>();
-        _fillSprite = TerminalUI.ChamferSprite(false);
-        _frameSprite = TerminalUI.ChamferSprite(true);
-        _made.Add(_fillSprite.texture);
-        _made.Add(_frameSprite.texture);
-        _made.Add(_fillSprite);
-        _made.Add(_frameSprite);
 
-        _panel = TerminalUI.Rect("Stores", _canvasRect, Vector2.zero, new Vector2(width, 200f));
-        _panel.anchorMin = _panel.anchorMax = Vector2.zero; // canvas units from the bottom left, like the sphere
-        var bg = _panel.gameObject.AddComponent<Image>();
-        bg.sprite = _fillSprite;
-        bg.type = Image.Type.Sliced;
-        bg.color = panel;
-        bg.raycastTarget = true; // clicks on it are the inventory's
+        _root = TerminalUI.Rect("Head", _canvasRect, Vector2.zero, Vector2.one * size);
+        _root.anchorMin = _root.anchorMax = _root.pivot = new Vector2(0f, 1f); // from the top-left corner
+        _root.anchoredPosition = new Vector2(margin.x, -margin.y);
+        _group = _root.gameObject.AddComponent<CanvasGroup>();
+        _group.blocksRaycasts = _group.interactable = false;
 
-        _scan = TerminalUI.Graphic<RawImage>("Scan", _panel, Vector2.zero, Vector2.zero);
-        Stretch(_scan.rectTransform, 2f);
-        Texture2D scan = TerminalUI.ScanTexture();
-        _made.Add(scan);
-        _scan.texture = scan;
-        _scan.uvRect = new Rect(0f, 0f, 1f, 200f / 3f);
-        _scan.raycastTarget = false;
+        _image = TerminalUI.Graphic<RawImage>("Circle", _root, Vector2.zero, Vector2.zero);
+        RectTransform r = _image.rectTransform;
+        r.anchorMin = Vector2.zero;
+        r.anchorMax = Vector2.one;
+        r.sizeDelta = Vector2.zero;
+        _image.raycastTarget = false;
 
-        Image frame = TerminalUI.Graphic<Image>("Frame", _panel, Vector2.zero, Vector2.zero);
-        Stretch(frame.rectTransform, 0f);
-        frame.sprite = _frameSprite;
-        frame.type = Image.Type.Sliced;
-        frame.color = line;
-        frame.raycastTarget = false;
-
-        Text title = TerminalUI.Graphic<Text>("Title", _panel, Vector2.zero, new Vector2(width - 2f * Pad, 20f));
-        TerminalUI.Style(title, _font, 12, new Color(line.r, line.g, line.b, 0.75f), TextAnchor.MiddleLeft);
-        TopLeft(title.rectTransform, new Vector2(Pad, -Pad + 2f));
-        _title = new Typed { text = title, full = "05 // STORES", start = Time.unscaledTime };
+        _title = Line(0f, 12, new Color(line.r, line.g, line.b, 0.7f), 0f);
+        _title.full = "05 // HEAD";
+        _loaded = Line(-18f, 14, text, 0.1f);
+        _hint = Line(-38f, 11, new Color(line.r, line.g, line.b, 0.6f), 0.2f);
+        _hint.full = "[E] OPEN";
+        Ready();
+        return true;
     }
 
-    void AddRow()
+    // A line of text to the right of the circle, 'y' down from its top third.
+    Typed Line(float y, int fontSize, Color color, float delay)
     {
-        int i = _rows.Count;
-        var r = new Row();
-        r.root = TerminalUI.Rect("Slot " + (i + 1), _panel, Vector2.zero, new Vector2(width - 2f * Pad, rowHeight - 8f));
-        TopLeft(r.root, new Vector2(Pad, -(Header + i * rowHeight)));
-
-        r.fill = Bar("Fill", r.root, _fillSprite);
-        r.flash = Bar("Flash", r.root, _fillSprite);
-        r.frame = Bar("Frame", r.root, _frameSprite);
-        Stretch(r.frame.rectTransform, 0f);
-
-        Text name = TerminalUI.Graphic<Text>("Name", r.root, Vector2.zero, Vector2.zero);
-        TerminalUI.Style(name, _font, 13, text, TextAnchor.MiddleLeft);
-        Stretch(name.rectTransform, 0f);
-        name.rectTransform.offsetMin = new Vector2(10f, 0f);
-        name.gameObject.AddComponent<Shadow>().effectColor = new Color(0f, 0f, 0f, 0.7f);
-        r.name = new Typed { text = name, delay = 0.08f * (i + 1), start = Time.unscaledTime };
-
-        r.amount = TerminalUI.Graphic<Text>("Amount", r.root, Vector2.zero, Vector2.zero);
-        TerminalUI.Style(r.amount, _font, 13, text, TextAnchor.MiddleRight);
-        Stretch(r.amount.rectTransform, 0f);
-        r.amount.rectTransform.offsetMax = new Vector2(-10f, 0f);
-        r.amount.gameObject.AddComponent<Shadow>().effectColor = new Color(0f, 0f, 0f, 0.7f);
-        _rows.Add(r);
+        Text t = TerminalUI.Graphic<Text>("Line", _root, Vector2.zero, new Vector2(200f, fontSize + 6f));
+        t.rectTransform.anchorMin = t.rectTransform.anchorMax = new Vector2(1f, 0.7f);
+        t.rectTransform.pivot = new Vector2(0f, 0.5f);
+        t.rectTransform.anchoredPosition = new Vector2(12f, y);
+        TerminalUI.Style(t, _font, fontSize, color, TextAnchor.MiddleLeft);
+        return new Typed { text = t, delay = delay, start = Time.unscaledTime };
     }
 
-    // A sliced image filling its parent from the left; its right edge is set per frame (anchorMax.x).
-    static Image Bar(string name, RectTransform parent, Sprite sprite)
+    void Ready()
     {
-        Image img = TerminalUI.Graphic<Image>(name, parent, Vector2.zero, Vector2.zero);
-        RectTransform t = img.rectTransform;
-        t.anchorMin = Vector2.zero;
-        t.anchorMax = Vector2.one;
-        t.offsetMin = t.offsetMax = Vector2.zero;
-        img.sprite = sprite;
-        img.type = Image.Type.Sliced;
-        img.raycastTarget = false;
-        return img;
+        _commands ??= new CommandBuffer { name = "Head Readout" };
+        _props ??= new MaterialPropertyBlock();
+        if (_texture && _texture.width == resolution && _display) return;
+        Release();
+        _texture = new RenderTexture(resolution, resolution, 0, RenderTextureFormat.ARGB32)
+        {
+            name = "Head Readout", hideFlags = HideFlags.DontSave, antiAliasing = 4,
+        };
+        _texture.Create();
+        _display = new RenderTexture(resolution, resolution, 0, RenderTextureFormat.ARGB32)
+        {
+            name = "Head Readout Display", hideFlags = HideFlags.DontSave, filterMode = FilterMode.Bilinear,
+            wrapMode = TextureWrapMode.Clamp,
+        };
+        _display.Create();
+        if (_image) _image.texture = _display;
     }
 
-    static void Stretch(RectTransform t, float inset)
+    void Release()
     {
-        t.anchorMin = Vector2.zero;
-        t.anchorMax = Vector2.one;
-        t.offsetMin = new Vector2(inset, inset);
-        t.offsetMax = new Vector2(-inset, -inset);
-    }
-
-    static void TopLeft(RectTransform t, Vector2 at)
-    {
-        t.anchorMin = t.anchorMax = new Vector2(0f, 1f);
-        t.pivot = new Vector2(0f, 1f);
-        t.anchoredPosition = at;
+        if (_texture) { _texture.Release(); Destroy(_texture); }
+        if (_display) { _display.Release(); Destroy(_display); }
+        _texture = _display = null;
     }
 
     void OnDestroy()
     {
-        foreach (Object o in _made)
-            if (o) Destroy(o);
+        Release();
+        if (_mesh) Destroy(_mesh);
+        if (_material) Destroy(_material);
+        _commands?.Release();
+        _commands = null;
     }
 }

@@ -15,19 +15,30 @@ public static class WhiteBloodCellMesh
     /// CAP_ANGLE in WhiteBloodCell.shader.</summary>
     public const float CapAngle = 0.7f;
 
-    /// <summary>detail 1: near mesh (~8.6k vertices); lower is coarser (0.3: ~800).</summary>
-    public static Mesh Build(float detail)
+    /// <summary>Share of the cap (from the tip) that rounds the tip, where the mouth opens and the wrap closes
+    /// over a catch. Keep equal to TIP_SPLIT in WhiteBloodCell.hlsl.</summary>
+    const float TipSplit = 0.3f;
+
+    // Where cap ring fraction i/capRings sits (0 tip .. 1 rim): half the cap's rings in the tip, the rest along the
+    // arm. The tip carries the most shape (mouth, lips, the skin over a whole catch); evenly spaced it had only
+    // 30% of them and the wrap stretched over a few rings.
+    static float CapShare(float f) => f < 0.5f ? TipSplit * f / 0.5f : TipSplit + (1f - TipSplit) * (f - 0.5f) / 0.5f;
+
+    /// <summary>detail 1: near mesh (~15.6k vertices, dense enough for the spikes to come to points); lower is
+    /// coarser (0.25: ~1k, no spikes drawn). 'directions' = its vertices (unit directions), row by row, 'rowLength'
+    /// per row (the seam column repeated): what WhiteBloodCellBake.compute walks.</summary>
+    public static Mesh Build(float detail, out Vector3[] directions, out int rowLength)
     {
-        int capRings = Mathf.Max(6, Mathf.RoundToInt(44 * detail));
-        int bodyRings = Mathf.Max(8, Mathf.RoundToInt(44 * detail));
-        int segments = Mathf.Max(12, Mathf.RoundToInt(96 * detail / 4f) * 4);
+        int capRings = Mathf.Max(6, Mathf.RoundToInt(56 * detail));
+        int bodyRings = Mathf.Max(8, Mathf.RoundToInt(64 * detail));
+        int segments = Mathf.Max(12, Mathf.RoundToInt(128 * detail / 4f) * 4);
         int rings = capRings + bodyRings; // ring 0 is the tip pole, ring 'rings' the back pole
 
         var vertices = new List<Vector3>((rings + 1) * (segments + 1));
         for (int i = 0; i <= rings; i++)
         {
             float theta = i <= capRings
-                ? CapAngle * i / capRings
+                ? CapAngle * CapShare((float)i / capRings)
                 : CapAngle + (Mathf.PI - CapAngle) * (i - capRings) / bodyRings;
             float st = Mathf.Sin(theta), ct = Mathf.Cos(theta);
             for (int j = 0; j <= segments; j++)
@@ -55,6 +66,8 @@ public static class WhiteBloodCellMesh
             else { triangles.Add(a); triangles.Add(c); triangles.Add(b); }
         }
 
+        directions = vertices.ToArray();
+        rowLength = segments + 1;
         var mesh = new Mesh { name = $"White Blood Cell ({detail:0.##})", hideFlags = HideFlags.DontSave };
         mesh.indexFormat = vertices.Count > 65000 ? UnityEngine.Rendering.IndexFormat.UInt32 : UnityEngine.Rendering.IndexFormat.UInt16;
         mesh.SetVertices(vertices);

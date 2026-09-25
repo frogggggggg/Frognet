@@ -106,13 +106,37 @@ public partial class Surface : MonoBehaviour
     {
         a = b = c = default;
         var map = CornerMap();
-        if (map == null || node == null || !map.TryGetValue(node, out var corners)) return false;
+        if (map == null || node == null || !map.corners.TryGetValue(node, out var corners)) return false;
         a = corners[0]; b = corners[1]; c = corners[2];
         return true;
     }
 
+    /// <summary>
+    /// The normal at a graph point on a triangle, on the winding's side: the corner normals near it blended by
+    /// distance (a smooth bump per vertex, a mean edge wide), so it turns smoothly *across* triangles too. The
+    /// corners' arcs blended by barycentric weights are only continuous there: the normal turned at a new rate
+    /// on every triangle, a sway per triangle the camera copied. Stays inside the triangle's smoothing groups,
+    /// so hard edges stay hard. False = none (not this graph, or nothing near).
+    /// </summary>
+    public bool SmoothNormal(TriangleMeshNode node, Vector3 graphPoint, out Vector3 normal)
+    {
+        normal = default;
+        var map = CornerMap();
+        if (map == null || node == null || !map.near.TryGetValue(node, out int[] near)) return false;
+        Vector3 sum = Vector3.zero;
+        foreach (int i in near)
+        {
+            Sample s = map.samples[i];
+            float t = 1f - (graphPoint - s.point).sqrMagnitude * s.invRadiusSq;
+            if (t > 0f) sum += t * t * s.normal;
+        }
+        if (sum.sqrMagnitude < 1e-12f) return false;
+        normal = sum.normalized;
+        return true;
+    }
+
     // This graph's corners, built once per graph (GraphFor drops them when it rescans).
-    Dictionary<GraphNode, Corner[]> CornerMap()
+    Smoothing CornerMap()
     {
         NavMeshGraph graph = Graph;
         if (graph == null) return null;
@@ -122,7 +146,11 @@ public partial class Surface : MonoBehaviour
 
     float Scale => Graph != null ? _scale : 1f; // makes sure the graph (and its scale) exist
 
-    void Awake() => BakeDisplacement();
+    void Awake()
+    {
+        BakeDisplacement();
+        SplitCollider(); // Surface.Collider.cs
+    }
 
     // Built after every Awake, so a scene Pathfinder has loaded its own graphs by then. The
     // corners too: built on first use they'd land (as a hitch) on the first touchdown.
@@ -130,16 +158,29 @@ public partial class Surface : MonoBehaviour
 
     // ---------------- corner normals and curvature ----------------
 
-    // Per graph, per triangle: its three corners. Rebuilt after a script reload.
-    static readonly Dictionary<NavMeshGraph, Dictionary<GraphNode, Corner[]>> CornerData =
-        new Dictionary<NavMeshGraph, Dictionary<GraphNode, Corner[]>>();
+    // Per graph: per triangle its three corners, and for SmoothNormal one sample per vertex per smoothing group
+    // with, per triangle, the samples near it (its corners' groups' 1-rings, ~15). Rebuilt after a script reload.
+    static readonly Dictionary<NavMeshGraph, Smoothing> CornerData = new Dictionary<NavMeshGraph, Smoothing>();
+
+    class Smoothing
+    {
+        public Dictionary<GraphNode, Corner[]> corners;
+        public Dictionary<GraphNode, int[]> near;
+        public Sample[] samples;
+    }
+
+    struct Sample
+    {
+        public Vector3 point, normal;
+        public float invRadiusSq;
+    }
 
     // Smoothing groups: around each vertex, faces joined through shared edges gentler than
     // the crease angle form a group, and every corner in a group gets the group's normal
     // (area-weighted) and curvature. One value per vertex per group keeps things continuous
     // across triangles (a sphere); a hard edge splits the groups (a cube). Relies on the
     // mesh's winding being consistent, which the graph keeps because recalculateNormals is off.
-    static Dictionary<GraphNode, Corner[]> BuildCorners(NavMeshGraph graph, float crease)
+    static Smoothing BuildCorners(NavMeshGraph graph, float crease)
     {
         var nodes = new List<TriangleMeshNode>();
         var normals = new List<Vector3>(); // length = 2 x area, the weight
@@ -170,6 +211,9 @@ public partial class Surface : MonoBehaviour
         float minCos = Mathf.Cos(crease * Mathf.Deg2Rad);
         var parent = new List<int>();
         var sums = new Dictionary<int, Vector3>();
+        var samples = new List<Sample>();
+        var groupOf = new int[nodes.Count * 3]; // per triangle corner: its sample, -1 = none (degenerate)
+        System.Array.Fill(groupOf, -1);
         foreach (var pair in around)
         {
             Int3 v = pair.Key;
@@ -196,17 +240,46 @@ public partial class Surface : MonoBehaviour
             foreach (var group in sums)
             {
                 if (group.Value.sqrMagnitude < 1e-12f) continue;
-                Corner corner = FitCorner(v, group.Value.normalized, fan, parent, group.Key, nodes);
+                Corner corner = FitCorner(v, group.Value.normalized, fan, parent, group.Key, nodes, out float meanEdge);
+                samples.Add(new Sample { point = (Vector3)v, normal = corner.normal, invRadiusSq = 1f / Mathf.Max(1e-8f, meanEdge * meanEdge) });
                 for (int i = 0; i < fan.Count; i++)
                 {
                     if (Root(parent, i) != group.Key) continue;
                     TriangleMeshNode node = nodes[fan[i]];
                     for (int c = 0; c < 3; c++)
-                        if (node.GetVertex(c) == v) map[node][c] = corner;
+                        if (node.GetVertex(c) == v) { map[node][c] = corner; groupOf[fan[i] * 3 + c] = samples.Count - 1; }
                 }
             }
         }
-        return map;
+
+        // Near each triangle: every sample of the triangles sharing one of its corners' groups (a bump is a
+        // mean edge wide, so nothing further reaches into it).
+        var near = new Dictionary<GraphNode, int[]>(nodes.Count);
+        var found = new List<int>();
+        for (int f = 0; f < nodes.Count; f++)
+        {
+            found.Clear();
+            for (int c = 0; c < 3; c++)
+            {
+                int group = groupOf[f * 3 + c];
+                if (group < 0) continue;
+                foreach (int t in around[nodes[f].GetVertex(c)])
+                {
+                    if (!SameGroup(nodes[t], t, nodes[f].GetVertex(c), group, groupOf)) continue;
+                    for (int k = 0; k < 3; k++)
+                        if (groupOf[t * 3 + k] >= 0 && !found.Contains(groupOf[t * 3 + k])) found.Add(groupOf[t * 3 + k]);
+                }
+            }
+            near[nodes[f]] = found.ToArray();
+        }
+        return new Smoothing { corners = map, near = near, samples = samples.ToArray() };
+    }
+
+    static bool SameGroup(TriangleMeshNode node, int index, Int3 v, int group, int[] groupOf)
+    {
+        for (int k = 0; k < 3; k++)
+            if (node.GetVertex(k) == v) return groupOf[index * 3 + k] == group;
+        return false;
     }
 
     // How the surface bends away from the vertex's tangent plane, per direction, from the
@@ -215,8 +288,9 @@ public partial class Surface : MonoBehaviour
     // a least-squares fit of kuu x^2 + 2 kuv x y + kvv y^2 to those gives every direction
     // (straight along a cylinder, round across it), pulled gently toward the average so a
     // vertex with few neighbours stays sensible. Capped so a bad fit can't throw crawlers far.
-    static Corner FitCorner(Int3 v, Vector3 n, List<int> fan, List<int> parent, int group, List<TriangleMeshNode> nodes)
+    static Corner FitCorner(Int3 v, Vector3 n, List<int> fan, List<int> parent, int group, List<TriangleMeshNode> nodes, out float meanEdge)
     {
+        meanEdge = 0f;
         Corner corner = Corner.Flat(n);
         Vector3 u = corner.u, w = Vector3.Cross(n, u), p = (Vector3)v;
 
@@ -249,6 +323,7 @@ public partial class Surface : MonoBehaviour
         }
         if (count == 0) return corner;
 
+        meanEdge = edges / count;
         float mean = sum / count;
         float lambda = 0.05f * count;
         m00 += lambda; m11 += lambda; m22 += lambda;
@@ -376,7 +451,7 @@ public partial class Surface : MonoBehaviour
                     return n;
 
         if (!mesh.isReadable)
-            Debug.LogWarning($"Surface: mesh '{mesh.name}' needs Read/Write enabled to be walkable in a build.", mesh);
+            Debug.LogError($"Surface: mesh '{mesh.name}' isn't walkable: turn on Read/Write in its import settings.", mesh);
 
         var graph = (NavMeshGraph)astar.data.AddGraph(typeof(NavMeshGraph));
         graph.name = mesh.name;

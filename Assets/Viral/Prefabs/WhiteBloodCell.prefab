@@ -123,8 +123,11 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   meshRenderer: {fileID: 2465077491696264421}
-  referenceSpeed: 100
+  creaseAngle: 60
   isCell: 0
+  referenceSpeed: 100
+  mergeDistance: 0.6
+  mergeTime: 0.1
 --- !u!54 &307347198651657751
 Rigidbody:
   m_ObjectHideFlags: 0
@@ -164,3 +167,35 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 7dd0998489aa4301abc20f54593ac061, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  speed: 2.5
+  huntSpeed: 4.5
+  acceleration: 2
+  patrolRange: 70
+  gap: 2
+  examineTime: {x: 4, y: 9}
+  signalWeight: 0.15
+  senseRange: 14
+  antibodyRange: 10
+  antibodyCap: 5
+  loseTime: 3
+  thinkInterval: 0.15
+  maxReach: 10
+  spotSpeed: 4
+  extendSpeed: 5
+  spotSpring: 0.7
+  spotDamping: 0.5
+  mouthSize: 0.28
+  touchMargin: 0.5
+  gripStrength: 130
+  gripStiffness: 40
+  reelSpeed: 3
+  breakStretch: 4
+  regrabDelay: 1.2
+  swallowTime: 2.2
+  mergeSpring: 1.4
+  gapeRange: 4
+  lipSpring: 2.2
+  lipDamping: 0.3
+  biteSqueeze: 1.2
+  gulpInterval: 0.9
+  digestTime: 4

@@ -1,38 +1,117 @@
-// White blood cells (WhiteBloodCells.cs draws them, mesh from WhiteBloodCellMesh.cs): a soft white ball
-// with ruffled membrane folds that flows like an amoeba and stretches a pseudopod out to its mouth.
-// Everything is shaped here, in the vertex stage, so every pass (shadows, depth, depth normals and so
-// the focus outlines) sees the same shape:
+// White blood cells (WhiteBloodCells.cs draws them, mesh from WhiteBloodCellMesh.cs, material
+// WhiteBloodCell.mat): a soft white ball bristling with flowing spikes and ruffled folds that crawls like an
+// amoeba and draws part of its own body out into an arm with a mouth at the end.
+// Everything is shaped here, in the vertex stage, so every pass (shadows, depth, depth normals and so the
+// focus outlines) sees the same shape:
 // - the mesh is a unit sphere in the cell's *reach frame* (+Z = toward the mouth); the membrane is
-//   sampled in the *body* frame, so its folds stay put on the cell while the mouth slides round it;
-// - body: a slow soft undulation, ruffles (ridged noise in patches: thin folded crests, like the
-//   membrane in micrographs), a leading edge that bulges where it crawls, a tail that tapers;
-// - the cap round +Z (CAP_ANGLE, = WhiteBloodCellMesh.CapAngle) becomes the pseudopod: a surface of
-//   revolution whose radius is a smooth max of the body's and a tapered, irregular, meandering finger's,
-//   so it grows out of the body with a fillet instead of a seam. At rest it's a flowing, irregular mouth
-//   on the surface; its lip ruffles and a few wisps drift round it (hunger);
-// - wrap (state.y) folds the lips forward round the prey (state.w, its radius) until they meet in front.
+//   sampled in the *body* frame, so its folds and spikes stay put on the cell while the mouth slides round;
+// - membrane: a slow undulation and rolling swells, ruffles (ridged noise in patches), and spikes (a
+//   Worley field of thorns that grow and retract, each curling along a drifting flow and trailing behind
+//   the crawl); a leading edge that bulges where it crawls, a tail that tapers;
+// - the arm is the body stretched, not a finger stuck on: the cap round +Z (CAP_ANGLE = WhiteBloodCellMesh.
+//   CapAngle) is drawn out into a tube that flares back into the body (_Flare), the body's front slides after
+//   it (_Pull). The membrane and lumps are mapped where the surface really is (Shape's material maps: one fixed
+//   to the body, one to the tip, cross-faded along the arm), so nothing stretches however far it reaches or
+//   wraps. The arm bows behind the spot's motion (_Lag), meanders when slack, thins and
+//   carries swallowing waves (_Peristalsis) when it's pulling a catch in (tension);
+// - at the tip a flowing, irregular mouth; its lip ruffles and a few wisps drift round it (hunger);
+// - wrap (state.y): as a phagocyte does it, the arm necks down to a throat just behind the catch and a thin
+//   skin creeps forward from it over the catch's *real* shape (its farthest surface per direction from the
+//   mouth, captured each frame by ShrinkWrap.cs, extra.w = slot), a rounded lip rolling onto the catch at its
+//   rim and a lining tucked under the uncovered front, so the catch shows there; the rim closes at uneven pace.
+//   Squeeze (extra.z) presses the skin in and jiggles; shut, the lips pucker. Gape (extra.y) opens the mouth wide
+//   as a catch nears. The shape itself is in WhiteBloodCell.hlsl.
+// Lit exactly like the red cells: the same family (BloodCellCore: lumps, fluctuation, bump; BloodCellForward:
+// CellShade, cel bands, hard highlight, rim subsurface), in world mapping, with the lumps on Shape's two
+// material maps (blended where both apply). Its own settings sit outside UnityPerMaterial.
 // Ripples: the cell rides RippleField like anything else (Surface impacts publish there).
-// Normals: the shape evaluated at two nearby directions (finite differences), ripples included.
+// Near cells are baked once a frame (WhiteBloodCellBake.compute: the shape once per vertex, normals from the
+// mesh grid) and every pass here just reads them; far cells are shaped here (finite-difference normals).
+// Ripples go on in the vertex stage either way, the normal bent to match.
 // Per instance (_Cells[_InstanceOffset + SV_InstanceID]): centre + radius, body rotation, reach
 // (world direction, extension in radii), motion (velocity / top speed, seed),
-// state (hunger, wrap, mouth radius in radii, prey radius in radii).
+// state (hunger, wrap, mouth radius in radii, prey radius in radii), sway (spot velocity in radii/s,
+// grip tension), extra (detail fade toward the far mesh, gape, squeeze, catch's wrap slot), merge (MergeShape),
+// side (the reach frame's x axis, carried along with the arm so nothing round it flips).
 Shader "Custom/WhiteBloodCell"
 {
     Properties
     {
-        _Albedo ("Albedo", Color) = (0.95, 0.93, 0.92, 1)
-        _Cavity ("Cavity", Color) = (0.8, 0.72, 0.76, 1)
-        _MouthColor ("Mouth", Color) = (1, 0.45, 0.7, 1)
-        _MouthGlow ("Mouth Glow", Float) = 1.1
-        _Rim ("Rim", Color) = (1, 0.9, 0.94, 1)
-        _Translucency ("Translucency", Range(0, 1)) = 0.6
-        _Smoothness ("Smoothness", Range(0, 1)) = 0.4
+        [Header(Colour (the red cells family))]
+        _Color ("Surface Color (ridges)", Color) = (0.94, 0.91, 0.95, 1)
+        _DeepColor ("Deep Color (hollows)", Color) = (0.42, 0.36, 0.66, 1)
+        _MainTex ("Detail Texture (optional)", 2D) = "white" {}
+        _DetailStrength ("Detail Strength", Range(0,1)) = 0.0
+
+        [Header(Inner Mouth (its own wet flesh, not the membrane))]
+        _MouthColor ("Mouth (rim, fold crests)", Color) = (1, 0.45, 0.7, 1)
+        _MouthDeepColor ("Mouth Depths (throat)", Color) = (0.32, 0.02, 0.12, 1)
+        _MouthGlow ("Mouth Glow", Float) = 0.8
+        _MouthWet ("Wetness (highlight)", Range(0,1)) = 0.85
+        _MouthFolds ("Folds Round the Throat", Float) = 13
+        _MouthFoldDepth ("Fold Depth (m)", Float) = 0.08
+
+        [Header(Surface Relief)]
+        _NoiseScale ("Lump Scale", Float) = 1.3
+        _BumpStrength ("Bump Strength", Range(0,2)) = 1.6
+        _Detail ("Fine Detail", Range(0,1)) = 1
+        _Lacunarity ("Lacunarity", Range(1.5,4)) = 2.19
+        _Gain ("Gain", Range(0.2,0.8)) = 0.42
+
+        [Header(Distance_Stability)]
+        _DetailFadeStart ("Fine Detail Fade Start", Float) = 20
+        _DetailFadeEnd ("Fine Detail Fade End", Float) = 100
+        _DistantTextureDetailMultiplier ("Distant Texture Detail Multiplier", Range(0,1)) = 0.15
+        _DistantDetail ("Distant Fine Detail", Range(0,1)) = 0.32
+        _DistantBumpMultiplier ("Distant Bump Multiplier", Range(0,1)) = 0.24
+
+        [Header(Wetness)]
+        _Glossiness ("Smoothness", Range(0,1)) = 0
+        _GlossVariation ("Smoothness Variation", Range(0,0.5)) = 0.14
+        _SpecTint ("Specular Tint (also tints reflections)", Color) = (0.15, 0.13, 0.17, 1)
+        _OcclusionStrength ("Cavity Shading", Range(0,1)) = 1
+
+        [Header(Subsurface)]
+        _SubsurfaceColor ("Subsurface Color", Color) = (0.78, 0.62, 0.86, 1)
+        _SubsurfaceStrength ("Subsurface Strength", Range(0,3)) = 1.1
+        _RimPower ("Rim Falloff", Range(0.5,8)) = 2.6
+        _ThinGlow ("Thin-Area Glow", Range(0,1)) = 0.6
+
+        [Header(Cel Shading)]
+        [KeywordEnum(Smooth, Cel)] _Shading ("Shading Mode", Float) = 1
+        _LightBands ("Light Bands", Range(2,8)) = 2
+        _BandSoftness ("Band Edge Softness", Range(0,0.25)) = 0.03
+        _ColorSteps ("Surface Color Steps (1 = off)", Range(1,8)) = 1
+        _RimSteps ("Rim Steps", Range(1,4)) = 1
+        _SpecThreshold ("Specular Cutoff", Range(0,1)) = 0.55
+
+        [Header(Fluctuation)]
+        _PulseAmount ("Fluctuation Amount", Range(0,1)) = 0.5
+        _PulseSpeed ("Fluctuation Speed", Range(0,6)) = 1
+        _PulseVariation ("Fluctuation Variation", Range(0,2)) = 2
+        _BlendSharpness ("Triplanar Blend Sharpness", Range(1,32)) = 6.0
+
+        [Header(Membrane)]
+        _Wobble ("Flow Undulation (radii)", Float) = 0.05
+        _Flow ("Flow Speed", Float) = 1
         _Lumps ("Ruffle Height (radii)", Float) = 0.05
         _LumpScale ("Ruffle Frequency", Float) = 2.6
         _FineLumps ("Fine Ruffle Height (radii)", Float) = 0.012
         _FineScale ("Fine Ruffle Frequency", Float) = 8
-        _Wobble ("Flow Undulation (radii)", Float) = 0.04
         _Lobes ("Leading Lobes (radii)", Float) = 0.09
+
+        [Header(Spikes)]
+        _Spikes ("Spike Length (radii)", Float) = 0.14
+        _SpikeScale ("Spike Density", Float) = 4.2
+        _SpikeWidth ("Spike Width", Range(0.1, 0.9)) = 0.45
+        _SpikeSharpness ("Spike Sharpness", Float) = 2.2
+        _SpikeFlow ("Spike Curl", Float) = 1.4
+
+        [Header(Arm and Mouth)]
+        _Pull ("Body Drawn After Arm", Float) = 0.14
+        _Flare ("Arm Base Flare", Float) = 2.6
+        _Lag ("Arm Lag Behind Motion", Float) = 0.4
+        _Peristalsis ("Swallowing Waves", Float) = 0.14
         _Cup ("Mouth Cup Depth", Float) = 0.45
         _Lip ("Lip Height (tip radii)", Float) = 0.25
         _Tendrils ("Wisp Frequency", Float) = 2.6
@@ -53,268 +132,82 @@ Shader "Custom/WhiteBloodCell"
         Tags { "RenderPipeline" = "UniversalPipeline" "RenderType" = "Opaque" "Queue" = "Geometry" }
 
         HLSLINCLUDE
-        #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
-        #include "RippleField.hlsl"
+        #define _SPACE_WORLD 1           // the lumps are mapped by hand (body frame, metres)
+        #include "BloodCellCore.hlsl"    // the red cells' properties, noise, lumps, bump (+ Core, RippleField)
+        #include "ShrinkWrap.hlsl"       // the catch's real shape (ShrinkWrap.cs), for the lips to wrap round
 
-        #define CAP_ANGLE 0.7   // WhiteBloodCellMesh.CapAngle
-        #define TIP_SPLIT 0.4   // share of the cap that rounds the tip; the rest is the shaft
-        #define MOUTH_RIM 0.28  // where the lip rings the mouth, in cap units
-        #define FILLET 0.16     // how softly the finger grows out of the body (radii)
-
-        CBUFFER_START(UnityPerMaterial)
-            float4 _Albedo, _Cavity, _MouthColor, _Rim;
-            float _MouthGlow, _Translucency, _Smoothness, _Lumps, _LumpScale, _FineLumps, _FineScale;
-            float _Wobble, _Lobes, _Cup, _Lip, _Tendrils, _TendrilLength, _Speed;
-            float _RippleAmplitude, _RippleWavelength, _RippleWidth, _RippleSpeed, _RippleDecay, _RippleInitialRadius;
-        CBUFFER_END
-
-        struct Instance { float4 positionRadius, rotation, reach, motion, state; };
-        StructuredBuffer<Instance> _Cells;
-        uint _InstanceOffset;
-        float _Detail; // 1 near (ruffles in the geometry and per pixel), 0 far
+        #include "WhiteBloodCell.hlsl"   // the shape: shared with WhiteBloodCellBake.compute
 
         struct Attributes
         {
             float4 positionOS : POSITION; // unit direction in the reach frame
             uint instanceID   : SV_InstanceID;
+            uint vertexID     : SV_VertexID;
         };
 
-        // ---------------- noise ----------------
+        // Near cells: baked once a frame by WhiteBloodCellBake.compute (_UseBaked 1), one record per vertex per
+        // instance. Far cells: shaped here (plain, cheap: no spikes or ruffles).
+        struct Baked { float4 positionLump, mapMouth, normalTendril, mapTip; };
+        StructuredBuffer<Baked> _Baked;
+        uint _BakedStride; // vertices per instance
+        float _UseBaked;
 
-        float Hash13(float3 p)
+        struct Surfel { float3 positionWS, normalWS, mapPos; float4 mapTip; float lump, mouth, tendril; };
+
+        float3 Place(Instance inst, Frame f, float3 p) { return inst.positionRadius.xyz + ToWorld(f, p) * inst.positionRadius.w; }
+
+        // Rides impact ripples like a cell: offset, and the normal bent to match (two taps a hand's width away).
+        void Ride(inout float3 p, inout float3 n)
         {
-            p = frac(p * 0.1031);
-            p += dot(p, p.zyx + 31.32);
-            return frac((p.x + p.y) * p.z);
-        }
-
-        // Value noise (0..1) with its gradient (xyz of the result's yzw), quintic fade.
-        float4 NoiseD(float3 x)
-        {
-            float3 i = floor(x), w = x - i;
-            float3 u = w * w * w * (w * (w * 6.0 - 15.0) + 10.0);
-            float3 du = 30.0 * w * w * (w * (w - 2.0) + 1.0);
-            float a = Hash13(i), b = Hash13(i + float3(1, 0, 0)), c = Hash13(i + float3(0, 1, 0)), d = Hash13(i + float3(1, 1, 0));
-            float e = Hash13(i + float3(0, 0, 1)), f = Hash13(i + float3(1, 0, 1)), g = Hash13(i + float3(0, 1, 1)), h = Hash13(i + float3(1, 1, 1));
-            float k1 = b - a, k2 = c - a, k3 = e - a, k4 = a - b - c + d, k5 = a - c - e + g, k6 = a - b - e + f, k7 = -a + b + c - d + e - f - g + h;
-            float v = a + k1 * u.x + k2 * u.y + k3 * u.z + k4 * u.x * u.y + k5 * u.y * u.z + k6 * u.z * u.x + k7 * u.x * u.y * u.z;
-            float3 grad = du * float3(k1 + k4 * u.y + k6 * u.z + k7 * u.y * u.z,
-                                      k2 + k5 * u.z + k4 * u.x + k7 * u.z * u.x,
-                                      k3 + k6 * u.x + k5 * u.y + k7 * u.x * u.y);
-            return float4(v, grad);
-        }
-
-        float Noise(float3 x)
-        {
-            float3 i = floor(x), f = x - i;
-            f = f * f * (3.0 - 2.0 * f);
-            float a = lerp(Hash13(i), Hash13(i + float3(1, 0, 0)), f.x);
-            float b = lerp(Hash13(i + float3(0, 1, 0)), Hash13(i + float3(1, 1, 0)), f.x);
-            float c = lerp(Hash13(i + float3(0, 0, 1)), Hash13(i + float3(1, 0, 1)), f.x);
-            float d = lerp(Hash13(i + float3(0, 1, 1)), Hash13(i + float3(1, 1, 1)), f.x);
-            return lerp(lerp(a, b, f.y), lerp(c, d, f.y), f.z);
-        }
-
-        // Membrane ruffles: thin crests along the noise's mid-line (ridged), only in patches. 0..1, gradient out.
-        float Ruffle(float3 x, float seed, out float3 grad)
-        {
-            float4 n = NoiseD(x);
-            float s = n.x * 2.0 - 1.0;
-            float r = 1.0 - abs(s);
-            float m = smoothstep(0.32, 0.72, Noise(x * 0.37 + seed + 11.3));
-            grad = 3.0 * r * r * (-sign(s) * 2.0 * n.yzw) * m;
-            return r * r * r * m;
-        }
-
-        // ---------------- frames ----------------
-
-        float3 Rotate(float4 q, float3 v) { return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
-        float3 InvRotate(float4 q, float3 v) { return Rotate(float4(-q.xyz, q.w), v); }
-
-        struct Frame
-        {
-            float3 x, y, z;    // reach frame in world (z = toward the mouth)
-            float4 body;       // body rotation
-            float3 move;       // motion in the reach frame (0..1 long)
-            float2 bend1, bend2; // the finger's meander (one bow, one S)
-            float seed, hunger, wrap, tip, prey, ext, t;
-        };
-
-        Frame MakeFrame(Instance inst)
-        {
-            Frame f;
-            f.body = inst.rotation;
-            f.z = normalize(inst.reach.xyz);
-            float3 bx = Rotate(f.body, float3(1, 0, 0));
-            if (abs(dot(bx, f.z)) > 0.95) bx = Rotate(f.body, float3(0, 1, 0));
-            f.x = normalize(bx - f.z * dot(bx, f.z));
-            f.y = cross(f.z, f.x);
-            float3 m = inst.motion.xyz;
-            f.move = float3(dot(m, f.x), dot(m, f.y), dot(m, f.z));
-            f.seed = inst.motion.w;
-            f.hunger = inst.state.x;
-            f.wrap = inst.state.y;
-            f.prey = inst.state.w;
-            // The mouth opens wide enough for what it's wrapping.
-            f.tip = lerp(inst.state.z, max(inst.state.z, f.prey * 1.35), f.wrap);
-            f.ext = inst.reach.w;
-            f.t = _Time.y * _Speed + f.seed * 7.0;
-            float s = f.seed * 1.37;
-            f.bend1 = float2(Noise(float3(f.t * 0.23, s, 1.1)), Noise(float3(s, f.t * 0.21, 4.7))) - 0.5;
-            f.bend2 = float2(Noise(float3(f.t * 0.31, s, 8.3)), Noise(float3(s, f.t * 0.27, 2.9))) - 0.5;
-            return f;
-        }
-
-        float3 ToWorld(Frame f, float3 v) { return f.x * v.x + f.y * v.y + f.z * v.z; }
-        float3 ToBody(Frame f, float3 v) { return InvRotate(f.body, ToWorld(f, v)); }
-
-        // ---------------- shape ----------------
-
-        // How far the membrane sits off the plain shape at reach-frame point p (radii). lump: ruffle crest 0..1.
-        float Membrane(Frame f, float3 p, out float lump)
-        {
-            float3 q = ToBody(f, p); // sampled on the body, so the folds stay put
-            float3 flow = float3(f.t * 0.05, -f.t * 0.03, f.t * 0.04);
-            float h = _Wobble * (Noise(q * 1.5 + float3(0.0, f.t * 0.12, f.t * 0.07) + f.seed) - 0.5) * 2.0
-                    + _Wobble * 0.5 * (Noise(q * 3.1 - flow * 2.0 + f.seed * 2.3) - 0.5) * 2.0;
-            lump = 0.0;
-            if (_Detail > 0.5)
-            {
-                float3 g;
-                lump = Ruffle(q * _LumpScale + flow + f.seed, f.seed, g);
-                h += _Lumps * lump;
-            }
-
-            // Amoeboid crawl: the leading edge bulges and feels about with two lobes, the tail tapers.
-            float mv = length(f.move);
-            if (mv > 1e-3)
-            {
-                float3 d = normalize(p);
-                float3 m = f.move / mv;
-                float lead = dot(d, m);
-                h += mv * (_Lobes * 0.6 * smoothstep(0.1, 1.0, lead) - _Lobes * 0.4 * smoothstep(0.4, 1.0, -lead));
-                float3 u = normalize(cross(m, abs(m.y) < 0.9 ? float3(0, 1, 0) : float3(1, 0, 0)));
-                float3 v = cross(m, u);
-                [unroll] for (int k = 0; k < 2; k++)
-                {
-                    float a = f.t * (0.35 + 0.2 * k) + f.seed * 3.0 + k * 3.1;
-                    float3 ld = normalize(m + 0.8 * (cos(a) * u + sin(a) * v));
-                    float grow = 0.5 + 0.5 * sin(f.t * 0.9 + k * 2.3 + f.seed);
-                    h += mv * _Lobes * grow * pow(saturate(dot(d, ld)), 12.0);
-                }
-            }
-            return h;
-        }
-
-        // Full shape (reach frame, radii). mouth: 1 in the mouth; tendril: lip and wisps.
-        float3 Shape(Frame f, float3 d, out float lump, out float mouth, out float tendril)
-        {
-            mouth = 0.0;
-            tendril = 0.0;
-            float u = acos(clamp(d.z, -1.0, 1.0)) / CAP_ANGLE;
-            if (u >= 1.0) return d * (1.0 + Membrane(f, d, lump));
-
-            float phi = atan2(d.y, d.x);
-            float2 radial = float2(cos(phi), sin(phi));
-            float e = f.ext, rt = f.tip;
-            float zTop = 1.0 + e, zRim = cos(CAP_ANGLE), D = zTop - zRim;
-
-            // Height along the cap: like the sphere at rest, tip hemisphere + shaft when stretched.
-            float k = smoothstep(0.02, 0.35, e);
-            float dzRest = D * (1.0 - cos(u * HALF_PI));
-            float tipD = min(rt, D);
-            float dzReach = u < TIP_SPLIT ? tipD * (1.0 - cos(u / TIP_SPLIT * HALF_PI))
-                                          : tipD + (u - TIP_SPLIT) / (1.0 - TIP_SPLIT) * (D - tipD);
-            float z = zTop - lerp(dzRest, dzReach, k);
-
-            // The finger: a round-tipped cone, lumpy in section and flowing, kept inside the cap's rim.
-            float c = zTop - rt;
-            float rf = z > c ? sqrt(max(rt * rt - (z - c) * (z - c), 0.0)) : rt + (c - z) * 0.2;
-            rf *= 1.0 + 0.3 * (Noise(float3(radial * 1.3, z * 2.2 - f.t * 0.35) + f.seed) - 0.5);
-            rf = min(rf, sin(CAP_ANGLE) - FILLET - 0.02);
-            // Smooth max with the body's section: the finger grows out of it with a fillet.
-            float rb = sqrt(max(1.0 - z * z, 0.0));
-            float hk = saturate((FILLET - abs(rf - rb)) / FILLET) * saturate(rb * 8.0);
-            float rho = max(rf, rb) + hk * hk * FILLET * 0.25;
-            float fingerW = saturate(0.5 + 0.5 * (rf - rb) / FILLET);
-
-            // It meanders, bowing and snaking, pinned at both ends so the mouth stays on the spot.
-            float along = saturate((z - zRim) / max(D, 1e-3));
-            float2 bend = (f.bend1 * sin(PI * along) + f.bend2 * 0.6 * sin(TWO_PI * along)) * 0.3 * e * k;
-
-            float3 p = float3(radial * rho + bend, z);
-            float3 axisPoint = float3(bend, clamp(z, 0.0, c));
-            float3 out1 = normalize(lerp(normalize(p), normalize(p - axisPoint + 1e-5), fingerW));
-            float h = Membrane(f, p, lump) * (1.0 - 0.5 * fingerW);
-
-            // The mouth: an irregular, flowing opening; its rim wanders round and breathes.
-            float rim = MOUTH_RIM * (1.0 + 0.7 * (Noise(float3(radial * 1.6, f.t * 0.25) + f.seed * 1.7) - 0.5));
-            float cup = 1.0 - saturate(u / rim);
-            mouth = smoothstep(0.0, 0.3, cup);
-            float3 axis = normalize(lerp(d, float3(0, 0, 1), k));
-            p -= axis * _Cup * rt * cup * (2.0 - cup) * (0.35 + 0.65 * f.hunger);
-
-            // Its lip, ruffled and thicker in places.
-            float lipN = Noise(float3(radial * 2.4, f.t * 0.4) + f.seed * 3.1);
-            float lip = exp(-pow((u - rim) / 0.06, 2.0)) * (0.4 + 1.2 * lipN);
-            h += _Lip * rt * lip * (0.4 + 0.6 * f.hunger);
-
-            // A few wisps drift round the lip, growing and shrinking, reaching forward.
-            float wn = Noise(float3(radial * _Tendrils, f.t * 0.3) + f.seed * 5.3);
-            float wisp = pow(saturate((wn - 0.5) / 0.5), 1.5) * exp(-pow((u - rim - 0.07) / 0.08, 2.0));
-            float2 swirl = float2(-radial.y, radial.x) * (Noise(float3(radial * 2.0, f.t * 0.5) + 9.1) - 0.5);
-            float3 wispDir = normalize(out1 + axis * 1.1 + float3(swirl, 0.0));
-            p += out1 * h + wispDir * _TendrilLength * wisp * (0.3 + 0.7 * f.hunger) * (1.0 - f.wrap);
-            tendril = saturate(lip * 0.6 + wisp * 2.0);
-
-            // Wrapping: the lips flow forward round the prey (centred on the tip) until they meet in front,
-            // an outer layer over it and an inner one hugging it. The lips don't all move at the same pace.
-            if (f.wrap > 1e-3 && u < TIP_SPLIT)
-            {
-                float v = u / TIP_SPLIT;
-                float pr = max(f.prey, 0.04);
-                float ro = max(pr * 1.3, rt * 1.05), ri = pr * 1.04;
-                float pace = 0.8 + 0.4 * Noise(float3(radial * 1.8, f.t * 0.6) + f.seed * 2.2);
-                float front = lerp(PI * 0.6, 0.03, saturate(f.wrap * pace));
-                float back = PI - asin(saturate(rt / ro));
-                float beta = v < 0.5 ? lerp(PI, front, v / 0.5) : lerp(front, back, (v - 0.5) / 0.5);
-                float r = lerp(ri, ro, smoothstep(0.35, 0.65, v)) * (1.0 + 0.06 * (lipN - 0.5));
-                float3 wrapped = float3(0, 0, zTop) + r * float3(radial * sin(beta), cos(beta));
-                p = lerp(p, wrapped, f.wrap * (1.0 - smoothstep(0.7, 1.0, v)));
-                mouth *= 1.0 - f.wrap * 0.6;
-            }
-            return p;
-        }
-
-        struct Surfel { float3 positionWS, normalWS, bodyPos; float lump, mouth, tendril; };
-
-        float3 Place(Instance inst, Frame f, float3 p)
-        {
-            float3 w = inst.positionRadius.xyz + ToWorld(f, p) * inst.positionRadius.w;
-            return w + RippleFieldOffset(w); // rides impact ripples like a cell
+            if (_RippleFieldCellCount < 0.5) return;
+            float3 t1 = normalize(cross(n, abs(n.y) < 0.9 ? float3(0, 1, 0) : float3(1, 0, 0))), t2 = cross(n, t1);
+            const float E = 0.15;
+            float3 p0 = p + RippleFieldOffset(p), p1 = p + t1 * E, p2 = p + t2 * E;
+            p1 += RippleFieldOffset(p1);
+            p2 += RippleFieldOffset(p2);
+            float3 m = cross(p1 - p0, p2 - p0); // cross(t1, t2) = n: faces out
+            p = p0;
+            if (dot(m, m) > 1e-12) n = normalize(m);
         }
 
         Surfel Evaluate(Attributes v)
         {
-            Instance inst = _Cells[_InstanceOffset + v.instanceID];
-            Frame f = MakeFrame(inst);
-            float3 d = normalize(v.positionOS.xyz);
-
             Surfel o;
-            float3 p = Shape(f, d, o.lump, o.mouth, o.tendril);
-            // Normal from two nearby directions: Cross(t1, t2) = d, so the cross faces out.
-            float3 t1 = normalize(cross(d, abs(d.z) < 0.99 ? float3(0, 0, 1) : float3(1, 0, 0)));
-            float3 t2 = cross(d, t1);
-            const float E = 0.01;
-            float a, b, c;
-            float3 w0 = Place(inst, f, p);
-            float3 w1 = Place(inst, f, Shape(f, normalize(d + t1 * E), a, b, c));
-            float3 w2 = Place(inst, f, Shape(f, normalize(d + t2 * E), a, b, c));
-            float3 n = cross(w1 - w0, w2 - w0);
-
-            o.positionWS = w0;
-            o.normalWS = dot(n, n) > 1e-14 ? normalize(n) : ToWorld(f, d);
-            o.bodyPos = ToBody(f, p);
+            float3 p, n;
+            if (_UseBaked > 0.5)
+            {
+                Baked b = _Baked[v.instanceID * _BakedStride + v.vertexID];
+                p = b.positionLump.xyz;
+                n = b.normalTendril.xyz;
+                o.mapPos = b.mapMouth.xyz;
+                o.lump = b.positionLump.w;
+                o.mouth = b.mapMouth.w;
+                o.tendril = b.normalTendril.w;
+                o.mapTip = b.mapTip;
+            }
+            else
+            {
+                Instance inst = _Cells[_InstanceOffset + v.instanceID];
+                Frame f = MakeFrame(inst);
+                float3 d = normalize(v.positionOS.xyz);
+                // Normal from two nearby directions: Cross(t1, t2) = d, so the cross faces out.
+                float3 t1 = normalize(cross(d, abs(d.z) < 0.99 ? float3(0, 0, 1) : float3(1, 0, 0)));
+                float3 t2 = cross(d, t1);
+                const float E = 0.01;
+                float a, b, c;
+                float3 map, mx;
+                float4 mapTip, mt;
+                p = Place(inst, f, Shape(f, d, o.lump, o.mouth, o.tendril, map, mapTip));
+                float3 w1 = Place(inst, f, Shape(f, normalize(d + t1 * E), a, b, c, mx, mt));
+                float3 w2 = Place(inst, f, Shape(f, normalize(d + t2 * E), a, b, c, mx, mt));
+                n = cross(w1 - p, w2 - p);
+                n = dot(n, n) > 1e-14 ? normalize(n) : ToWorld(f, d);
+                o.mapPos = map * inst.positionRadius.w; // material maps (m), see Shape
+                o.mapTip = float4(mapTip.xyz * inst.positionRadius.w, mapTip.w);
+            }
+            Ride(p, n);
+            o.positionWS = p;
+            o.normalWS = n;
             return o;
         }
         ENDHLSL
@@ -326,81 +219,157 @@ Shader "Custom/WhiteBloodCell"
 
             HLSLPROGRAM
             #pragma vertex vert
-            #pragma fragment frag
+            #pragma fragment WhiteFrag
             #pragma target 4.5
             #pragma multi_compile _ _MAIN_LIGHT_SHADOWS _MAIN_LIGHT_SHADOWS_CASCADE _MAIN_LIGHT_SHADOWS_SCREEN
+            #pragma multi_compile _ _ADDITIONAL_LIGHTS_VERTEX _ADDITIONAL_LIGHTS
+            #pragma multi_compile _ _FORWARD_PLUS
+            #pragma multi_compile_fragment _ _ADDITIONAL_LIGHT_SHADOWS
             #pragma multi_compile_fragment _ _SHADOWS_SOFT
             #pragma multi_compile_fog
-            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
+            #pragma shader_feature_local_fragment _SHADING_SMOOTH _SHADING_CEL
 
-            struct Varyings
+            #include "BloodCellForward.hlsl" // CellShade: the red cells' lighting
+
+            struct WhiteVaryings
             {
                 float4 positionCS : SV_POSITION;
                 float3 positionWS : TEXCOORD0;
                 float3 normalWS   : TEXCOORD1;
-                float3 bodyPos    : TEXCOORD2;
-                float3 marks      : TEXCOORD3; // ruffle crest, mouth, lip/wisps
+                float3 mapPos     : TEXCOORD2;
+                float3 marks      : TEXCOORD3; // ruffle / spike crest, mouth, lip / wisps
                 float  fog        : TEXCOORD4;
                 nointerpolation uint id : TEXCOORD5;
+                float4 mapTip     : TEXCOORD6; // the tip's material map, w = its share
             };
 
-            Varyings vert(Attributes v)
+            WhiteVaryings vert(Attributes v)
             {
                 Surfel s = Evaluate(v);
-                Varyings o;
+                WhiteVaryings o;
                 o.positionWS = s.positionWS;
                 o.positionCS = TransformWorldToHClip(s.positionWS);
                 o.normalWS = s.normalWS;
-                o.bodyPos = s.bodyPos;
+                o.mapPos = s.mapPos;
+                o.mapTip = s.mapTip;
                 o.marks = float3(s.lump, s.mouth, s.tendril);
                 o.fog = ComputeFogFactor(o.positionCS.z);
                 o.id = _InstanceOffset + v.instanceID;
                 return o;
             }
 
-            half4 frag(Varyings i) : SV_Target
+            // Fine creases (the ridged noise's value and gradient) and the red cells' lumps at one material map.
+            void Relief(float3 map, float R, float seed, bool fineOn, float fade, out float fine, out float3 fineGrad, out float4 hd)
             {
-                Instance inst = _Cells[i.id];
-                float seed = inst.motion.w, hunger = inst.state.x;
-                float crest = saturate(i.marks.x), mouth = saturate(i.marks.y), tendril = saturate(i.marks.z);
-                float3 n = normalize(i.normalWS);
-                float3 v = normalize(GetWorldSpaceViewDir(i.positionWS));
-
-                // Fine membrane creases per pixel (bump from the ridged noise's own gradient), and a soft mottle.
-                float mottle = Noise(i.bodyPos * 2.3 + seed);
-                float fine = 0.0;
-                if (_Detail > 0.5)
+                fine = 0.0;
+                fineGrad = 0.0;
+                if (fineOn)
                 {
                     float t = _Time.y * _Speed + seed * 7.0;
-                    float3 g;
-                    fine = Ruffle(i.bodyPos * _FineScale + float3(t * 0.08, 0.0, -t * 0.05) + seed * 1.3, seed + 5.0, g);
-                    float3 grad = Rotate(inst.rotation, g) * (_FineLumps * _FineScale * (1.0 - mouth));
-                    n = normalize(n - (grad - n * dot(grad, n)));
+                    fine = Ruffle(map / R * _FineScale + float3(t * 0.08, 0.0, -t * 0.05) + seed * 1.3, seed + 5.0, fineGrad);
                 }
-                float cavity = saturate(0.35 * (1.0 - crest) * (1.0 - fine) + 0.4 * (mottle - 0.5));
+                hd = SurfaceHeight(map + seed * 13.1, fade);
+            }
 
-                Light l = GetMainLight(TransformWorldToShadowCoord(i.positionWS));
-                float atten = l.shadowAttenuation * l.distanceAttenuation;
-                float3 albedo = lerp(_Albedo.rgb, _Cavity.rgb, cavity);
-                albedo = lerp(albedo, _MouthColor.rgb, saturate(mouth * 0.7 + tendril * 0.3));
+            // The inside of the mouth: not the membrane but wet flesh. Radial folds drawing into a dark throat (they
+            // wander, and swallowing rings run down them), glossy, lit wrapped like flesh, in the same bands and hard
+            // highlight as the cells. Polar coordinates round the mouth's axis from the instance (the spot and reach),
+            // the folds' relief turned into a normal from its screen derivatives.
+            half3 MouthShade(Instance inst, float3 positionWS, float4 positionCS, float3 geoN, float mouth)
+            {
+                float R = max(inst.positionRadius.w, 1e-3), seed = inst.motion.w;
+                float3 axis = normalize(inst.reach.xyz);
+                float3 spot = inst.positionRadius.xyz + axis * R * (1.0 + inst.reach.w);
+                float3 bx = ReachSide(inst, axis); // the shape's own frame, so the folds turn with the lip
+                float3 by = cross(axis, bx), local = positionWS - spot;
+                float2 pl = float2(dot(local, bx), dot(local, by));
+                float open = max(TipRadius(inst) * 0.92 * R, 1e-3); // the rim's radius (MOUTH_RIM round the rounded tip)
+                float rr = length(pl) / open, phi = atan2(pl.y, pl.x + 1e-7); // atan2(0, 0) is NaN on D3D
+                float t = _Time.y * _Speed + seed * 7.0;
 
-                float nl = dot(n, l.direction);
-                float wrap = saturate((nl + 0.6) / 1.6);                                  // soft, fleshy
-                float thin = 0.6 + 0.8 * max(crest, fine);                                  // folds let light through
-                float back = pow(saturate(dot(v, -l.direction)), 3.0) * _Translucency * thin * (1.0 - saturate(nl));
-                float3 h = normalize(l.direction + v);
-                float spec = pow(saturate(dot(n, h)), exp2(10.0 * _Smoothness + 1.0)) * _Smoothness * (1.0 - cavity * 0.6);
-                float fres = pow(1.0 - saturate(dot(n, v)), 3.0);
+                // Folds: ridges round the throat, wandering, fading out into its centre; rings swallowed inward.
+                float wander = (Noise(float3(rr * 3.0 - t * 0.2, phi * 1.5, seed)) - 0.5) * 2.5;
+                float ridge = 0.5 + 0.5 * cos(phi * round(_MouthFolds) + wander);
+                ridge = ridge * ridge * smoothstep(0.08, 0.45, rr);
+                float rings = 0.5 + 0.5 * sin(rr * 16.0 + t * 2.5);
+                float relief = ridge + 0.35 * rings * rings * smoothstep(0.05, 0.3, rr);
 
-                float ao = 1.0 - cavity * 0.4;
-                float3 col = albedo * (SampleSH(n) * ao + l.color * (wrap * atten + back));
-                col += l.color * spec * atten;
-                col += _Rim.rgb * fres * 0.5 * ao;
-                // The mouth glows (brighter hungry, a slow pulse) so you can see where it's aimed.
+                // Relief -> normal (surface gradient from screen derivatives).
+                float height = relief * _MouthFoldDepth;
+                float3 dpdx = ddx(positionWS), dpdy = ddy(positionWS);
+                float3 r1 = cross(dpdy, geoN), r2 = cross(geoN, dpdx);
+                float det = dot(dpdx, r1);
+                float3 n = abs(det) > 1e-12 ? normalize(abs(det) * geoN - sign(det) * (ddx(height) * r1 + ddy(height) * r2)) : geoN;
+
+                // Deeper = darker; crests catch the light.
+                float deep = saturate(1.0 - rr) * saturate(mouth);
+                half3 albedo = lerp(_MouthColor.rgb, _MouthDeepColor.rgb, smoothstep(0.0, 0.85, deep));
+                albedo *= lerp(0.6, 1.15, relief / 1.35);
+
+                float3 viewWS = GetWorldSpaceNormalizeViewDir(positionWS);
+                Light light = GetMainLight(TransformWorldToShadowCoord(positionWS));
+                float lit = saturate(dot(n, light.direction) * 0.5 + 0.5) * light.shadowAttenuation * light.distanceAttenuation;
+                float3 hv = normalize(light.direction + viewWS);
+                float spec = pow(saturate(dot(n, hv)), lerp(8.0, 90.0, _MouthWet)) * _MouthWet * light.shadowAttenuation;
+            #ifdef _SHADING_CEL
+                lit = QuantizeBand(lit, _LightBands, _BandSoftness);
+                spec = smoothstep(_SpecThreshold - 0.03, _SpecThreshold + 0.03, spec) * _MouthWet;
+            #endif
+                float fres = pow(1.0 - saturate(dot(n, viewWS)), 3.0);
+                half3 rgb = albedo * (light.color * lit + SampleSH(n))
+                          + light.color * spec * 0.9
+                          + _MouthColor.rgb * fres * 0.35 * (1.0 - deep);             // wet rim sheen
                 float pulse = 0.75 + 0.25 * sin(_Time.y * 3.0 + seed);
-                col += _MouthColor.rgb * _MouthGlow * (mouth * 0.8 + tendril * 0.4) * (0.25 + 0.75 * hunger) * pulse;
-                col = MixFog(col, i.fog);
-                return half4(col, 1);
+                rgb += albedo * _MouthGlow * (0.25 + 0.75 * inst.state.x) * pulse
+                     * (1.0 + 1.5 * saturate(abs(inst.extra.z))) * (0.4 + 0.6 * deep); // glows from the throat
+                return rgb;
+            }
+
+            half4 WhiteFrag(WhiteVaryings i) : SV_Target
+            {
+                Instance inst = _Cells[i.id];
+                float seed = inst.motion.w, hunger = inst.state.x, R = max(inst.positionRadius.w, 1e-3);
+                float crest = saturate(i.marks.x), mouth = saturate(i.marks.y), tendril = saturate(i.marks.z);
+                float3 geoN = normalize(i.normalWS);
+                float detail = _LodDetail * inst.extra.x, fade = DetailFade(i.positionWS);
+
+                // Relief on the body's map, the tip's, or (along the arm) both, blended keeping its contrast.
+                float a = saturate(i.mapTip.w), fine = 0.0;
+                float3 g = 0.0;
+                float4 hd = float4(0.5, 0.0, 0.0, 0.0);
+                if (a < 0.999) Relief(i.mapPos, R, seed, detail > 0.01, fade, fine, g, hd);
+                if (a > 0.001)
+                {
+                    float fine2;
+                    float3 g2;
+                    float4 hd2;
+                    Relief(i.mapTip.xyz, R, seed, detail > 0.01, fade, fine2, g2, hd2);
+                    float keep = rsqrt(a * a + (1.0 - a) * (1.0 - a)); // two blended fields are flatter than either
+                    fine = lerp(fine, fine2, a);
+                    g = lerp(g, g2, a) * keep;
+                    hd = lerp(hd, hd2, a);
+                    hd = float4(0.5 + (hd.x - 0.5) * keep, hd.yzw * keep);
+                }
+
+                // Fine membrane creases tilt the normal first...
+                float3 grad = WbcRotate(inst.rotation, g) * (_FineLumps * _FineScale * detail * (1.0 - mouth));
+                geoN = normalize(geoN - (grad - geoN * dot(grad, geoN)));
+
+                // ...then the red cells' own lumps, fluctuation and bump.
+                float3 n = BumpNormal(geoN, float4(hd.x, WbcRotate(inst.rotation, hd.yzw)), float4(0, 0, 0, 0), fade);
+                // Crests (spikes, folds) read as raised and thin; the mouth as deep.
+                float h = saturate(hd.x * 0.75 + crest * 0.35 + fine * 0.2 - mouth * 0.4);
+                half3 rgb = CellShade(i.positionWS, i.positionCS, a > 0.5 ? i.mapTip.xyz : i.mapPos, geoN, n, h, fade);
+
+                // The lip and wisps: the membrane, flushed and glowing a little (brighter hungry, a flash per squeeze).
+                float pulse = 0.75 + 0.25 * sin(_Time.y * 3.0 + seed);
+                float m = saturate(tendril * 0.5 + mouth * 0.3);
+                rgb = lerp(rgb, rgb * _MouthColor.rgb * 1.4, m * 0.6);
+                rgb += _MouthColor.rgb * _MouthGlow * m * 0.5 * (0.25 + 0.75 * hunger) * pulse * (1.0 + 1.5 * saturate(abs(inst.extra.z)));
+                // Inside: its own flesh.
+                float inner = smoothstep(0.15, 0.7, mouth);
+                rgb = lerp(rgb, MouthShade(inst, i.positionWS, i.positionCS, geoN, mouth), inner); // no branch: it takes screen derivatives
+                return half4(MixFog(rgb, i.fog), 1.0);
             }
             ENDHLSL
         }

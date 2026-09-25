@@ -110,6 +110,75 @@ public static class Synth
         }
     }
 
+    /// <summary>A sine gliding from one pitch to another over 'glide' seconds (smoothstepped; 0 = the whole length),
+    /// with an 'attack' s fade-in and an exponential decay (per second).</summary>
+    public static void Glide(float[] buf, float start, float length, float fromHz, float toHz, float attack, float decay, float gain, float glide = 0f)
+    {
+        if (glide <= 0f) glide = length;
+        int from = Samples(start), count = Mathf.Min(buf.Length / 2 - from, Samples(length));
+        double phase = 0;
+        for (int i = 0; i < count; i++)
+        {
+            float t = i / (float)Rate;
+            phase += 2.0 * Math.PI * Mathf.Lerp(fromHz, toHz, Mathf.SmoothStep(0f, 1f, t / glide)) / Rate;
+            float v = (float)Math.Sin(phase) * Mathf.SmoothStep(0f, 1f, t / attack) * Mathf.Exp(-t * decay) * gain;
+            int k = (from + i) * 2;
+            buf[k] += v;
+            buf[k + 1] += v;
+        }
+    }
+
+    /// <summary>A soft glassy tone: two sines 0.2% apart (a slow shimmer between them), eased in over 0.12 s
+    /// and dying away over `decay` seconds, so it has no attack to hear as a note or a zap.</summary>
+    public static void Shimmer(float[] buf, float start, float freq, float gain, float decay, float pan)
+    {
+        int from = Samples(start), count = Mathf.Min(buf.Length / 2 - from, Samples(decay * 4f));
+        float left = gain * Mathf.Sqrt(0.5f * (1f - pan)), right = gain * Mathf.Sqrt(0.5f * (1f + pan));
+        double a = 0, b = 0;
+        for (int i = 0; i < count; i++)
+        {
+            float t = i / (float)Rate;
+            a += 2.0 * System.Math.PI * freq * 0.999 / Rate;
+            b += 2.0 * System.Math.PI * freq * 1.001 / Rate;
+            float v = (float)(System.Math.Sin(a) + System.Math.Sin(b)) * 0.5f * Mathf.SmoothStep(0f, 1f, t / 0.12f) * Mathf.Exp(-t / decay);
+            int k = (from + i) * 2;
+            buf[k] += v * left;
+            buf[k + 1] += v * right;
+        }
+    }
+
+    /// <summary>A short burst of band-passed noise with a fast attack and exponential decay (a tick, a scrape grain).</summary>
+    public static void Grain(float[] buf, float start, float hz, float q, float length, float gain, float pan, uint seed)
+    {
+        int from = Samples(start), count = Mathf.Min(buf.Length / 2 - from, Samples(length * 4f));
+        if (count <= 0) return;
+        var rng = new Noise(seed);
+        Biquad band = default;
+        band.Bandpass(hz, q);
+        float left = gain * Mathf.Sqrt(0.5f * (1f - pan)), right = gain * Mathf.Sqrt(0.5f * (1f + pan));
+        for (int i = 0; i < count; i++)
+        {
+            float t = i / (float)Rate;
+            float v = band.Process(rng.Next()) * Mathf.Min(1f, t * 2000f) * Mathf.Exp(-t / length);
+            int k = (from + i) * 2;
+            buf[k] += v * left;
+            buf[k + 1] += v * right;
+        }
+    }
+
+    /// <summary>Low-passes a stereo buffer in place.</summary>
+    public static void Lowpass(float[] buf, float hz)
+    {
+        Biquad l = default, r = default;
+        l.Lowpass(hz, 0.7f);
+        r.Lowpass(hz, 0.7f);
+        for (int i = 0; i < buf.Length; i += 2)
+        {
+            buf[i] = l.Process(buf[i]);
+            buf[i + 1] = r.Process(buf[i + 1]);
+        }
+    }
+
     /// <summary>
     /// Freeverb-style stereo reverb, in place: 8 damped combs + 4 allpasses per side (the right
     /// side's delays spread a little for width). Leave silence at the end of the buffer for the tail.

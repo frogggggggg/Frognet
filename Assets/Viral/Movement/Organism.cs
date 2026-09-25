@@ -236,10 +236,18 @@ public class Organism : MonoBehaviour, ISurfaceContact
 
         // Dynamic root (no separate body child): rotate through physics so interpolation doesn't fight it.
         if (RotatesRoot && !Rb.isKinematic && !_externalRotation)
-            Rb.MoveRotation(Quaternion.Slerp(Rb.rotation, _lean * TargetRotation, RotationWeight(dt)));
+            Rb.MoveRotation(Quaternion.Slerp(Rb.rotation, _lean * Wanted, RotationWeight(dt)));
     }
 
     void OnCollisionEnter(Collision c) => ForEachEffect(e => e.OnCollision(c));
+
+    // A touchdown refused on contact (still Jumping, seized...) would otherwise wait for a fresh contact:
+    // resting on the cell it stayed "flying" for seconds. Retry the landing while touching. Cheap: Ground
+    // returns at once when attached, and a grounded body is kinematic, so it gets no contacts from cells.
+    void OnCollisionStay(Collision c)
+    {
+        if (!grounded.surface.Attached) grounded.surface.OnCollision(c);
+    }
 
     void OnDisable()
     {
@@ -282,6 +290,17 @@ public class Organism : MonoBehaviour, ISurfaceContact
     public Quaternion TargetRotation { get; set; } = Quaternion.identity;
     public Transform RotTarget => body ? body : transform;
 
+    /// <summary>The transform that carries the body as seen: turned, leaned and lifted by BodyOffset
+    /// (the visual child if it sits under the turning one). Things riding the body follow this.</summary>
+    public Transform Shown
+    {
+        get
+        {
+            Transform turned = RotTarget;
+            return visual && visual != transform && visual.IsChildOf(turned) ? visual : turned;
+        }
+    }
+
     /// <summary>Hold the up axis exactly on the target's; only the heading around it eases.
     /// Stops the tilt that easing the whole rotation gives on curved surfaces.</summary>
     [NonSerialized] public bool keepUpright;
@@ -304,7 +323,7 @@ public class Organism : MonoBehaviour, ISurfaceContact
         Quaternion current = RotTarget.rotation;
         if (!_baseValid || Quaternion.Angle(current, _shown) > 0.05f) _base = Quaternion.Inverse(_lean) * current;
 
-        Quaternion to = keepUpright ? Upright(_base, t) : Quaternion.Slerp(_base, TargetRotation, t);
+        Quaternion to = keepUpright ? Upright(_base, t) : Quaternion.Slerp(_base, Wanted, t);
         _base = to;
         _baseValid = true;
         _shown = _lean * to;
@@ -312,6 +331,24 @@ public class Organism : MonoBehaviour, ISurfaceContact
         if (!RotatesRoot) body.rotation = _shown;
         else if (Rb.isKinematic) transform.rotation = _shown; // dynamic: MoveRotation owns it
     }
+
+    // ---------------- restraint ----------------
+
+    Quaternion _restraint = Quaternion.identity;
+    float _restraintAngle = -1f; // < 0: free
+
+    /// <summary>Something has hold of the body (a white cell's mouth): whatever the states aim for, it turns at most
+    /// maxAngle (degrees) away from 'rotation'. Update it as the hold moves; <see cref="ClearRestraint"/> lets go.</summary>
+    public void Restrain(Quaternion rotation, float maxAngle)
+    {
+        _restraint = rotation;
+        _restraintAngle = Mathf.Max(maxAngle, 0f);
+    }
+
+    public void ClearRestraint() => _restraintAngle = -1f;
+
+    /// <summary>TargetRotation, kept within the restraint if something holds the body.</summary>
+    Quaternion Wanted => _restraintAngle < 0f ? TargetRotation : Quaternion.RotateTowards(_restraint, TargetRotation, _restraintAngle);
 
     // ---------------- lean ----------------
 
@@ -355,11 +392,12 @@ public class Organism : MonoBehaviour, ISurfaceContact
     /// <summary>TargetRotation's up, taken whole, with the heading turned only part of the way to it.</summary>
     Quaternion Upright(Quaternion from, float t)
     {
-        Vector3 axis = TargetRotation * Vector3.up;
-        Vector3 want = Vector3.ProjectOnPlane(TargetRotation * Vector3.forward, axis);
+        Quaternion target = Wanted;
+        Vector3 axis = target * Vector3.up;
+        Vector3 want = Vector3.ProjectOnPlane(target * Vector3.forward, axis);
         Vector3 have = Vector3.ProjectOnPlane(from * Vector3.forward, axis);
         if (have.sqrMagnitude < 1e-6f) have = Vector3.ProjectOnPlane(from * Vector3.up, axis); // nose along the axis
-        if (have.sqrMagnitude < 1e-6f || want.sqrMagnitude < 1e-6f) return TargetRotation;
+        if (have.sqrMagnitude < 1e-6f || want.sqrMagnitude < 1e-6f) return target;
 
         have.Normalize();
         want.Normalize();

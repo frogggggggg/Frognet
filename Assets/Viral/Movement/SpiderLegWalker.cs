@@ -144,7 +144,7 @@ public class SpiderLegWalker : MonoBehaviour
     const float MinProbeFacing = 0.5f;  // ground more than 60° off the probe direction doesn't count (skimmed, not stood on)
     const float GroundExitScale = 1.5f; // auto ground detection hysteresis: leaving needs more distance than arriving
 
-    static readonly RaycastHit[] Hits = new RaycastHit[8];
+    static readonly RaycastHit[] Hits = new RaycastHit[16]; // a concave cell is several overlapping pieces (Surface.Collider.cs)
 
     Leg[] _legs;
     Transform _b, _self, _support, _frameSupport;
@@ -163,6 +163,7 @@ public class SpiderLegWalker : MonoBehaviour
     Vector3 _lastPos, _vel, _relVel, _normal, _groundNormal = Vector3.up, _supportLocal, _prevMove;
     float _turn, _gait = 1f, _cycle, _wobblePhase, _lastShapeTime = -999f;
     float _hubHeight = -1f; // hub above the surface it stands on, learned from feet on that surface (-1 unknown)
+    Vector3 _hub; float _reach = float.MaxValue; // Probe ignores ground farther than _reach from _hub (a leg can't get there)
 
     // Rotation wiggle: 0 composed .. 1 fully loose.
     float _wiggle, _turnRate;
@@ -447,6 +448,11 @@ public class SpiderLegWalker : MonoBehaviour
             // down beside the side face and caught a bump on it far below: feet planted a couple of
             // leg lengths down the side. Rejected here, the step wraps round the edge instead.
             if (h.distance <= 0f || Vector3.Dot(h.normal, n) < MinProbeFacing || h.collider.transform.IsChildOf(_self)) continue;
+            // Out of a leg's reach. On a bump or a round cell's crest the ground falls away under the
+            // rest spot and the long probe hit the slope far below: legs stretched down it, and as
+            // that's overstretched the foot kept re-stepping to the same far spot. Rejected, the
+            // step wraps round the crest onto the near slope instead.
+            if ((h.point - _hub).sqrMagnitude > _reach * _reach) continue;
             float gap = Mathf.Abs(h.distance - up);
             if (gap < bestGap) { bestGap = gap; bestI = i; }
             if (own && SameBody(h.collider.transform, own) && gap < ownGap) { ownGap = gap; ownI = i; }
@@ -494,6 +500,8 @@ public class SpiderLegWalker : MonoBehaviour
         Vector3 n = _normal;
         if (fromAir) AlignRingToLanding(n);
         Basis(n, out Vector3 right, out Vector3 fwd);
+        _hub = pos;
+        _reach = footDistance * (1f + SpanMargin);
 
         for (int i = 0; i < _legs.Length; i++)
         {
@@ -515,7 +523,8 @@ public class SpiderLegWalker : MonoBehaviour
                 continue;
             }
 
-            Probe(rest, n, ProbeUp, ProbeDown, out Vector3 foot, out Vector3 hn, out Transform s);
+            if (!Probe(rest, n, ProbeUp, ProbeDown, out Vector3 foot, out Vector3 hn, out Transform s))
+                WrapProbe(pos, rest, n, out foot, out hn, out s);
             l.foot.Set(foot, s);
             l.foot.SetNormal(hn);
             SetPlanted(ref l);
@@ -620,6 +629,8 @@ public class SpiderLegWalker : MonoBehaviour
         // margin, a foot steps out of turn: over a cube's edge the feet left on the old face
         // otherwise stayed planted until twice the leg's length away.
         float maxSpan = Mathf.Min(footDistance * (1f + SpanMargin) + speed * (swingTime + stanceTime * 0.5f), footDistance * MaxSpan);
+        _hub = pos;
+        _reach = maxSpan; // a foot planted farther would be overstretched at once
         bool moving = speed > HoldSpeed;
         bool active = moving;
 

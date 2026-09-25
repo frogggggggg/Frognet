@@ -206,8 +206,8 @@ public class FocusSound : MonoBehaviour
             float u = b / 15f, at = 0.05f + 0.7f * u * u + rng.Range(0f, 0.04f);
             Synth.Bubble(buf, at, 300f + 700f * u + rng.Range(-40f, 40f), rng.Range(0.03f, 0.06f), 0.16f * (1f - 0.6f * u), rng.Range(-0.7f, 0.7f));
         }
-        Shimmer(buf, 0.15f, 1175f, 0.05f, 0.9f, -0.3f);
-        Shimmer(buf, 0.25f, 1760f, 0.035f, 0.8f, 0.3f);
+        Synth.Shimmer(buf, 0.15f, 1175f, 0.05f, 0.9f, -0.3f);
+        Synth.Shimmer(buf, 0.25f, 1760f, 0.035f, 0.8f, 0.3f);
         Synth.Reverb(buf, 0.3f, 0.8f, 0.5f);
         Synth.Normalize(buf, 0.7f);
         return buf;
@@ -225,28 +225,9 @@ public class FocusSound : MonoBehaviour
             float u = b / 5f;
             Synth.Bubble(buf, 0.03f + 0.3f * u + rng.Range(0f, 0.03f), 700f - 350f * u, rng.Range(0.03f, 0.05f), 0.12f, rng.Range(-0.6f, 0.6f));
         }
-        Shimmer(buf, 0.02f, 880f, 0.035f, 0.5f, 0f);
+        Synth.Shimmer(buf, 0.02f, 880f, 0.035f, 0.5f, 0f);
         Synth.Reverb(buf, 0.25f, 0.75f, 0.5f);
         Synth.Normalize(buf, 0.55f);
         return buf;
-    }
-
-    // A soft glassy tone: two sines 0.2% apart (a slow shimmer between them), eased in over 0.12 s
-    // and dying away over `decay` seconds, so it has no attack to hear as a note or a zap.
-    static void Shimmer(float[] buf, float start, float freq, float gain, float decay, float pan)
-    {
-        int from = Synth.Samples(start), count = Mathf.Min(buf.Length / 2 - from, Synth.Samples(decay * 4f));
-        float left = gain * Mathf.Sqrt(0.5f * (1f - pan)), right = gain * Mathf.Sqrt(0.5f * (1f + pan));
-        double a = 0, b = 0;
-        for (int i = 0; i < count; i++)
-        {
-            float t = i / (float)Synth.Rate;
-            a += 2.0 * System.Math.PI * freq * 0.999 / Synth.Rate;
-            b += 2.0 * System.Math.PI * freq * 1.001 / Synth.Rate;
-            float v = (float)(System.Math.Sin(a) + System.Math.Sin(b)) * 0.5f * Mathf.SmoothStep(0f, 1f, t / 0.12f) * Mathf.Exp(-t / decay);
-            int k = (from + i) * 2;
-            buf[k] += v * left;
-            buf[k + 1] += v * right;
-        }
     }
 }

@@ -121,6 +121,10 @@ public class VirusRope : MonoBehaviour
     public float hoverScale = 1.6f;
     [Min(0.01f), Tooltip("Seconds for the base to grow or shrink.")]
     public float hoverTime = 0.12f;
+    [Min(0f), Tooltip("Focus mode: each base shows a glowing core (like a resource chunk's) so it reads as clickable. Its radius, in rope radii. 0 = none.")]
+    public float baseCoreSize = 2.2f;
+    [Tooltip("Custom/ResourceCore. Found by name when empty (editor only: keep it assigned for builds).")]
+    public Shader baseCoreShader;
     [Min(0f), Tooltip("How hard a straightened rope pulls itself into shape (1/s). Higher = stiffer.")]
     public float straightenStrength = 25f;
     [Min(0f), Tooltip("Straightened between two bodies: how quickly the rod moves and turns them until it fits at its own length, square to both surfaces (rad/s). 0 = don't move them.")]
@@ -389,8 +393,8 @@ public class VirusRope : MonoBehaviour
     readonly List<Rope> _ropes = new List<Rope>();
     readonly HashSet<Collider> _playerCols = new HashSet<Collider>();
     readonly Dictionary<Collider, int> _shapeLookup = new Dictionary<Collider, int>(64);
-    readonly Collider[] _overlap = new Collider[64];
-    readonly RaycastHit[] _hits = new RaycastHit[8];
+    readonly Collider[] _overlap = new Collider[256]; // concave cells are many pieces (Surface.Collider.cs)
+    readonly RaycastHit[] _hits = new RaycastHit[16];
     static Vector3[] s_render = new Vector3[256];
     float[] _cos, _sin;
 
@@ -447,6 +451,8 @@ public class VirusRope : MonoBehaviour
         if (_fallbackMat) Destroy(_fallbackMat);
         if (_phantomMat) Destroy(_phantomMat);
         if (_bloodMat) Destroy(_bloodMat);
+        if (_coreMat) Destroy(_coreMat);
+        _coreBuffer?.Release();
         foreach (Material m in _beadMats.Values) if (m) Destroy(m);
         _beadMats.Clear();
         if (_root) Destroy(_root.gameObject);
@@ -514,6 +520,91 @@ public class VirusRope : MonoBehaviour
                 BuildMesh(_ropes[i], alpha, mat);
             DrawPhantom(alpha);
         }
+        DrawBaseCores();
+    }
+
+    // ------------------------------------------------------------------ base cores
+
+    // Focus mode: a glowing core in each base, drawn by the resource cores' own shader (over the sweep,
+    // only inside its circle), so bases read as clickable like a chunk's core. Terminal colours: cyan,
+    // acid green once straightened, blood red while cauterizing; grows and brightens when hovered.
+    // Hidden behind a cell (a raycast per base every BaseSightInterval) unless hovered.
+    struct CoreInstance { public Vector4 positionScale, color, state; }
+    const int CoreStride = 48;
+    const float BaseSightInterval = 0.15f;
+    CoreInstance[] _coreData = new CoreInstance[16];
+    GraphicsBuffer _coreBuffer;
+    Material _coreMat;
+    MaterialPropertyBlock _coreProps;
+    readonly Dictionary<int, Vector2> _baseSight = new Dictionary<int, Vector2>(); // next check, hidden (0/1)
+    static readonly int CoresId = Shader.PropertyToID("_Cores");
+
+    void DrawBaseCores()
+    {
+        if (!ShowBaseCores || baseCoreSize <= 0f)
+        {
+            if (_baseSight.Count > 0) _baseSight.Clear();
+            return;
+        }
+        if (!_coreMat)
+        {
+            Shader shader = baseCoreShader ? baseCoreShader : Shader.Find("Custom/ResourceCore");
+            if (!shader) return;
+            _coreMat = new Material(shader) { name = "Rope Base Core", hideFlags = HideFlags.DontSave };
+        }
+        _coreData ??= new CoreInstance[16]; // plain fields: remade after a play-mode script reload
+        _coreProps ??= new MaterialPropertyBlock();
+
+        Vector3 eye = SimulationTicker.CameraPosition;
+        float now = Time.time;
+        int n = 0;
+        var bounds = new Bounds();
+        foreach (Rope r in _ropes)
+            for (int end = 0; end < 2; end++)
+            {
+                if (!(end == 0 ? r.BaseA : r.BaseB)) continue;
+                Anchor an = end == 0 ? r.a : r.b;
+                int handle = r.id * 2 + end;
+                float scale = end == 0 ? r.scaleA : r.scaleB;
+                float radius = ropeRadius * baseCoreSize * scale;
+                Vector3 p = an.RenderPoint;
+                if (!SimulationTicker.OnScreen(p, radius)) continue;
+
+                if (!_baseSight.TryGetValue(handle, out Vector2 sight) || now >= sight.x)
+                {
+                    bool hidden = Occluded(eye, p + an.RenderNormal * (ropeRadius * 2f));
+                    sight = new Vector2(now + BaseSightInterval * Random.Range(0.8f, 1.2f), hidden ? 1f : 0f);
+                    _baseSight[handle] = sight;
+                }
+                if (sight.y > 0.5f && HoveredBase != handle) continue;
+
+                Color c = r.Cauterizing ? TerminalUI.Blood : r.straight ? TerminalUI.Live : TerminalUI.Line;
+                float hover = hoverScale > 1f ? Mathf.Clamp01((scale - 1f) / (hoverScale - 1f)) : 0f;
+                if (n == _coreData.Length) System.Array.Resize(ref _coreData, n * 2);
+                _coreData[n++] = new CoreInstance
+                {
+                    positionScale = new Vector4(p.x, p.y, p.z, radius),
+                    color = new Vector4(c.r, c.g, c.b, hover),
+                    state = new Vector4(0f, r.straight ? 0.5f : 0f, r.id * 0.37f + end * 0.5f, 0f), // full, pulse speed, seed
+                };
+                var b = new Bounds(p, Vector3.one * (radius * 3f));
+                if (n == 1) bounds = b; else bounds.Encapsulate(b);
+            }
+        if (n == 0) return;
+
+        if (_coreBuffer == null || !_coreBuffer.IsValid() || _coreBuffer.count < n)
+        {
+            _coreBuffer?.Release();
+            _coreBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _coreData.Length, CoreStride);
+        }
+        _coreBuffer.SetData(_coreData, 0, 0, n);
+        _coreProps.SetBuffer(CoresId, _coreBuffer);
+        var rp = new RenderParams(_coreMat)
+        {
+            worldBounds = bounds, matProps = _coreProps, receiveShadows = false,
+            shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off,
+        };
+        Graphics.RenderMeshPrimitives(rp, ChunkMesh.Ball(), 0, n);
     }
 
     // ------------------------------------------------------------------ public API
@@ -758,6 +849,9 @@ public class VirusRope : MonoBehaviour
 
     /// <summary>Handle of the base shown enlarged; -1 for none.</summary>
     public int HoveredBase { get; set; } = -1;
+
+    /// <summary>Show every base's core (VirusMovement: while bases are clickable, in focus mode).</summary>
+    public bool ShowBaseCores { get; set; }
 
     /// <summary>Switch the rope a base belongs to between hanging and standing up. Returns the new state.</summary>
     public bool ToggleStraight(int handle)

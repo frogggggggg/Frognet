@@ -162,28 +162,67 @@ public class Ground : Effect
     public override void Exit()
     {
         nav.Release();
+        Ignore(null);
         O.keepUpright = false;
     }
 
     public override void OnCollision(Collision c)
     {
-        if (!S.enabled || Attached || c.contactCount == 0 || !nav.Accepts(c.gameObject)) return;
+        if (!S.enabled || Attached || c.contactCount == 0 || O.Holding(Intent.Seized) || !nav.Accepts(c.gameObject)) return;
 
         ContactPoint hit = c.GetContact(0);
         HitCollider = c.collider;
         HitPoint = hit.point;
         HitSpeed = c.relativeVelocity.magnitude; // before landing zeroes it
-        Land(hit.point, hit.normal, c.gameObject.GetComponentInParent<Surface>());
+        Surface on = c.gameObject.GetComponentInParent<Surface>();
+        if (!Land(hit.point, hit.normal, on) && O.Brain == null && Time.unscaledTime >= _refusedLogAt)
+        {
+            // Diagnostic (the player touching ground without landing: the focus prompt waits for it).
+            _refusedLogAt = Time.unscaledTime + 1f;
+            string why = !on ? "no Surface on it" : _outranked ? "outranked by " + O.Current?.GetType().Name
+                : $"contact is {nav.LastMiss:0.##} from its walk mesh '{(on.Mesh ? on.Mesh.name : "none")}' (snapDistance {nav.snapDistance}); " +
+                  $"the {c.collider.GetType().Name}{(c.collider is MeshCollider mc ? (mc.convex ? " (convex)" : "") + " '" + (mc.sharedMesh ? mc.sharedMesh.name : "none") + "'" : "")} " +
+                  "should match that mesh";
+            Debug.Log($"[Ground] touched {c.collider.name} but didn't land: {why}", c.collider);
+        }
     }
+
+    float _refusedLogAt;
+    bool _outranked;
 
     /// <summary>Attach and switch in now (kinematic before the next physics step). False if outranked.</summary>
     public bool Land(Vector3 point, Vector3 up, Surface on)
     {
+        _outranked = false;
         if (!nav.TryAttach(point, up, on, O.RotTarget.forward)) return false;
         O.Refresh();
-        if (!O.InState(S)) { nav.Release(); return false; }
+        if (!O.InState(S)) { nav.Release(); _outranked = true; return false; }
+        Ignore(on);
         Pose();
         return true;
+    }
+
+    // The body stands on the walk mesh, not on the collider: while attached it doesn't collide with the surface
+    // under it. A kinematic body touching it (smoothing sinks it a little into dents) shoved a dynamic cell every frame.
+    Surface _ignoring;
+    Collider[] _own;
+
+    void Ignore(Surface surface)
+    {
+        if (_ignoring == surface) return;
+        SetIgnored(_ignoring, false);
+        SetIgnored(surface, true);
+        _ignoring = surface;
+    }
+
+    void SetIgnored(Surface surface, bool ignore)
+    {
+        if (!surface) return;
+        _own ??= O.GetComponentsInChildren<Collider>(true);
+        foreach (Collider c in surface.Colliders)
+            if (c)
+                foreach (Collider own in _own)
+                    if (own) Physics.IgnoreCollision(own, c, ignore);
     }
 
     /// <summary>Ripple the cell under the body as if hit at 'speed' (scaled by the cell's Reference Speed).</summary>
@@ -196,6 +235,7 @@ public class Ground : Effect
     public void Detach(Vector3 velocity)
     {
         nav.Release();
+        Ignore(null);
         O.Refresh();
         O.Rb.isKinematic = false;
         O.Rb.linearVelocity = velocity;
@@ -231,6 +271,18 @@ public class ImpactSound : Effect
     {
         Ground g = S.Find<Ground>();
         if (g != null) CreatureAudio.Impact(g.HitCollider ? g.HitPoint : O.transform.position, g.HitSpeed);
+    }
+}
+
+/// <summary>Touching down on a cell sets its alarm off a little: warning motes spurt out where the body
+/// landed, more the harder it hit (ImmuneSystem.Landed).</summary>
+[Serializable]
+public class LandAlarm : Effect
+{
+    public override void Enter()
+    {
+        Ground g = S.Find<Ground>();
+        if (g != null && g.HitCollider) ImmuneSystem.Landed(g.HitCollider.transform, g.HitPoint, O.up, g.HitSpeed);
     }
 }
 
@@ -334,6 +386,49 @@ public class HoldSlam : Effect
             S.Find<Ground>()?.RippleCell(rippleSpeed);
         }
         if (t >= resultDelay) { Cancel(); O.Hold(resultIntent); }
+    }
+}
+
+/// <summary>
+/// Inject beat (focus): a press of the intent draws the body up a little, then slams it down onto the
+/// cell like a plunger, and the cell ripples. GenomeView's injection presses it when the strand
+/// reaches the drill and sends the strand down the drill at <see cref="ImpactDelay"/>.
+/// </summary>
+[Serializable]
+public class Pump : Effect
+{
+    public string intent = Intent.Inject;
+    [Min(0f)] public float liftAmount = 0.22f, slamDepth = 0.18f;
+    [Min(0.01f), Tooltip("Seconds drawing up.")] public float liftTime = 0.38f;
+    [Min(0.01f)] public float slamDuration = 0.08f;
+    [Min(0f), Tooltip("How hard the push ripples the cell, as an impact speed. 0 = none.")]
+    public float rippleSpeed = 90f;
+    [Min(0f), Tooltip("The slam's thump (the landing sound, CreatureAudio.Impact) as a landing speed in m/s. 0 = silent.")]
+    public float soundSpeed = 10f;
+
+    float _at = -1f, _from;
+
+    /// <summary>Seconds from the press to the bottom of the slam.</summary>
+    public float ImpactDelay => liftTime + slamDuration;
+    public override void Exit() => _at = -1f;
+
+    public override void Tick(float dt)
+    {
+        if (O.Pressed(intent)) { _at = Time.time; _from = O.BodyOffset; }
+        if (_at < 0f) return;
+        float t = Time.time - _at;
+        if (t < liftTime)
+        {
+            float x = t / liftTime;
+            O.BodyOffset = Mathf.Lerp(_from, liftAmount, 1f - (1f - x) * (1f - x)); // draws up, slowing
+        }
+        else if (t < ImpactDelay) O.BodyOffset = Mathf.LerpUnclamped(liftAmount, -slamDepth, Mathf.Pow((t - liftTime) / slamDuration, 3f));
+        else
+        {
+            _at = -1f; // eases home on its own
+            S.Find<Ground>()?.RippleCell(rippleSpeed);
+            if (soundSpeed > 0f) CreatureAudio.Impact(O.transform.position, soundSpeed);
+        }
     }
 }
 

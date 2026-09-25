@@ -103,6 +103,7 @@ public class VirusAI : MonoBehaviour, IOrganismBrain, ICommandable
     // Cached per goal cell: its collider (for centre and radius) and flow-field id.
     Transform _cell;
     Collider _cellCollider;
+    Surface _cellSurface;
     int _cellId;
 
     void Awake()
@@ -425,13 +426,16 @@ public class VirusAI : MonoBehaviour, IOrganismBrain, ICommandable
         if (cell != _cell)
         {
             _cell = cell;
+            _cellSurface = cell.GetComponentInParent<Surface>();
             _cellCollider = cell.GetComponentInChildren<Collider>();
             _cellId = PathManager.Id(cell);
         }
 
         Vector3 goal = near;
-        // The surface point under it, on any shape (ClosestPoint needs a convex collider).
-        if (_cellCollider && !(_cellCollider is MeshCollider mc && !mc.convex))
+        // The surface point under it, on any shape (ClosestPoint needs a convex collider; a Surface's pieces are).
+        if (_cellSurface && _cellSurface.Colliders.Length > 0)
+            goal = _cellSurface.ClosestPoint(goal);
+        else if (_cellCollider && !(_cellCollider is MeshCollider mc && !mc.convex))
             goal = _cellCollider.ClosestPoint(goal);
         else
         {

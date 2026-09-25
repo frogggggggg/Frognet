@@ -22,14 +22,13 @@ using Random = UnityEngine.Random;
 /// transforms; the deformation is in the vertex stage, so a chunk costs a sphere-vs-frustum test and a
 /// 64-byte buffer entry per frame. Past lodDistance a lighter mesh, past drawDistance or off screen nothing.
 ///
-/// Focus mode (VirusMovement calls ShowCores each frame): chunks within extractRange of the virus show
-/// their core (Custom/ResourceCore, over the focus sweep), unless a cell hides it (a raycast per shown
-/// chunk every sightInterval). Clicking a core toggles extraction into the virus's VirusInventory: a stream
+/// Focus mode (VirusMovement calls ShowCores each frame): the chunk the virus stands on shows its core
+/// (Custom/ResourceCore, over the focus sweep); only that one can be extracted. Clicking the core toggles extraction into the virus's VirusInventory: a stream
 /// of dust in its colour flows into the virus, the chunk shrinks and deforms (the shader), and once
-/// drained to poofAt it bursts into a cloud of its colour and is gone. Out of reach or no room: it stops.
+/// drained to poofAt it bursts into a cloud of its colour and is gone. Stepping off it stops it; no room pauses it.
 ///
 /// Cost per frame: O(chunks) (cull + LOD + a float step, cheap per chunk) + O(organisms); O(chunks in reach)
-/// for cores; extraction O(chunks being extracted). Past ~10k chunks, a spatial grid for the draw / reach
+/// O(1) for cores; extraction O(chunks being extracted). Past ~10k chunks, a spatial grid for the draw / reach
 /// loops and a TransformAccessArray job for the stepping are the next steps.
 /// </summary>
 [DefaultExecutionOrder(-20)] // chunks moved before VirusMovement (-10) and the SimulationTicker (0) pose riders
@@ -67,8 +66,6 @@ public class ResourceField : MonoBehaviour
     public Shader dustShader;
 
     [Header("Extraction")]
-    [Min(1f), Tooltip("How far from the virus (metres) a chunk's core shows and it can be extracted.")]
-    public float extractRange = 45f;
     [Min(0.1f), Tooltip("Units per second per metre of the chunk's radius (so a chunk drains in a time ~ radius squared).")]
     public float extractRate = 4f;
     [Range(0.5f, 1f), Tooltip("Drained this far, the rest goes in at once and the chunk poofs.")]
@@ -77,10 +74,6 @@ public class ResourceField : MonoBehaviour
     public float coreSize = 0.32f;
     [Min(0f), Tooltip("Dust puffs per second flowing into the virus while extracting.")]
     public float streamRate = 18f;
-    [Min(0.05f), Tooltip("Seconds between checks of whether a cell hides a core.")]
-    public float sightInterval = 0.15f;
-    [Tooltip("What can hide a core.")]
-    public LayerMask occluders = ~0;
 
     /// <summary>(chunk, inventory) when a chunk is drained and poofs.</summary>
     public static event Action<ResourceChunk, VirusInventory> Drained;
@@ -156,11 +149,8 @@ public class ResourceField : MonoBehaviour
 
     readonly List<ResourceChunk> _cores = new List<ResourceChunk>();
     readonly List<ResourceChunk> _extracting = new List<ResourceChunk>();
-    readonly Dictionary<ResourceChunk, float> _sightAt = new Dictionary<ResourceChunk, float>();
-    readonly HashSet<ResourceChunk> _hidden = new HashSet<ResourceChunk>();
     readonly Dictionary<ResourceChunk, float> _streamOwed = new Dictionary<ResourceChunk, float>();
-    readonly RaycastHit[] _hits = new RaycastHit[8];
-    Transform _viewer;
+    ResourceChunk _standingOn;
     int _coresFrame = -1;
 
     /// <summary>Chunks being extracted right now.</summary>
@@ -206,10 +196,10 @@ public class ResourceField : MonoBehaviour
         if (_coreMat) Destroy(_coreMat);
     }
 
-    /// <summary>Show cores round 'viewer' this frame (call every frame while in focus mode).</summary>
-    public void ShowCores(Transform viewer)
+    /// <summary>Show the core of the chunk 'viewer' stands on this frame (call every frame while in focus mode).</summary>
+    public void ShowCores(Organism viewer)
     {
-        _viewer = viewer;
+        _standingOn = viewer ? Of(viewer.Surface) : null;
         _coresFrame = Time.frameCount;
     }
 
@@ -233,11 +223,14 @@ public class ResourceField : MonoBehaviour
     }
 
     /// <summary>Starts extracting 'c' into 'into', or stops if it already is.</summary>
-    public void ToggleExtract(ResourceChunk c, VirusInventory into)
+    /// Only while 'by' stands on it: stepping off stops it.
+    public void ToggleExtract(ResourceChunk c, VirusInventory into, Organism by)
     {
-        if (!c || !into) return;
+        if (!c || !into || !by) return;
         if (c.Extractor == into) { Stop(c); return; }
+        if (by.Surface != c.transform) return;
         c.Extractor = into;
+        c.ExtractorBody = by;
         c.Blocked = false;
         if (!_extracting.Contains(c)) _extracting.Add(c);
         Started?.Invoke(c, into);
@@ -246,6 +239,7 @@ public class ResourceField : MonoBehaviour
     void Stop(ResourceChunk c)
     {
         c.Extractor = null;
+        c.ExtractorBody = null;
         _extracting.Remove(c);
         _streamOwed.Remove(c);
         if (!_settling.Contains(c)) _settling.Add(c); // its wobble dies down
@@ -308,7 +302,7 @@ public class ResourceField : MonoBehaviour
             if (!c || !c.Extractor) { if (c) Stop(c); else _extracting.RemoveAt(i); continue; }
             VirusInventory into = c.Extractor;
             Vector3 centre = c.Centre, to = into.transform.position;
-            if ((centre - to).sqrMagnitude > extractRange * extractRange * 1.2f) { Stop(c); continue; }
+            if (!c.ExtractorBody || c.ExtractorBody.Surface != c.transform) { Stop(c); continue; } // stepped off
 
             float want = Mathf.Min(extractRate * c.radius * dt, c.Remaining);
             float got = into.Add(c.substance, want);
@@ -378,48 +372,12 @@ public class ResourceField : MonoBehaviour
 
     // ---------------- cores ----------------
 
-    // In focus mode: every chunk in reach of the viewer, less those a cell hides (a raycast per chunk
-    // every sightInterval, staggered by when each came into reach).
+    // In focus mode: the chunk the viewer stands on.
     void FindCores()
     {
         _cores.Clear();
-        if (_coresFrame < Time.frameCount - 1 || !_viewer) { if (Hovered) Hovered = null; return; }
-        Camera cam = Camera.main;
-        Vector3 at = _viewer.position;
-        float range2 = extractRange * extractRange, now = Time.time;
-        foreach (ResourceChunk c in s_all)
-        {
-            Vector3 centre = c.Centre;
-            if ((centre - at).sqrMagnitude > range2) continue;
-            if (!_sightAt.TryGetValue(c, out float next) || now >= next)
-            {
-                _sightAt[c] = now + sightInterval * Random.Range(0.8f, 1.2f);
-                if (Hidden(cam, c, centre, c.CurrentRadius * coreSize)) _hidden.Add(c); else _hidden.Remove(c);
-            }
-            if (!_hidden.Contains(c) || c.Extractor) _cores.Add(c); // one being extracted stays shown
-        }
-        if (_sightAt.Count > 4 * _cores.Count + 64) // drop the ones long out of reach
-        {
-            s_stale.Clear();
-            foreach (KeyValuePair<ResourceChunk, float> kv in _sightAt) if (!kv.Key || now - kv.Value > 5f) s_stale.Add(kv.Key);
-            foreach (ResourceChunk k in s_stale) { _sightAt.Remove(k); _hidden.Remove(k); }
-        }
-    }
-
-    static readonly List<ResourceChunk> s_stale = new List<ResourceChunk>();
-
-    // Whether something other than the viewer or the chunk itself lies between the camera and the core.
-    bool Hidden(Camera cam, ResourceChunk chunk, Vector3 centre, float coreRadius)
-    {
-        if (!cam) return false;
-        Ray ray = cam.ScreenPointToRay(cam.WorldToScreenPoint(centre)); // right for the ortho focus camera too
-        float dist = Vector3.Distance(ray.origin, centre) - coreRadius;
-        if (dist <= 0f) return false;
-        int n = Physics.RaycastNonAlloc(ray, _hits, dist, occluders, QueryTriggerInteraction.Ignore);
-        Transform viewerRoot = _viewer.root;
-        for (int i = 0; i < n; i++)
-            if (!_hits[i].transform.IsChildOf(viewerRoot) && !_hits[i].transform.IsChildOf(chunk.transform)) return true;
-        return false;
+        if (_coresFrame < Time.frameCount - 1 || !_standingOn) { if (Hovered) Hovered = null; return; }
+        _cores.Add(_standingOn);
     }
 
     void DrawCores()

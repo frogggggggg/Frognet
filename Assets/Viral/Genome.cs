@@ -65,6 +65,16 @@ public class Genome : MonoBehaviour
         if (index >= 0 && index < genes.Count) Injected?.Invoke(this, index);
     }
 
+    /// <summary>Uses a gene up (injected: one use for now). Later genes shift down one; the selection
+    /// follows its gene, or unloads if it was this one. Fix the ring first (VirusInventory.GeneRemoved).</summary>
+    public void Consume(int index)
+    {
+        if (index < 0 || index >= genes.Count) return;
+        genes.RemoveAt(index);
+        if (Selected == index) Select(-1);
+        else if (Selected > index) Selected--; // same gene, new index: no event
+    }
+
     public static Genome Of(Component owner)
     {
         Genome g = owner.GetComponentInChildren<Genome>(true);
