@@ -1,11 +1,11 @@
 ﻿<Solution>
   <Project Path="PurrNet.Editor.csproj" />
+  <Project Path="Assembly-CSharp.csproj" />
   <Project Path="PurrNet.Runtime.csproj" />
   <Project Path="SimpleWebTransport.csproj" />
   <Project Path="AstarPathfindingProject.csproj" />
   <Project Path="LiteNetLib.csproj" />
   <Project Path="PurrNet.Edgegap.Runtime.csproj" />
-  <Project Path="Assembly-CSharp.csproj" />
   <Project Path="Assembly-CSharp-Editor.csproj" />
   <Project Path="Unity.PurrNet.Codegen.csproj" />
   <Project Path="PackageToolsEditor.csproj" />

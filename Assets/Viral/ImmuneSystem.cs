@@ -13,9 +13,9 @@ using UnityEngine.Rendering;
 ///   follow the signal field to the loud cells, patrol over the activity and stick to viruses they
 ///   see (Antibody), in slots round the body (AntibodyHold), until shaken off. They're command-mode
 ///   targets ("Antibodies").
-/// - A gene delivered into a cell (the head view's injection, <see cref="Deliver"/>) takes the cell
-///   over if it's the one it answers to (<see cref="controlGene"/>): it stops signalling for good.
-///   Any other gene sets its alarm off.
+/// - A gene delivered into a cell (the head view's injection, <see cref="Deliver"/>) takes effect if it
+///   works on that kind of body (GeneEffects: the blight silences a red cell for good). Any other gene
+///   sets its alarm off.
 ///
 /// Creates itself on play when the scene has cells (add one to the scene to tune it; disable it to
 /// switch the immune system off).
@@ -34,9 +34,7 @@ public class ImmuneSystem : MonoBehaviour
     public float halfLife = 15f;
     [Min(0f), Tooltip("Cells quieter than this don't call anything.")]
     public float callThreshold = 4f;
-    [Tooltip("Gene code that takes a cell over (unless the cell's CellSignal names its own).")]
-    public string controlGene = "INT-5";
-    [Min(0f), Tooltip("Signal from injecting the wrong gene into a cell.")]
+    [Min(0f), Tooltip("Signal from injecting a gene that doesn't work on the cell.")]
     public float wrongGeneBurst = 40f;
     [Min(0f), Tooltip("Signal from a virus landing on a cell (at 10 m/s; scaled by impact speed).")]
     public float landSignal = 2f;
@@ -132,22 +130,20 @@ public class ImmuneSystem : MonoBehaviour
         new GameObject("Immune System").AddComponent<ImmuneSystem>();
     }
 
-    /// <summary>A gene delivered into a cell (the head view's injection): the right one takes it
-    /// over, any other sets it off. True if the cell is ours now.</summary>
-    public static bool Deliver(Transform cell, Genome.Gene gene)
+    /// <summary>A gene delivered into a body (the head view's injection) at 'at' (world, on its surface,
+    /// 'normal' out of it): takes effect if it works on that kind of body (GeneEffects), else sets off
+    /// the cell's alarm there. True if it took.</summary>
+    public static bool Deliver(Transform body, Genome.Gene gene, Vector3 at, Vector3 normal)
     {
-        CellSignal c = CellSignal.For(cell);
-        if (!c || gene == null) return false;
-        ImmuneSystem s = s_instance;
-        bool wasOurs = c.Converted;
-        c.Inject(gene, s ? s.controlGene : "INT-5", s ? s.wrongGeneBurst : 40f);
-        if (s && !c.Converted && !wasOurs) // the wrong gene: a big spurt of alarm from the wound
+        if (!body || gene == null) return false;
+        if (GeneEffects.WorksOn(gene, body))
         {
-            Vector3 centre = c.Centre(out float _);
-            Vector3 at = c.Hotspot;
-            s.motes.Emit(at, at - centre, Spurt(s.wrongGeneBurst * s.motes.perSignal, 1f));
+            GeneEffects.Apply(gene, body, at, normal);
+            return true;
         }
-        return c.Converted;
+        ImmuneSystem s = s_instance; // the wrong gene: a big spurt of alarm from the wound
+        if (s) Alarm(body, at, normal, s.wrongGeneBurst);
+        return false;
     }
 
     /// <summary>Activity on a cell at 'at' (world, on its surface, 'normal' out of it): raises its

@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Generic;
+using Unity.Burst;
+using Unity.Collections;
 using Unity.Profiling;
 using UnityEngine;
+using UnityEngine.Jobs;
 using UnityEngine.Rendering;
 
 /// <summary>
@@ -22,7 +25,8 @@ using UnityEngine.Rendering;
 /// swept into, loaded, dropped) rewrites only its pages. Each frame FarField.compute culls every slot (frustum, under
 /// <see cref="minPixels"/> on screen, faded out), picks the LOD by on-screen size and appends it to its draw group;
 /// one indirect draw per (look, LOD).
-/// Cost: CPU O(changed sectors' records) + O(live objects) for the dynamic list per frame; GPU one thread per slot
+/// Cost: CPU O(changed sectors' records) + O(live objects) for the dynamic list per frame (a Burst job over the live
+/// transforms, 64 B uploaded per live object); GPU one thread per slot
 /// (every record within the far distance, ~40k at 1600 m) + the visible instances' vertices (320 / 80 triangles).
 /// Memory ~64 B per slot on the CPU and 64 + 48 + 4 x groups B on the GPU.
 /// </summary>
@@ -45,8 +49,14 @@ public class FarField : MonoBehaviour
     public float edgeFade = 350f;
     [Min(0f), Tooltip("Seconds a newly generated sector's contents take to fade in.")]
     public float bornFade = 1.5f;
-    [Min(0f), Tooltip("Not drawn when smaller than this on screen (pixels across its bounding radius).")]
-    public float minPixels = 0.6f;
+    [Min(0f), Tooltip("Not drawn when smaller than this on screen (pixels across its bounding radius); fades in up to " +
+                      "twice this, so tiny specks don't turn the distance into confetti.")]
+    public float minPixels = 2f;
+    [Min(0f), Tooltip("Past this distance (metres) only a shrinking share of records draws, reaching Thin Keep at " +
+                      "Distance: the far field reads as sparse clusters, not a uniform snowstorm.")]
+    public float thinStart = 500f;
+    [Range(0f, 1f), Tooltip("Share of records still drawn at Distance.")]
+    public float thinKeep = 0.25f;
     [Min(1f), Tooltip("The low mesh below this many pixels (bounding radius).")]
     public float lodPixels = 14f;
     [Min(0.05f), Tooltip("Milliseconds a frame spent generating far sectors (at least one a frame while any wait).")]
@@ -88,7 +98,9 @@ public class FarField : MonoBehaviour
 
     WorldStreamer _streamer;
     LookData[] _looks;
-    FarInstance[] _mirror, _dynamic;
+    FarInstance[] _mirror;
+    NativeArray<FarInstance> _dynamic;
+    NativeArray<float> _lookReach; // per look: its mesh's reach at scale 1 (0: no look)
     int _pages, _dynCount;
     readonly Stack<int> _free = new Stack<int>();
     readonly Dictionary<long, Block> _blocks = new Dictionary<long, Block>();
@@ -109,13 +121,16 @@ public class FarField : MonoBehaviour
     readonly Vector4[] _planeVectors = new Vector4[6];
 
     static readonly ProfilerMarker UpdateMarker = new ProfilerMarker("FarField.Update");
+    static readonly ProfilerMarker RebuildMarker = new ProfilerMarker("FarField.Rebuild"),
+                                   DynamicMarker = new ProfilerMarker("FarField.Dynamic"),
+                                   DrawMarker = new ProfilerMarker("FarField.Draw");
     static readonly int SourceId = Shader.PropertyToID("_Source"), PosedId = Shader.PropertyToID("_Posed"),
                         VisibleId = Shader.PropertyToID("_Visible"), ArgsId = Shader.PropertyToID("_Args"),
                         SourceCountId = Shader.PropertyToID("_SourceCount"), PosedOffsetId = Shader.PropertyToID("_PosedOffset"),
                         GroupCapacityId = Shader.PropertyToID("_GroupCapacity"), PlanesId = Shader.PropertyToID("_Planes"),
                         CameraPosId = Shader.PropertyToID("_CameraPos"), VesselCId = Shader.PropertyToID("_VesselC"),
                         VesselAId = Shader.PropertyToID("_VesselA"), ClockId = Shader.PropertyToID("_Clock"),
-                        RangeId = Shader.PropertyToID("_Range"), StreamFadeId = Shader.PropertyToID("_StreamFade"),
+                        RangeId = Shader.PropertyToID("_Range"), ThinId = Shader.PropertyToID("_Thin"), StreamFadeId = Shader.PropertyToID("_StreamFade"),
                         StreamFadeEndId = Shader.PropertyToID("_StreamFadeEnd"),
                         FarPosedId = Shader.PropertyToID("_FarPosed"), FarVisibleId = Shader.PropertyToID("_FarVisible"),
                         GroupBaseId = Shader.PropertyToID("_FarGroupBase"), ColorId = Shader.PropertyToID("_Color"),
@@ -154,6 +169,8 @@ public class FarField : MonoBehaviour
     {
         _static?.Release(); _dyn?.Release(); _posed?.Release(); _visible?.Release(); _args?.Release();
         _static = _dyn = _posed = _visible = _args = null;
+        if (_dynamic.IsCreated) _dynamic.Dispose();
+        if (_lookReach.IsCreated) _lookReach.Dispose();
         if (_looks != null)
             foreach (LookData l in _looks)
             {
@@ -186,7 +203,7 @@ public class FarField : MonoBehaviour
         BuildLooks();
         _epoch = Vessel.Clock;
         _epochFrame = Vessel.FrameAngle;
-        _dynamic = new FarInstance[256];
+        _dynamic = new NativeArray<FarInstance>(256, Allocator.Persistent);
         _dyn = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _dynamic.Length, Stride);
         Grow(64);
         foreach (long key in _streamer.FarSectors) Changed(key, false);
@@ -198,9 +215,9 @@ public class FarField : MonoBehaviour
     {
         if (!On || (!_ready || _static == null) && !Init()) return;
         using var _ = UpdateMarker.Auto();
-        Rebuild();
-        FillDynamic();
-        Draw();
+        using (RebuildMarker.Auto()) Rebuild();
+        using (DynamicMarker.Auto()) FillDynamic();
+        using (DrawMarker.Auto()) Draw();
     }
 
     // ---------------- far records ----------------
@@ -250,7 +267,7 @@ public class FarField : MonoBehaviour
         int look = _streamer.FarLookOf(r);
         if (look < 0 || look >= _looks.Length || _looks[look] == null) return false;
         Vector3 s = r.scale;
-        float reach = _looks[look].reach * Mathf.Max(Mathf.Abs(s.x), Mathf.Abs(s.y), Mathf.Abs(s.z));
+        float reach = _looks[look].reach * Mathf.Max(Mathf.Max(Mathf.Abs(s.x), Mathf.Abs(s.y)), Mathf.Abs(s.z));
         Quaternion q = r.rotation;
         f.position = new Vector4(r.position.x, r.position.y, r.position.z, _streamer.DriftRate(r.position));
         f.rotation = new Vector4(q.x, q.y, q.z, q.w);
@@ -314,55 +331,81 @@ public class FarField : MonoBehaviour
     // ---------------- the crossover band ----------------
 
     // Live objects the real fade has started on (their stand-ins take the dropped pixels) and loaded records
-    // waiting to spawn.
+    // waiting to spawn. Fade starts ~215 m into a ~450 m bubble, so that's ~90% of live objects every frame: their
+    // poses are read in one Burst job over WorldStreamer.LiveTransforms, one slot per live object (-1 look: not in
+    // the band; the cull skips it). On the main thread it was ~0.7 ms of transform reads.
     void FillDynamic()
     {
         _dynCount = 0;
         _streamer.FadeBand(out Vector3 centre, out float fadeStart);
         float now = Now, frame = (float)(Vessel.FrameAngle - _epochFrame);
-        IReadOnlyList<WorldEntity> live = WorldStreamer.Live;
-        for (int i = 0; i < live.Count; i++)
-        {
-            WorldEntity e = live[i];
-            if (!e) continue;
-            Transform t = e.T;
-            Vector3 p = t.position;
-            if ((p - centre).sqrMagnitude < fadeStart * fadeStart) continue;
-            int look = _streamer.FarLookOf(e.key);
-            if (look < 0 || look >= _looks.Length || _looks[look] == null) continue;
-            Vector3 s = t.localScale;
-            Quaternion q = t.rotation;
-            AddDynamic(new FarInstance
-            {
-                position = new Vector4(p.x, p.y, p.z, 0f),
-                rotation = new Vector4(q.x, q.y, q.z, q.w),
-                scale = new Vector4(s.x, s.y, s.z, _looks[look].reach * Mathf.Max(Mathf.Abs(s.x), Mathf.Abs(s.y), Mathf.Abs(s.z))),
-                time = new Vector4(now, frame, LongAgo, look),
-            });
-        }
+        TransformAccessArray transforms = WorldStreamer.LiveTransforms;
+        int live = transforms.isCreated ? transforms.length : 0;
         _streamer.PendingRecords(_pendingRecords);
+        Reserve(live + _pendingRecords.Count);
+        if (live > 0)
+        {
+            new PoseJob
+            {
+                looks = WorldStreamer.LiveLooks.AsArray(), reach = _lookReach, output = _dynamic,
+                centre = centre, start2 = fadeStart * fadeStart, now = now, frame = frame,
+            }.ScheduleReadOnly(transforms, 64).Complete();
+            _dynCount = live;
+        }
         foreach (WorldStreamer.EntityRecord r in _pendingRecords)
-            if (Make(r, LongAgo, out FarInstance f)) AddDynamic(f);
+            if (Make(r, LongAgo, out FarInstance f)) _dynamic[_dynCount++] = f;
         _pendingRecords.Clear();
         if (_dynCount > 0) _dyn.SetData(_dynamic, 0, 0, _dynCount);
     }
 
-    void AddDynamic(in FarInstance f)
+    [BurstCompile]
+    struct PoseJob : IJobParallelForTransform
     {
-        if (_dynCount == _dynamic.Length)
+        [ReadOnly] public NativeArray<int> looks;
+        [ReadOnly] public NativeArray<float> reach;
+        [WriteOnly] public NativeArray<FarInstance> output;
+        public Vector3 centre;
+        public float start2, now, frame;
+
+        public void Execute(int i, TransformAccess t)
         {
-            Array.Resize(ref _dynamic, _dynamic.Length * 2);
-            _dyn.Release();
-            _dyn = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _dynamic.Length, Stride);
-            ResizeOutputs();
+            var f = new FarInstance { time = new Vector4(0f, 0f, 0f, -1f) };
+            int look = looks[i];
+            if (t.isValid && look >= 0 && look < reach.Length && reach[look] > 0f)
+            {
+                Vector3 p = t.position;
+                if ((p - centre).sqrMagnitude >= start2)
+                {
+                    Quaternion q = t.rotation;
+                    Vector3 s = t.localScale;
+                    float big = Mathf.Max(Mathf.Max(Mathf.Abs(s.x), Mathf.Abs(s.y)), Mathf.Abs(s.z));
+                    f.position = new Vector4(p.x, p.y, p.z, 0f);
+                    f.rotation = new Vector4(q.x, q.y, q.z, q.w);
+                    f.scale = new Vector4(s.x, s.y, s.z, reach[look] * big);
+                    f.time = new Vector4(now, frame, LongAgo, look);
+                }
+            }
+            output[i] = f;
         }
-        _dynamic[_dynCount++] = f;
+    }
+
+    // Room for n dynamic slots (doubling; the GPU buffer and the outputs follow).
+    void Reserve(int n)
+    {
+        if (n <= _dynamic.Length) return;
+        int size = _dynamic.Length;
+        while (size < n) size *= 2;
+        _dynamic.Dispose();
+        _dynamic = new NativeArray<FarInstance>(size, Allocator.Persistent);
+        _dyn.Release();
+        _dyn = new GraphicsBuffer(GraphicsBuffer.Target.Structured, size, Stride);
+        ResizeOutputs();
     }
 
     // Posed = every static slot then every dynamic slot; each group can list them all.
     void ResizeOutputs()
     {
-        if (_looks == null || _dynamic == null || _mirror == null) return;
+        if (_looks == null || !_dynamic.IsCreated || _mirror == null) return;
         int capacity = _mirror.Length + _dynamic.Length;
         if (capacity == _posedCapacity && _posed != null) return;
         _posedCapacity = capacity;
@@ -428,6 +471,7 @@ public class FarField : MonoBehaviour
         cull.SetVector(VesselAId, vessel ? (Vector4)vessel.Axis : Vector4.zero);
         cull.SetVector(ClockId, new Vector4(Now, (float)(Vessel.FrameAngle - _epochFrame), bornFade, 0f));
         cull.SetVector(RangeId, new Vector4(distance, Mathf.Min(edgeFade, distance), minPixels, lodPixels));
+        cull.SetVector(ThinId, new Vector4(thinStart, 1f / Mathf.Max(distance - thinStart, 1f), thinKeep, 0.08f));
         cull.SetVector(StreamFadeId, fade);
         cull.SetFloat(StreamFadeEndId, fadeEnd);
         cull.SetInt(GroupCapacityId, _posedCapacity);
@@ -497,6 +541,9 @@ public class FarField : MonoBehaviour
             look.farProps = new MaterialPropertyBlock();
             _looks[i] = look;
         }
+        if (_lookReach.IsCreated) _lookReach.Dispose();
+        _lookReach = new NativeArray<float>(_looks.Length, Allocator.Persistent);
+        for (int i = 0; i < _looks.Length; i++) _lookReach[i] = _looks[i] != null ? _looks[i].reach : 0f;
         _posedCapacity = 0;
     }
 

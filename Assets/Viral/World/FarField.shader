@@ -14,7 +14,7 @@ Shader "Custom/FarField"
 
     SubShader
     {
-        Tags { "RenderPipeline" = "UniversalPipeline" "RenderType" = "Opaque" "Queue" = "Geometry" }
+        Tags { "RenderPipeline" = "UniversalPipeline" "RenderType" = "Opaque" "Queue" = "Geometry+50" }
 
         HLSLINCLUDE
         #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
@@ -101,7 +101,7 @@ Shader "Custom/FarField"
                 float band = 0.35 + 0.35 * smoothstep(0.38 - w, 0.38 + w, h) + 0.3 * smoothstep(0.68 - w, 0.68 + w, h);
                 float3 col = lerp(_DeepColor.rgb, _Color.rgb, band) * (0.9 + 0.2 * i.extra.z);
                 col += _Color.rgb * pow(1.0 - saturate(dot(n, v)), 3.0) * _Rim;
-                return half4(MixFog(col, i.fog), 1);
+                return half4(MixFog(MixAtmosphere(col, i.positionWS), i.fog), 1);
             }
             ENDHLSL
         }

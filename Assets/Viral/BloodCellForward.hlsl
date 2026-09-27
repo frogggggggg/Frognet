@@ -5,6 +5,9 @@
 // pass supplies the vertex/domain stage that fills Varyings.
 
 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
+#ifdef CELL_TENDRILS
+    #include "CellTendrils.hlsl" // a blight's tendrils (cells only, not legs)
+#endif
 
 struct Varyings
 {
@@ -139,12 +142,15 @@ half4 frag(Varyings input, FRONT_FACE_TYPE face : FRONT_FACE_SEMANTIC) : SV_Targ
     float3 geoNormal = normalize(input.normalWS) * IS_FRONT_VFACE(face, 1.0, -1.0);
 
     float  fade   = DetailFade(input.positionWS);
-    float4 hd     = SurfaceHeight(input.mapPos, fade);
+    float4 hd     = SurfaceHeight(input.mapPos, fade, PixelMetres(input.positionWS));
     float4 ripple = float4(0.0, input.rippleGrad);
 
     float3 normalWS = BumpNormal(geoNormal, hd, ripple, fade);
     half3 rgb = CellShade(input.positionWS, input.positionHCS, input.mapPos, geoNormal, normalWS, hd.x, fade);
-    return half4(MixFog(rgb, input.fogCoord), 1.0);
+#ifdef CELL_TENDRILS
+    rgb = ApplyTendrils(rgb, input.positionWS, geoNormal);
+#endif
+    return half4(MixFog(MixAtmosphere(rgb, input.positionWS), input.fogCoord), 1.0);
 }
 
 #endif

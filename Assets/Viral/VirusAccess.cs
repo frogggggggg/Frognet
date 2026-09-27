@@ -78,8 +78,8 @@ public class VirusAccess : MonoBehaviour
     {
         Bounds local = _cell.localBounds;
         Vector3 scale = _cell.transform.lossyScale;
-        float radius = Mathf.Max(local.extents.x * Mathf.Abs(scale.x),
-                                 local.extents.y * Mathf.Abs(scale.y),
+        float radius = Mathf.Max(Mathf.Max(local.extents.x * Mathf.Abs(scale.x),
+                                           local.extents.y * Mathf.Abs(scale.y)),
                                  local.extents.z * Mathf.Abs(scale.z));
 
         Vector3 center = _cell.bounds.center;

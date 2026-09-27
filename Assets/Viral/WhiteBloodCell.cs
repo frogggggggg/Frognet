@@ -445,7 +445,7 @@ public class WhiteBloodCell : MonoBehaviour, IWorldState
             Collider col = s_hits[i];
             if (col.transform.IsChildOf(transform)) continue;
             Rigidbody body = col.attachedRigidbody;
-            if (body && body.GetComponent<Organism>()) continue;
+            if (body && body.TryGetComponent(out Organism _)) continue;
             // ClosestPoint only takes primitives and convex meshes; a concave mesh uses its bounds.
             Vector3 closest = col is MeshCollider mc && !mc.convex ? col.bounds.ClosestPoint(c) : col.ClosestPoint(c);
             Vector3 away = c - closest;
@@ -655,7 +655,7 @@ public class WhiteBloodCell : MonoBehaviour, IWorldState
             Transform t = hit.collider.transform;
             if (t.IsChildOf(transform) || t.IsChildOf(o.transform)) continue;
             Rigidbody body = hit.collider.attachedRigidbody;
-            if (body && body.GetComponent<Organism>()) continue;
+            if (body && body.TryGetComponent(out Organism _)) continue;
             return false;
         }
         return true;

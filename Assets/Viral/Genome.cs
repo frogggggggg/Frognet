@@ -17,17 +17,17 @@ public class Genome : MonoBehaviour
         public string code = "GEN-0";
         [Tooltip("What it does, shown under the code.")]
         public string name = "UNKNOWN";
+        [Tooltip("Its colour as it is (what it does in the world uses it, e.g. a blight's tendrils); the " +
+                 "head view shows it saturated and bright.")]
         public Color color = TerminalUI.Line;
+        [Tooltip("What it works on. Injected into anything else it only sets off the alarm.")]
+        public GeneTarget targets = GeneTarget.RedBloodCell;
+        [Tooltip("What it does to what it works on (GeneEffects).")]
+        public GeneEffect effect;
     }
 
-    public List<Gene> genes = new List<Gene>
-    {
-        new Gene { code = "LYS-1", name = "LYSIS",      color = new Color(1f, 0.36f, 0.42f) },
-        new Gene { code = "REP-2", name = "REPLICASE",  color = new Color(0.55f, 0.93f, 1f) },
-        new Gene { code = "CAP-3", name = "CAPSID",     color = new Color(0.62f, 1f, 0.45f) },
-        new Gene { code = "SPK-4", name = "SPIKE",      color = new Color(1f, 0.78f, 0.35f) },
-        new Gene { code = "INT-5", name = "INTEGRASE",  color = new Color(0.78f, 0.55f, 1f) },
-    };
+    [Tooltip("Strands carried. None to start with: they're made in the head view's synthesizer (Crafting).")]
+    public List<Gene> genes = new List<Gene>();
 
     /// <summary>The virus's head (split off its body so it can grow; the ball inside it is where the
     /// head view grows from). Made on first use.</summary>

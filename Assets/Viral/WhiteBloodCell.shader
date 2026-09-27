@@ -264,7 +264,7 @@ Shader "Custom/WhiteBloodCell"
             }
 
             // Fine creases (the ridged noise's value and gradient) and the red cells' lumps at one material map.
-            void Relief(float3 map, float R, float seed, bool fineOn, float fade, out float fine, out float3 fineGrad, out float4 hd)
+            void Relief(float3 map, float R, float seed, bool fineOn, float fade, float pixel, out float fine, out float3 fineGrad, out float4 hd)
             {
                 fine = 0.0;
                 fineGrad = 0.0;
@@ -273,7 +273,7 @@ Shader "Custom/WhiteBloodCell"
                     float t = _Time.y * _Speed + seed * 7.0;
                     fine = Ruffle(map / R * _FineScale + float3(t * 0.08, 0.0, -t * 0.05) + seed * 1.3, seed + 5.0, fineGrad);
                 }
-                hd = SurfaceHeight(map + seed * 13.1, fade);
+                hd = SurfaceHeight(map + seed * 13.1, fade, pixel);
             }
 
             // The inside of the mouth: not the membrane but wet flesh. Radial folds drawing into a dark throat (they
@@ -337,19 +337,19 @@ Shader "Custom/WhiteBloodCell"
                 float seed = inst.motion.w, hunger = inst.state.x, R = max(inst.positionRadius.w, 1e-3);
                 float crest = saturate(i.marks.x), mouth = saturate(i.marks.y), tendril = saturate(i.marks.z);
                 float3 geoN = normalize(i.normalWS);
-                float detail = _LodDetail * inst.extra.x, fade = DetailFade(i.positionWS);
+                float detail = _LodDetail * inst.extra.x, fade = DetailFade(i.positionWS), pixel = PixelMetres(i.positionWS);
 
                 // Relief on the body's map, the tip's, or (along the arm) both, blended keeping its contrast.
                 float a = saturate(i.mapTip.w), fine = 0.0;
                 float3 g = 0.0;
                 float4 hd = float4(0.5, 0.0, 0.0, 0.0);
-                if (a < 0.999) Relief(i.mapPos, R, seed, detail > 0.01, fade, fine, g, hd);
+                if (a < 0.999) Relief(i.mapPos, R, seed, detail > 0.01, fade, pixel, fine, g, hd);
                 if (a > 0.001)
                 {
                     float fine2;
                     float3 g2;
                     float4 hd2;
-                    Relief(i.mapTip.xyz, R, seed, detail > 0.01, fade, fine2, g2, hd2);
+                    Relief(i.mapTip.xyz, R, seed, detail > 0.01, fade, pixel, fine2, g2, hd2);
                     float keep = rsqrt(a * a + (1.0 - a) * (1.0 - a)); // two blended fields are flatter than either
                     fine = lerp(fine, fine2, a);
                     g = lerp(g, g2, a) * keep;
@@ -375,7 +375,7 @@ Shader "Custom/WhiteBloodCell"
                 // Inside: its own flesh.
                 float inner = smoothstep(0.15, 0.7, mouth);
                 rgb = lerp(rgb, MouthShade(inst, i.positionWS, i.positionCS, geoN, mouth), inner); // no branch: it takes screen derivatives
-                return half4(MixFog(rgb, i.fog), 1.0);
+                return half4(MixFog(MixAtmosphere(rgb, i.positionWS), i.fog), 1.0);
             }
             ENDHLSL
         }

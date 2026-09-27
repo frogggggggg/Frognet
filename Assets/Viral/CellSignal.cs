@@ -7,20 +7,18 @@ using UnityEngine;
 /// it dies away on its own. Loud cells pull antibodies toward them (<see cref="Pull"/>, a simple
 /// gravity field) and let out warning motes.
 ///
-/// A cell stops signalling for good once it's yours: inject the gene it answers to
-/// (<see cref="Inject"/>, from the head view's injection). The wrong gene sets it off instead.
-/// Added to Surfaces on demand (<see cref="For"/>); add one yourself to set its gene or limits.
+/// A cell stops signalling for good once it's yours: a gene that works on it (GeneEffects, e.g. the
+/// blight) <see cref="Silence"/>s it. A gene that doesn't sets it off instead (ImmuneSystem.Deliver).
+/// Added to Surfaces on demand (<see cref="For"/>); add one yourself to set its limits.
 /// </summary>
 public class CellSignal : MonoBehaviour, ICompletable
 {
-    [Tooltip("Gene code that brings this cell under your control. Empty: ImmuneSystem's default.")]
-    public string controlGene = "";
     [Min(1f), Tooltip("Loudest it gets.")]
     public float maxSignal = 100f;
 
     /// <summary>Current strength, 0..maxSignal.</summary>
     public float Signal { get; private set; }
-    /// <summary>Taken over (the right gene injected): silent from now on.</summary>
+    /// <summary>Taken over (a gene silenced it): no signal, no warning motes, from now on.</summary>
     public bool Converted { get; private set; }
     bool ICompletable.Complete => Converted; // a task on this cell is done once it is yours
     /// <summary>Where the activity was last, on the cell (world).</summary>
@@ -62,17 +60,11 @@ public class CellSignal : MonoBehaviour, ICompletable
     public void Decay(float dt, float halfLife) =>
         Signal = Converted ? 0f : Signal * Mathf.Pow(0.5f, dt / Mathf.Max(halfLife, 0.01f));
 
-    /// <summary>A gene delivered into it: the right one takes it over, any other sets off the alarm.</summary>
-    public void Inject(Genome.Gene gene, string defaultGene, float wrongBurst)
+    /// <summary>Stops it calling the immune system for good (it's yours now).</summary>
+    public void Silence()
     {
-        if (gene == null || Converted) return;
-        string wanted = string.IsNullOrEmpty(controlGene) ? defaultGene : controlGene;
-        if (gene.code == wanted)
-        {
-            Converted = true;
-            Signal = 0f;
-        }
-        else Raise(wrongBurst, Hotspot);
+        Converted = true;
+        Signal = 0f;
     }
 
     /// <summary>Its bounding sphere (world): centre and the radius inside its flattest side, so

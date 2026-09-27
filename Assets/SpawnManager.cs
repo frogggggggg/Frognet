@@ -140,8 +140,8 @@ public class SpawnManager : MonoBehaviour
             Bounds b = filter.sharedMesh.bounds;
             // Mesh space -> root space, including the root's own scale.
             Matrix4x4 m = Matrix4x4.Scale(rootScale) * toRoot * filter.transform.localToWorldMatrix;
-            float half = Mathf.Max(m.MultiplyVector(new Vector3(b.extents.x, 0f, 0f)).magnitude,
-                                   m.MultiplyVector(new Vector3(0f, b.extents.y, 0f)).magnitude,
+            float half = Mathf.Max(Mathf.Max(m.MultiplyVector(new Vector3(b.extents.x, 0f, 0f)).magnitude,
+                                             m.MultiplyVector(new Vector3(0f, b.extents.y, 0f)).magnitude),
                                    m.MultiplyVector(new Vector3(0f, 0f, b.extents.z)).magnitude);
             radius = Mathf.Max(radius, m.MultiplyPoint3x4(b.center).magnitude + half);
         }

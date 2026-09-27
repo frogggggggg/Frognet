@@ -52,7 +52,7 @@ MonoBehaviour:
   substance:
     name: GLUCOSE
     code: GLU
-    color: {r: 1, g: 0.95, b: 0.86, a: 1}
+    color: {r: 1, g: 0.97, b: 0.74, a: 1}
   shape: 0
   sizeRange: {x: 1.2, y: 5}
   sizeSkew: 2

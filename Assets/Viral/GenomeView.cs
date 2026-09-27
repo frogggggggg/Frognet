@@ -1476,6 +1476,21 @@ public class GenomeView : MonoBehaviour
                 Ring(P(-0.3f, 0f), s * 0.42f, w, col, 24);
                 Ring(P(0.3f, 0f), s * 0.42f, w, col, 24);
                 break;
+            case Crafting.Glyph.Tendrils: // blight: a blot with roots branching out, creeping when pointed at
+            {
+                float creep = 1f + 0.12f * Mathf.Sin(t * 4f);
+                Disc(c, s * 0.24f, col, 14);
+                for (int j = 0; j < 5; j++)
+                {
+                    float a0 = j * 72f + 15f * Mathf.Sin(j * 2.3f);
+                    Vector2 d0 = Rotate(Vector2.up, a0), d1 = Rotate(Vector2.up, a0 + (j % 2 == 0 ? 28f : -24f));
+                    Vector2 knee = c + d0 * (s * 0.55f), tip = knee + d1 * (s * 0.42f * creep);
+                    Taper(c + d0 * (s * 0.15f), knee, s * 0.13f, s * 0.08f, col);
+                    Taper(knee, tip, s * 0.08f, 0f, col);
+                    Taper(knee, knee + Rotate(d1, j % 2 == 0 ? -62f : 58f) * (s * 0.3f * creep), s * 0.06f, 0f, col); // a side root
+                }
+                break;
+            }
             case Crafting.Glyph.Bolt:
                 Taper(P(0.35f, 0.95f), P(-0.28f, 0.05f), s * 0.03f, s * 0.14f, col);
                 Quad(P(-0.32f, 0.05f), P(0.32f, 0.05f), s * 0.24f, col, col);
@@ -1676,7 +1691,8 @@ public class GenomeView : MonoBehaviour
             if (_drill)
             {
                 _drill.Deliver();
-                took = ImmuneSystem.Deliver(_drill.Cell, genes[gene]); // the right gene takes the cell over
+                if (_drill.Site(out Vector3 site, out Vector3 siteNormal))
+                    took = ImmuneSystem.Deliver(_drill.Cell, genes[gene], site, siteNormal); // takes effect if it works on this cell
             }
             Reach(InjectStage.Delivered, took);
             _genome.Delivered(gene);

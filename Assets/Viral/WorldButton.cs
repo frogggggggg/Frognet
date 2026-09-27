@@ -89,6 +89,15 @@ public class WorldButton : MonoBehaviour
         if (visualRoot) visualRoot.SetActive(false);
     }
 
+    // Built up front (hidden): built on first show it was a ~220 ms hitch mid-game (the OS font list, six painted
+    // sprites, the canvas, first-call JIT).
+    void Start()
+    {
+        if (_canvas) return;
+        Build();
+        _canvas.enabled = false;
+    }
+
     void OnEnable()
     {
         All.Add(this);

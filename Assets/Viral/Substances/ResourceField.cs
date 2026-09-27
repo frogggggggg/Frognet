@@ -16,7 +16,9 @@ using Random = UnityEngine.Random;
 /// Floating: Update steps every chunk (ResourceChunk.Step) before the simulation ticks, so anyone standing
 /// on one is posed on where it is this frame. Chunks near the camera, stood on, settling or being extracted
 /// step every frame; the rest every 4 frames on screen, 8 off, staggered (the skipped time is caught up).
-/// A chunk at rest writes nothing. Who stands on what: one pass over Organism.All per frame.
+/// A chunk at rest writes nothing. Chunks cache their pose (ResourceChunk.Pos / Rot / Size): no transform reads per
+/// frame, and a far chunk is drawn carried on by its last step's velocity, so stepping every 4 frames doesn't judder.
+/// Who stands on what: one pass over Organism.All per frame.
 ///
 /// Drawing: one buffer, one instanced draw per (shape, LOD) mesh (Custom/ResourceChunk) from the chunks'
 /// transforms; the deformation is in the vertex stage, so a chunk costs a sphere-vs-frustum test and a
@@ -239,8 +241,6 @@ public class ResourceField : MonoBehaviour
 
     // ---------------- floating ----------------
 
-    const float DriftEveryFrame = 0.3f * 0.3f; // (m/s)^2: slower drift in 4-frame steps doesn't show
-
     void Update()
     {
         int frame = Time.frameCount;
@@ -258,13 +258,13 @@ public class ResourceField : MonoBehaviour
             bool occupied = c.occupiedFrame == frame;
             if (!occupied && c.Still <= 0f && !c.Extractor)
             {
-                Vector3 p = c.T.position;
+                Vector3 p = c.Pos;
                 if ((p - cam).sqrMagnitude > near2)
                 {
-                    // On screen and carried by the blood (off the calm middle it moves relative to the camera):
-                    // every frame, else it moved in steps of 4 frames' drift (judder).
-                    bool seen = SimulationTicker.OnScreen(p, c.radius * 1.3f);
-                    int every = !seen ? 8 : Vessel.FlowAt(p).sqrMagnitude > DriftEveryFrame ? 1 : 4;
+                    // Every 4 frames on screen (8 off), staggered. Carried by the blood it would move in steps of 4
+                    // frames' drift (judder), so DrawChunks draws it where its last step's velocity has taken it
+                    // since; only its collider (the transform) moves in steps, and nothing out here stands on it.
+                    int every = SimulationTicker.OnScreen(p, c.radius * 1.3f) ? 4 : 8;
                     if ((i + frame) % every != 0) continue;
                 }
             }
@@ -436,14 +436,16 @@ public class ResourceField : MonoBehaviour
         Vector3 cam = SimulationTicker.CameraPosition;
         float lod2 = lodDistance * lodDistance, draw2 = drawDistance * drawDistance;
         Vector3 min = Vector3.positiveInfinity, max = Vector3.negativeInfinity;
+        float now = Time.time;
         foreach (ResourceChunk c in s_all)
         {
-            Transform t = c.T;
-            Vector3 home = t.position;
-            float r = t.lossyScale.x, reach = r * 1.3f, d2 = (home - cam).sqrMagnitude;
+            // From the chunk's cached pose (no transform reads), carried on by its velocity since its last step: a
+            // far chunk steps every few frames (Update), and drawn at its last step it moved in steps.
+            Vector3 home = c.Pos + c.Velocity * (now - c.StepTime);
+            float r = c.Size, reach = r * 1.3f, d2 = (home - cam).sqrMagnitude;
             if (d2 > draw2 || !SimulationTicker.OnScreen(home, reach)) continue;
             int g = (int)c.shape * 2 + (d2 < lod2 ? 0 : 1);
-            Quaternion q = t.rotation;
+            Quaternion q = c.Rot;
             Color tint = c.Tint;
             _groups[g][_groupCount[g]++] = new Instance64
             {

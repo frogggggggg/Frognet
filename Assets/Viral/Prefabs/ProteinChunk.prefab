@@ -52,7 +52,7 @@ MonoBehaviour:
   substance:
     name: PROTEIN
     code: PRO
-    color: {r: 1, g: 0.64, b: 0.3, a: 1}
+    color: {r: 1, g: 0.46, b: 0.1, a: 1}
   shape: 1
   sizeRange: {x: 1.5, y: 6}
   sizeSkew: 2.2

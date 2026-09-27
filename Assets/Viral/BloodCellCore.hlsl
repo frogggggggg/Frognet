@@ -117,10 +117,20 @@ float DetailFade(float3 positionWS)
 // Fluctuation scales the field about its midpoint (lumps swell in
 // place instead of sliding), with phase driven by the height itself so
 // neighbouring lumps fall out of sync.
-float4 SurfaceHeight(float3 p, float fade)
+// Metres one pixel covers at a world point (any stage: no derivatives). Perspective or orthographic.
+float PixelMetres(float3 positionWS)
+{
+    float span = unity_OrthoParams.w > 0.5
+               ? 2.0 * unity_OrthoParams.y
+               : 2.0 * distance(positionWS, GetCameraPositionWS()) / max(abs(UNITY_MATRIX_P._m11), 1e-5);
+    return span / max(_ScreenParams.y, 1.0);
+}
+
+// pixel = PixelMetres at the point (map units are metres): octaves finer than a pixel fade out (FBM3DLod).
+float4 SurfaceHeight(float3 p, float fade, float pixel)
 {
     float detail = saturate(lerp(_DistantDetail, _Detail, fade));
-    float4 n  = FBM3D(p * _NoiseScale, _Gain, _Lacunarity, detail);
+    float4 n  = FBM3DLod(p * _NoiseScale, _Gain, _Lacunarity, detail, pixel * _NoiseScale);
     float4 hd = float4(n.x, n.yzw * _NoiseScale);   // chain rule
 
     if (_PulseAmount <= 0.0)
@@ -134,6 +144,12 @@ float4 SurfaceHeight(float3 p, float fade)
     float dkdh = _PulseAmount * c * phaseMul;
 
     return float4(0.5 + centered * k, hd.yzw * (k + centered * dkdh));
+}
+
+// Unfiltered (the rope beads: their map isn't in metres).
+float4 SurfaceHeight(float3 p, float fade)
+{
+    return SurfaceHeight(p, fade, 0.0);
 }
 
 // ---------------------------------------------------------------

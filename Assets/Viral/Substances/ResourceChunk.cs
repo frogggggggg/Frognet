@@ -83,7 +83,7 @@ public class ResourceChunk : MonoBehaviour, IWorldState
     public float CurrentRadius => radius * Mathf.Lerp(0.33f, 1f, Mathf.Pow(Mathf.Clamp01(1f - Extracted), 0.6f));
 
     /// <summary>Where it is (its centre).</summary>
-    public Vector3 Centre => T.position;
+    public Vector3 Centre => Pos;
 
     /// <summary>How fast it's moving (m/s), from its last step.</summary>
     public Vector3 Velocity { get; private set; }
@@ -94,6 +94,11 @@ public class ResourceChunk : MonoBehaviour, IWorldState
     internal int occupiedFrame = -1;
     /// <summary>Settled still, 0..1 (1 = stood on long enough).</summary>
     internal float Still => _still;
+    /// <summary>Its pose as of its last step (only Step moves it), its size (the transform's scale), and when it last
+    /// stepped: ResourceField reads these for every chunk every frame instead of the transform.</summary>
+    internal Vector3 Pos;
+    internal Quaternion Rot;
+    internal float Size, StepTime;
 
     Rigidbody _body;
     Surface _surface;
@@ -106,6 +111,7 @@ public class ResourceChunk : MonoBehaviour, IWorldState
     void Awake()
     {
         T = transform;
+        T.GetPositionAndRotation(out Pos, out Rot);
 
         // The walkable hull (shared by every chunk of this shape), never drawn: ResourceField draws them.
         var filter = GetComponent<MeshFilter>();
@@ -171,13 +177,20 @@ public class ResourceChunk : MonoBehaviour, IWorldState
         radius = Mathf.Max(r, 0.05f);
         Amount = Remaining = yieldAtUnitRadius * radius * radius * radius;
         transform.localScale = Vector3.one * radius;
+        Rescaled();
         if (_surface) _surface.referenceSpeed = rippleReference / radius;
     }
+
+    void Rescaled() => Size = transform.lossyScale.x;
 
     float Mass => Mathf.Max(1e-3f, density * radius * radius * radius);
 
     /// <summary>The transform follows the volume left (ResourceField, while it drains).</summary>
-    internal void Shrink() => T.localScale = Vector3.one * CurrentRadius;
+    internal void Shrink()
+    {
+        T.localScale = Vector3.one * CurrentRadius;
+        Rescaled();
+    }
 
     /// <summary>Picks a random radius in the prefab's range, skewed small (for spawners).</summary>
     public float RandomRadius()
@@ -195,13 +208,14 @@ public class ResourceChunk : MonoBehaviour, IWorldState
     internal void Step(float now, bool occupied)
     {
         float dt = Mathf.Min(now - _lastStep, 0.5f);
-        _lastStep = now;
+        _lastStep = StepTime = now;
         if (!_placed)
         {
             // Its place is wherever it was put (spawned, dragged in the editor, resized).
             _placed = true;
-            _baseRotation = T.rotation;
-            _home = T.position - Bob(0f);
+            T.GetPositionAndRotation(out Pos, out _baseRotation);
+            Rot = _baseRotation;
+            _home = Pos - Bob(0f);
             dt = 0f;
         }
 
@@ -218,8 +232,10 @@ public class ResourceChunk : MonoBehaviour, IWorldState
         _phase += dt * moving;
         _home += (_push + flow) * dt;
         Vector3 at = _home + Bob(_phase);
-        if (dt > 0f) Velocity = (at - T.position) / dt;
-        T.SetPositionAndRotation(at, Quaternion.AngleAxis(_spinRate * _phase, _spinAxis) * _baseRotation);
+        if (dt > 0f) Velocity = (at - Pos) / dt;
+        Pos = at;
+        Rot = Quaternion.AngleAxis(_spinRate * _phase, _spinAxis) * _baseRotation;
+        T.SetPositionAndRotation(Pos, Rot);
     }
 
     Vector3 Bob(float phase)

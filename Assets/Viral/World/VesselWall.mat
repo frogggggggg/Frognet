@@ -37,7 +37,7 @@ Material:
     - _WallHazeMax: 0.8
     m_Colors:
     - _InkColor: {r: 0.2, g: 0.1, b: 0.17, a: 1}
-    - _NucleusColor: {r: 0.34, g: 0.18, b: 0.27, a: 1}
+    - _NucleusColor: {r: 0.6745098, g: 0.09803922, b: 0.23529412, a: 1}
     - _WallColor: {r: 0.67295593, g: 0.09946198, b: 0.23440187, a: 1}
     - _WallGlow: {r: 0.72, g: 0.4, b: 0.42, a: 1}
   m_BuildTextureStacks: []

@@ -140,7 +140,7 @@ public partial class Surface
         _colliders = made.ToArray();
     }
 
-    // Round-robin collider LOD (once a frame, from the first Surface to update).
+    // Round-robin collider LOD (once a frame, from TickAll in Surface.Ripples.cs).
     static void StepColliderLod()
     {
         if (s_lodFrame == Time.frameCount) return;
@@ -161,7 +161,7 @@ public partial class Surface
             Bounds b = s._hull.sharedMesh.bounds;
             Vector3 scale = t.lossyScale;
             Vector3 centre = t.TransformPoint(b.center);
-            float reach = b.extents.magnitude * Mathf.Max(Mathf.Abs(scale.x), Mathf.Abs(scale.y), Mathf.Abs(scale.z)) + s.detailDistance;
+            float reach = b.extents.magnitude * Mathf.Max(Mathf.Max(Mathf.Abs(scale.x), Mathf.Abs(scale.y)), Mathf.Abs(scale.z)) + s.detailDistance;
             reach *= reach;
             bool near = false;
             foreach (Vector3 p in s_organisms)

@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/Tools/check.py\" --hook",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
+  }
+}

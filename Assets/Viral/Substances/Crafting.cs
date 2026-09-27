@@ -8,7 +8,7 @@ using UnityEngine;
 /// (into a store). Pure data plus the sums: what a recipe would draw from which store
 /// (<see cref="Plan"/>), where its product goes (<see cref="Output"/>), and making it
 /// (<see cref="Deliver"/>). Taking the material is left to the caller, so it can be drawn out over
-/// time. Made on demand (with test recipes: genes from glucose and protein) when a virus has none.
+/// time. Made on demand (with the default recipes: genes from glucose and protein) when a virus has none.
 /// </summary>
 public class Crafting : MonoBehaviour
 {
@@ -22,7 +22,7 @@ public class Crafting : MonoBehaviour
 
     /// <summary>The picture a recipe shows in the synthesizer's menu (drawn by GenomeView), so recipes are
     /// told apart at a glance, not by reading. Strand = a plain helix (the fallback).</summary>
-    public enum Glyph { Strand, Burst, Copy, Shell, Spike, Scissors, Drop, Chain, Bolt, Star, Eye, Shield }
+    public enum Glyph { Strand, Burst, Copy, Shell, Spike, Scissors, Drop, Chain, Bolt, Star, Eye, Shield, Tendrils }
 
     [Serializable]
     public class Recipe
@@ -31,6 +31,9 @@ public class Crafting : MonoBehaviour
         public string name = "UNKNOWN";
         public Color color = TerminalUI.Line;
         public Glyph glyph;
+        [Tooltip("A strand's: what it works on and what it does there (GeneEffects).")]
+        public GeneTarget targets = GeneTarget.RedBloodCell;
+        public GeneEffect effect;
         public Cost[] costs = new Cost[0];
         [Tooltip("Off: makes a DNA strand (a gene with the code, name and colour above). On: 'amount' of a " +
                  "substance with them, into a store.")]
@@ -50,11 +53,9 @@ public class Crafting : MonoBehaviour
 
     public List<Recipe> recipes = new List<Recipe>
     {
-        new Recipe { code = "LYS-1", name = "LYSIS",     color = new Color(1f, 0.36f, 0.42f), glyph = Glyph.Burst,    costs = Costs(20f, 30f) },
-        new Recipe { code = "REP-2", name = "REPLICASE", color = new Color(0.55f, 0.93f, 1f), glyph = Glyph.Copy,     costs = Costs(40f, 10f) },
-        new Recipe { code = "CAP-3", name = "CAPSID",    color = new Color(0.62f, 1f, 0.45f), glyph = Glyph.Shell,    costs = Costs(0f, 40f) },
-        new Recipe { code = "SPK-4", name = "SPIKE",     color = new Color(1f, 0.78f, 0.35f), glyph = Glyph.Spike,    costs = Costs(15f, 25f) },
-        new Recipe { code = "INT-5", name = "INTEGRASE", color = new Color(0.78f, 0.55f, 1f), glyph = Glyph.Scissors, costs = Costs(30f, 30f) },
+        // Blight: black tendrils spread over a red cell from the injection and it stops calling for help.
+        new Recipe { code = "BLT-1", name = "BLIGHT", color = new Color(0.07f, 0.03f, 0.1f), glyph = Glyph.Tendrils,
+                     targets = GeneTarget.RedBloodCell, effect = GeneEffect.Blight, costs = Costs(20f, 20f) },
     };
 
     /// <summary>What the recipe would take from which store slot (last slot first, as the stores are
@@ -127,7 +128,7 @@ public class Crafting : MonoBehaviour
     /// the gene's index.</summary>
     public static int Deliver(Recipe r, VirusInventory inv, Genome genome, int mount)
     {
-        genome.genes.Add(new Genome.Gene { code = r.code, name = r.name, color = r.color });
+        genome.genes.Add(new Genome.Gene { code = r.code, name = r.name, color = r.color, targets = r.targets, effect = r.effect });
         int index = genome.genes.Count - 1;
         if (mount >= 0 && mount < inv.ring.Count && inv.ring[mount].kind == VirusInventory.Kind.Gene && inv.ring[mount].index < 0)
             inv.ring[mount].index = index;

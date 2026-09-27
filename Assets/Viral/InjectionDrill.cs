@@ -73,6 +73,19 @@ public class InjectionDrill : MonoBehaviour
 
     Vector3 _start, _tip, _entry;
 
+    /// <summary>Where it goes into the cell: the point on the cell under the virus and the surface's
+    /// normal there (world). False while it has no cell.</summary>
+    public bool Site(out Vector3 point, out Vector3 normal)
+    {
+        point = _entry;
+        normal = Vector3.up;
+        if (!_surfaceRenderer) return false;
+        Transform v = virus ? virus : transform;
+        normal = _contact != null && _contact.OnSurface ? _contact.SurfaceNormal : (v.position - _surfaceRenderer.bounds.center).normalized;
+        point = _surfaceRipples ? _surfaceRipples.ClosestPoint(v.position) : _entry;
+        return true;
+    }
+
     /// <summary>The cell it's drilling into (null while it has none).</summary>
     public Transform Cell => _surfaceRenderer ? _surfaceRenderer.transform : null;
 

@@ -20,8 +20,8 @@ MonoBehaviour:
     minimumQueue: 2501
     maximumQueue: 3999
     passEvent: 450
-    transparentDepthShader: {fileID: 0}
-    screenInvertSweepShader: {fileID: 0}
+    transparentDepthShader: {fileID: 4800000, guid: 4e3c02e93c843b346baf7535c4d5c4ab, type: 3}
+    screenInvertSweepShader: {fileID: 4800000, guid: 5e73e6d04106e0340ad944053c0eee64, type: 3}
 --- !u!114 &-638358480604012935
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -283,7 +283,7 @@ MonoBehaviour:
   m_Active: 0
   m_Settings:
     AOMethod: 0
-    Downsample: 0
+    Downsample: 1
     AfterOpaque: 0
     Source: 1
     NormalSamples: 1
@@ -291,6 +291,6 @@ MonoBehaviour:
     DirectLightingStrength: 0.25
     Radius: 0.3
     Samples: 1
-    BlurQuality: 0
+    BlurQuality: 2
     Falloff: 100
     SampleCount: -1

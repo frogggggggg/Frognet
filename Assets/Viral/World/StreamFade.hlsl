@@ -41,6 +41,20 @@ void StreamFadeClipComplement(float fade, float2 pixel)
     clip(dither * 0.998 - (fade - 0.001) - 1e-5);
 }
 
+// Atmospheric perspective (Vessel.perspective*): past a start distance colour drains and sinks into the fog colour
+// well before the fog itself takes it, so far things read as far (not as small vivid confetti). Every streamed
+// shader and the far field's stand-ins call it before MixFog, so they match where they cross over. Needs Core.hlsl.
+// _Atmosphere: x start (metres), y 1 / (end - start), z desaturation, w strength (0 = off).
+float4 _Atmosphere;
+float3 MixAtmosphere(float3 col, float3 positionWS)
+{
+    if (_Atmosphere.w <= 0.0) return col;
+    float t = saturate((distance(positionWS, _WorldSpaceCameraPos) - _Atmosphere.x) * _Atmosphere.y);
+    t = t * (2.0 - t); // eases in fast, then settles
+    col = lerp(col, dot(col, float3(0.3, 0.59, 0.11)), t * _Atmosphere.z);
+    return lerp(col, unity_FogColor.rgb, t * _Atmosphere.w);
+}
+
 // One renderer per object (the cells): its origin is the centre, and only streamed renderers (rendering layer bit
 // WorldEntity.StreamedLayer) fade, so hand-placed scenery never does. Needs Core.hlsl.
 #define STREAM_FADE_LAYER (1u << 30)

@@ -229,10 +229,10 @@ public static class TerminalUI
         Texture2D tex = Paint(S, (x, y) =>
         {
             // Rounded rectangle: distance inside it (negative outside).
-            float qx = Mathf.Max(left + round - x, x - (right - round), 0f);
-            float qy = Mathf.Max(bottom + round - y, y - (top - round), 0f);
+            float qx = Mathf.Max(Mathf.Max(left + round - x, x - (right - round)), 0f);
+            float qy = Mathf.Max(Mathf.Max(bottom + round - y, y - (top - round)), 0f);
             float inside = round - Mathf.Sqrt(qx * qx + qy * qy);
-            inside = Mathf.Min(inside, Mathf.Min(x - left, right - x), Mathf.Min(y - bottom, top - y));
+            inside = Mathf.Min(Mathf.Min(inside, Mathf.Min(x - left, right - x)), Mathf.Min(y - bottom, top - y));
             if (inside < 0f) return 0f;
             if (inside < width) return 1f;                                            // outline
             if (y > split && y < split + width) return 1f;                            // buttons' lower edge

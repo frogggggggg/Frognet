@@ -37,7 +37,7 @@ public class PerfOverlay : MonoBehaviour
     int _frameCount, _frameHead;
     float _windowTime, _windowStart;
     int _windowFrames;
-    double _cpuMain, _cpuRender, _gpu;
+    double _cpuMain, _cpuWait, _cpuRender, _gpu;
     int _timedFrames, _gpuFrames;
     long _gcPeak;
     string _plain = "";
@@ -143,13 +143,14 @@ public class PerfOverlay : MonoBehaviour
         if (FrameTimingManager.GetLatestTimings(1, _timing) > 0)
         {
             _cpuMain += _timing[0].cpuMainThreadFrameTime;
+            _cpuWait += _timing[0].cpuMainThreadPresentWaitTime;
             _cpuRender += _timing[0].cpuRenderThreadFrameTime;
             _timedFrames++;
             if (_timing[0].gpuFrameTime > 0) { _gpu += _timing[0].gpuFrameTime; _gpuFrames++; }
             TotalMain += _timing[0].cpuMainThreadFrameTime;
             TotalRender += _timing[0].cpuRenderThreadFrameTime;
             TotalTimedFrames++;
-            if (_timing[0].gpuFrameTime > 0) { TotalGpu += _timing[0].gpuFrameTime; TotalGpuFrames++; }
+            if (_timing[0].gpuFrameTime > 0 && _timing[0].gpuFrameTime < 1000) { TotalGpu += _timing[0].gpuFrameTime; TotalGpuFrames++; } // a bogus reading (~4e11 once) skewed a whole average
         }
 
         if (Time.unscaledTime - _windowStart < refresh) return;
@@ -157,7 +158,7 @@ public class PerfOverlay : MonoBehaviour
         _windowStart = Time.unscaledTime;
         _windowTime = 0f;
         _windowFrames = 0;
-        _cpuMain = _cpuRender = _gpu = 0;
+        _cpuMain = _cpuWait = _cpuRender = _gpu = 0;
         _timedFrames = _gpuFrames = 0;
         _gcPeak = 0;
     }
@@ -169,6 +170,10 @@ public class PerfOverlay : MonoBehaviour
         Lows(out float lowFps, out float worstMs);
 
         double main = _timedFrames > 0 ? _cpuMain / _timedFrames : 0;
+        // The main thread's frame time includes blocking on the GPU at present: split that off, or a GPU-bound frame
+        // reads as "CPU main" (main 16.5 vs GPU 16.2 was really ~7 ms of work waiting on the GPU).
+        double wait = _timedFrames > 0 ? _cpuWait / _timedFrames : 0;
+        main = System.Math.Max(0, main - wait);
         double render = _timedFrames > 0 ? _cpuRender / _timedFrames : 0;
         double gpu = _gpuFrames > 0 ? _gpu / _gpuFrames : 0;
 
@@ -177,7 +182,7 @@ public class PerfOverlay : MonoBehaviour
         Line($"1% low <color={Rate(lowFps)}>{lowFps:0}</color>   worst <color={Rate(1000f / worstMs)}>{worstMs:0.0} ms</color>");
         Line("");
 
-        Line($"CPU main   {Ms(main)}");
+        Line($"CPU main   {Ms(main)}" + (wait >= 0.5 ? $"  <color={Dim}>+{wait:0.0} waiting on GPU</color>" : ""));
         Line($"CPU render {Ms(render)}");
         Line($"GPU        {(gpu > 0 ? Ms(gpu) : $"<color={Dim}>n/a</color>")}");
         Line($"bound by   {Bottleneck(main, render, gpu)}");
@@ -197,7 +202,8 @@ public class PerfOverlay : MonoBehaviour
         string quality = QualitySettings.names[QualitySettings.GetQualityLevel()];
         string vsync = QualitySettings.vSyncCount > 0 ? "on" : Application.targetFrameRate > 0 ? $"cap {Application.targetFrameRate}" : "off";
         Line($"{Screen.width}x{Screen.height} @ {scale:0.##}x = {Mathf.RoundToInt(Screen.width * scale)}x{Mathf.RoundToInt(Screen.height * scale)}");
-        Line($"quality {quality}   vsync {vsync}");
+        Line($"quality {quality}   vsync {vsync}" +
+             (SystemInfo.batteryStatus == BatteryStatus.Discharging ? $"   <color={Warn}>on battery</color>" : ""));
         Line($"<color={Dim}>{SystemInfo.graphicsDeviceName} ({SystemInfo.graphicsDeviceType})</color>");
         Line($"<color={Dim}>{SystemInfo.processorType.Trim()}</color>");
         Line($"<color={Dim}>{toggleKey} hide  {copyKey} copy</color>");

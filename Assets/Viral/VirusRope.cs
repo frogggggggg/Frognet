@@ -1876,7 +1876,7 @@ public class VirusRope : MonoBehaviour
         {
             // Capped per step, so a sudden yank can't pay out a flood of rope at once.
             float stretch = Vector3.Distance(r.x[r.n - 2], playerPoint) - r.rest[r.n - 2];
-            if (stretch > 0.001f) Feed(r, Mathf.Min(stretch, autoBudget, feedSpeed * dt), playerPoint);
+            if (stretch > 0.001f) Feed(r, Mathf.Min(Mathf.Min(stretch, autoBudget), feedSpeed * dt), playerPoint);
         }
 
         if (r.slurping)

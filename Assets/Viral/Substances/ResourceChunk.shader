@@ -194,7 +194,7 @@ Shader "Custom/ResourceChunk"
                 col += l.color * spec * atten * ao;
                 col += lerp(albedo, 1.0, 0.5) * fres * _RimStrength * (0.4 + 0.6 * ao); // glassy edges
                 col += albedo * i.extra.x * 0.25;                                      // pointed at
-                col = MixFog(col, i.fog);
+                col = MixFog(MixAtmosphere(col, i.positionWS), i.fog);
                 return half4(col, 1);
             }
             ENDHLSL

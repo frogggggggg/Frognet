@@ -37,6 +37,9 @@ public class PathManager : MonoBehaviour
              "Fewer spheres to refresh and to test in every query; the bubble round each creature is a little rounder and wider.")]
     public bool oneSpherePerCreature = true;
     [Tooltip("Max spheres used to cover one box collider (more = tighter fit, slower)")] public int maxSpheresPerCollider = 64;
+    [Min(20f), Tooltip("Obstacles are gathered within this of each creature (a physics overlap), not from the whole scene. " +
+                       "A creature that moves a third of this from where it was gathered around triggers a new gather.")]
+    public float scanRadius = 250f;
 
     [Header("Field")]
     [Tooltip("Sink strength: flow speed toward the target is S/d^2. Tune against body speeds (velocity-aware compares them)")] public float sinkStrength = 1000f;
@@ -70,6 +73,7 @@ public class PathManager : MonoBehaviour
     // come after GetDirections has done this, so they only read the flags).
     void Ensure()
     {
+        if (_stale && !_rescan && Strayed()) _rescan = true;
         if (_rescan) { _rescan = _stale = false; Scan(); }
         else if (_stale) { _stale = false; Refresh(); }
     }
@@ -80,8 +84,9 @@ public class PathManager : MonoBehaviour
         lt.Clear(); lb.Clear(); ll.Clear(); lr.Clear(); lg.Clear();
         // Merged into one sphere each: a creature's colliders (oneSpherePerCreature), and a Surface's (a concave
         // cell's collider is many convex pieces, Surface.Collider.cs).
-        var merged = new Dictionary<Component, List<Collider>>();
-        foreach (var c in FindObjectsByType<Collider>(FindObjectsSortMode.None))
+        foreach (var list in merged.Values) { list.Clear(); listPool.Push(list); }
+        merged.Clear();
+        foreach (var c in Gather())
         {
             if (!c.enabled || c.isTrigger || (obstacleLayers.value & (1 << c.gameObject.layer)) == 0) continue;
             Organism o = c.GetComponentInParent<Organism>();
@@ -89,7 +94,7 @@ public class PathManager : MonoBehaviour
             Component owner = o ? (oneSpherePerCreature ? o : null) : c.GetComponentInParent<Surface>();
             if (owner)
             {
-                if (!merged.TryGetValue(owner, out var list)) merged.Add(owner, list = new List<Collider>());
+                if (!merged.TryGetValue(owner, out var list)) merged.Add(owner, list = listPool.Count > 0 ? listPool.Pop() : new List<Collider>());
                 list.Add(c);
             }
             else AddCollider(c);
@@ -111,6 +116,48 @@ public class PathManager : MonoBehaviour
         Refresh(true);
     }
 
+    readonly Dictionary<Component, List<Collider>> merged = new();
+    readonly Stack<List<Collider>> listPool = new();
+    readonly HashSet<Collider> gathered = new();
+    readonly List<Vector3> scanCentres = new();
+    Collider[] overlap = new Collider[4096];
+
+    // Colliders within scanRadius of any creature: one overlap per cluster of creatures (a creature near an earlier
+    // centre shares it). A whole-scene FindObjectsByType was 12-17 ms per streamer change with ~1k streamed cells.
+    HashSet<Collider> Gather()
+    {
+        gathered.Clear();
+        scanCentres.Clear();
+        float share = scanRadius / 3f;
+        foreach (Organism o in Organism.All)
+        {
+            if (!o) continue;
+            Vector3 at = o.transform.position;
+            if (Near(at, share)) continue;
+            scanCentres.Add(at);
+            int hits;
+            while ((hits = Physics.OverlapSphereNonAlloc(at, scanRadius, overlap, obstacleLayers, QueryTriggerInteraction.Ignore)) == overlap.Length)
+                overlap = new Collider[overlap.Length * 2];
+            for (int i = 0; i < hits; i++) gathered.Add(overlap[i]);
+        }
+        return gathered;
+    }
+
+    bool Near(Vector3 at, float within)
+    {
+        foreach (Vector3 c in scanCentres) if ((c - at).sqrMagnitude < within * within) return true;
+        return false;
+    }
+
+    // A creature has left the gathered area (moved a third of scanRadius past every centre): gather again.
+    bool Strayed()
+    {
+        float margin = scanRadius / 3f * 2f; // its own centre was within a third; this leaves a third of reach spare
+        foreach (Organism o in Organism.All)
+            if (o && !Near(o.transform.position, margin)) return true;
+        return false;
+    }
+
     void AddCollider(Collider c)
     {
         var t = c.transform; var body = c.attachedRigidbody;
@@ -128,7 +175,7 @@ public class PathManager : MonoBehaviour
                 }
             case BoxCollider b:
                 {
-                    Vector3 sz = b.size; float side = Mathf.Max(1e-3f, Mathf.Min(sz.x, sz.y, sz.z)); Vector3Int m;
+                    Vector3 sz = b.size; float side = Mathf.Max(1e-3f, Mathf.Min(Mathf.Min(sz.x, sz.y), sz.z)); Vector3Int m;
                     for (; ; side *= 1.25f)   // grow the cells until the box needs at most maxSpheresPerCollider
                     {
                         m = new Vector3Int(Mathf.CeilToInt(sz.x / side), Mathf.CeilToInt(sz.y / side), Mathf.CeilToInt(sz.z / side));
@@ -143,7 +190,7 @@ public class PathManager : MonoBehaviour
         }
     }
 
-    static float MaxScale(Transform t) { var s = t.lossyScale; return Mathf.Max(Mathf.Abs(s.x), Mathf.Abs(s.y), Mathf.Abs(s.z)); }
+    static float MaxScale(Transform t) { var s = t.lossyScale; return Mathf.Max(Mathf.Max(Mathf.Abs(s.x), Mathf.Abs(s.y)), Mathf.Abs(s.z)); }
 
     // One sphere around all of a creature's (or a Surface's) colliders: their bounding spheres merged.
     void AddMerged(Transform owner, List<Collider> colliders)

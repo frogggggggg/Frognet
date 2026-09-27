@@ -40,6 +40,16 @@ float4 _VesselC;     // centre, w = 1 with a vessel
 float4 _VesselA;     // axis
 float4 _Clock;       // x now, y frame angle now (from the epoch), z born fade seconds
 float4 _Range;       // x far distance, y far fade length, z least pixels, w LOD pixels
+float4 _Thin;        // x thinning start (metres), y 1 / (end - start), z share kept at the end, w fade width (share)
+
+// A stable 0..1 per record (its pose bits), for thinning: the same records drop out every frame.
+float RecordHash(FarInstance f)
+{
+    uint h = asuint(f.position.x) * 0x9E3779B1u ^ asuint(f.position.y) * 0x85EBCA77u
+           ^ asuint(f.position.z) * 0xC2B2AE3Du ^ asuint(f.time.x) * 0x27D4EB2Fu;
+    h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12; h *= 0x297A2D39u; h ^= h >> 15;
+    return (h & 0xFFFFFFu) / 16777216.0;
+}
 
 float3 Turn(float3 v, float3 k, float a)
 {
@@ -82,6 +92,11 @@ void Cull(uint3 id : SV_DispatchThreadID)
     if (pixels < _Range.z) return;
 
     float own = saturate((_Range.x - d) / max(_Range.y, 1.0));
+    own *= saturate(pixels / max(_Range.z, 1e-3) - 1.0); // fades in from least pixels to twice that, no popping dots
+    // Thinning: past the start only a shrinking share of records draws (keep eases 1 -> _Thin.z); a record whose
+    // hash sits just under the cut dissolves over _Thin.w of share instead of popping.
+    float keep = lerp(1.0, _Thin.z, smoothstep(0.0, 1.0, saturate((d - _Thin.x) * _Thin.y)));
+    own *= saturate((keep + _Thin.w - RecordHash(f)) / max(_Thin.w, 1e-3)); // + w: all kept while keep = 1
     if (_Clock.z > 0.0) own *= saturate((_Clock.x - f.time.z) / _Clock.z);
     if (own <= 0.0) return;
     float real = StreamFade(p);

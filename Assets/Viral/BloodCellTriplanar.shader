@@ -249,7 +249,7 @@ Shader "Custom/BloodCellTriplanar"
 
             // Distant relief is simplified so tessellated vertices don't crawl.
             // Ripples stay full strength: they're gameplay feedback.
-            float h      = SurfaceHeight(c.mapPos, c.fade).x;
+            float h      = SurfaceHeight(c.mapPos, c.fade, PixelMetres(baseWS)).x;
             c.ripple     = Ripple(c.mapPos);
             float relief = (h - 0.5) * _Displace
                          * lerp(_DistantDisplacementMultiplier, 1.0, c.fade);
@@ -295,7 +295,7 @@ Shader "Custom/BloodCellTriplanar"
         #if defined(INVERT_BACKFACES)
             o.positionWS  = c.positionWS;
         #endif
-            o.normalWS    = BumpNormal(c.normalWS, SurfaceHeight(c.mapPos, c.fade),
+            o.normalWS    = BumpNormal(c.normalWS, SurfaceHeight(c.mapPos, c.fade, PixelMetres(c.positionWS)),
                                        c.ripple, c.fade);
         #if defined(INVERT_BACKFACES)
             // Inside the focus sweep: the smooth vertex normal bent by ripples only (no bump), so
@@ -337,6 +337,7 @@ Shader "Custom/BloodCellTriplanar"
             #pragma shader_feature_local _SPACE_OBJECT _SPACE_WORLD
             #pragma shader_feature_local_fragment _SHADING_SMOOTH _SHADING_CEL
 
+            #define CELL_TENDRILS // Surface.Infect
             #include "BloodCellForward.hlsl"
 
             [domain("tri")]

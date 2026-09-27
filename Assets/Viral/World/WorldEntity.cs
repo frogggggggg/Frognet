@@ -33,6 +33,9 @@ public sealed class WorldEntity : MonoBehaviour
     static readonly List<Renderer> s_renderers = new List<Renderer>();
 
     internal int index = -1;          // in WorldStreamer's live list
+    // WorldStreamer's Template.farLook (FarField's stand-in), set on spawn. Serialized (hidden) so a play-mode script
+    // reload keeps it (the live list is rebuilt from OnEnable then).
+    [SerializeField, HideInInspector] internal int farLook = -1;
     IWorldState[] _states;
     Rigidbody _body;
     Transform _t;
@@ -54,8 +57,10 @@ public sealed class WorldEntity : MonoBehaviour
         Drifts = _body && !GetComponent<Organism>();
         // Drifting cells move by physics steps; off the calm middle they move relative to the camera, and
         // uninterpolated they stepped at the physics rate against the frame rate (judder). Nothing writes their
-        // transform directly, so interpolation is safe; sleeping bodies cost nothing.
-        if (Drifts && !_body.isKinematic) _body.interpolation = RigidbodyInterpolation.Interpolate;
+        // transform directly, so interpolation is safe. Only near the camera, though: the Vessel's drag loop turns it
+        // on and off by distance (Vessel.interpolateWithin).
+        if (Drifts && !_body.isKinematic)
+            _body.interpolation = Vessel.Interpolates(T.position) ? RigidbodyInterpolation.Interpolate : RigidbodyInterpolation.None;
         GetComponentsInChildren(true, s_renderers);
         foreach (Renderer r in s_renderers) r.renderingLayerMask |= StreamedLayer;
         s_renderers.Clear();

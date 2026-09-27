@@ -103,7 +103,11 @@ float4 ValueNoise3D(float3 p)
 //
 // The gradient accumulates through the chain rule: octave i is sampled at
 // p * freq, so its derivative contributes freq times its own amplitude.
-float4 FBM3D(float3 p, float gain, float lacunarity, float detail)
+//
+// footprint = noise units one pixel covers (0 = off). An octave finer than a pixel can show only aliases
+// (shimmer, moire), so each fades to its mean (0.5, slope 0) between 0.15 and 0.4 cycles per pixel: far
+// surfaces go smooth instead of speckled, and the average colour doesn't shift with distance.
+float4 FBM3DLod(float3 p, float gain, float lacunarity, float detail, float footprint)
 {
     float  value = 0.0, norm = 0.0, amp = 0.5, w = 1.0, freq = 1.0;
     float3 deriv = float3(0.0, 0.0, 0.0);
@@ -112,9 +116,10 @@ float4 FBM3D(float3 p, float gain, float lacunarity, float detail)
     for (int i = 0; i < 4; i++)
     {
         float4 n = ValueNoise3D(p * freq);
+        float  k = 1.0 - smoothstep(0.15, 0.4, freq * footprint);
 
-        value += n.x   * amp * w;
-        deriv += n.yzw * amp * w * freq;
+        value += lerp(0.5, n.x, k) * amp * w;
+        deriv += n.yzw * (amp * w * freq * k);
         norm  += amp * w;
 
         freq *= lacunarity;
@@ -123,6 +128,11 @@ float4 FBM3D(float3 p, float gain, float lacunarity, float detail)
     }
 
     return float4(value, deriv) / max(norm, 1e-5);
+}
+
+float4 FBM3D(float3 p, float gain, float lacunarity, float detail)
+{
+    return FBM3DLod(p, gain, lacunarity, detail, 0.0);
 }
 
 // Value only. The compiler dead-strips the derivative math, so this costs the

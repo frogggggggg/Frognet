@@ -351,22 +351,47 @@ public class HoloMap : MonoBehaviour
         for (int i = 0; i < _geometry.Count; i++) { _geometry[i].transforms.Clear(); _geometry[i].radii.Clear(); }
         float biggest = range * maxObjectSize;
 
-        foreach (MeshRenderer r in FindObjectsByType<MeshRenderer>(FindObjectsSortMode.None))
+        // Only what's near: bodies found by a physics overlap round the centre (range + margin for a second of
+        // movement), then their renderers. FindObjectsByType over the whole streamed world was a 30-65 ms rescan and
+        // left thousands of far transforms walked every frame. Renderers with no collider on their body aren't mapped.
+        Camera cam = Camera.main;
+        Vector3 centre = _player ? _player.transform.position : cam ? cam.transform.position : Vector3.zero;
+        _hits ??= new Collider[4096]; // cells are many collider pieces each
+        _roots ??= new HashSet<Transform>();
+        _renderers ??= new List<MeshRenderer>();
+        _roots.Clear();
+        int hits = Physics.OverlapSphereNonAlloc(centre, range * 1.5f + biggest, _hits, geometryLayers, QueryTriggerInteraction.Ignore);
+        for (int h = 0; h < hits; h++)
+        {
+            Collider c = _hits[h];
+            _roots.Add(c.attachedRigidbody ? c.attachedRigidbody.transform : c.transform);
+        }
+        _renderers.Clear();
+        foreach (Transform root in _roots)
+        {
+            root.GetComponentsInChildren(false, _renderersOne ??= new List<MeshRenderer>());
+            _renderers.AddRange(_renderersOne);
+        }
+
+        foreach (MeshRenderer r in _renderers)
         {
             if ((geometryLayers.value & (1 << r.gameObject.layer)) == 0) continue;
             if (r.GetComponentInParent<Organism>()) continue;
             if (!r.TryGetComponent(out MeshFilter filter) || !filter.sharedMesh) continue;
+            // A chunk's filter holds its 1280-triangle walk hull; a few pixels on the map, it's drawn with the light
+            // mesh the game itself draws chunks with past lodDistance.
+            Mesh mesh = r.TryGetComponent(out ResourceChunk chunk) ? ChunkMesh.Get(chunk.shape, false) : filter.sharedMesh;
 
             float radius = r.bounds.extents.magnitude;
             if (radius > biggest) continue;
 
             MeshGroup group = null;
             for (int i = 0; i < _geometry.Count; i++)
-                if (_geometry[i].mesh == filter.sharedMesh) { group = _geometry[i]; break; }
+                if (_geometry[i].mesh == mesh) { group = _geometry[i]; break; }
 
             if (group == null)
             {
-                group = new MeshGroup { mesh = filter.sharedMesh };
+                group = new MeshGroup { mesh = mesh };
                 _geometry.Add(group);
             }
             group.transforms.Add(r.transform);
@@ -375,8 +400,12 @@ public class HoloMap : MonoBehaviour
         _geometry.RemoveAll(g => g.transforms.Count == 0);
 
         _organisms.Clear();
-        _organisms.AddRange(FindObjectsByType<Organism>(FindObjectsSortMode.None));
+        _organisms.AddRange(Organism.All);
     }
+
+    Collider[] _hits;
+    HashSet<Transform> _roots;
+    List<MeshRenderer> _renderers, _renderersOne;
 
     // Plain UV sphere, radius 0.5 like Unity's own, so scale = diameter.
     static Mesh Sphere(int rings = 10, int segments = 16)

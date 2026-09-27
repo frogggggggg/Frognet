@@ -133,7 +133,7 @@ LegSample EvaluateLeg(LegAttributes v)
     s.fade     = DetailFade(baseWS);
 
     float plain = LegSweepCover(baseWS);
-    s.height = SurfaceHeight(s.mapPos, s.fade) * (1.0 - plain) + float4(0.5, 0, 0, 0) * plain;
+    s.height = SurfaceHeight(s.mapPos, s.fade, PixelMetres(baseWS)) * (1.0 - plain) + float4(0.5, 0, 0, 0) * plain;
     s.positionWS = baseWS + s.normalWS * ((s.height.x - 0.5) * _Displace
                  * lerp(_DistantDisplacementMultiplier, 1.0, s.fade));
 

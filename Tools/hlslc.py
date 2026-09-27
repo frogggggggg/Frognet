@@ -1,6 +1,7 @@
 """Compile Unity HLSL outside Unity with d3dcompiler_47 (D3DCompile), includes inlined by hand.
 usage: hlslc.py compute <file.compute> <kernel> [DEFINE...]
-       hlslc.py shader <file.shader> <pass-name> <vs> <ps> [DEFINE...]
+       hlslc.py shader <file.shader> <pass-name | #index> <vs> <ps> [DEFINE...]
+HLSLC_FAST=1 skips fxc's optimizer (errors only; much faster; misses optimizer-only problems like failed unrolls).
 """
 import ctypes, os, re, sys
 
@@ -38,6 +39,8 @@ def inline(text, cur, seen_once):
     return '\n'.join(out)
 
 d3d = ctypes.WinDLL('d3dcompiler_47.dll')
+# 0x1000 = backwards compatibility (as Unity); 4 = skip optimization
+FLAGS = 0x1000 | (4 if os.environ.get('HLSLC_FAST') else 0)
 
 class Macro(ctypes.Structure):
     _fields_ = [('Name', ctypes.c_char_p), ('Definition', ctypes.c_char_p)]
@@ -48,7 +51,7 @@ def compile_src(src, entry, target, defines, name):
     macros = (Macro * (len(defines) + 1))(*[Macro(k.encode(), v.encode()) for k, v in defines], Macro(None, None))
     code = ctypes.c_void_p(); errs = ctypes.c_void_p()
     b = src.encode('utf-8')
-    hr = d3d.D3DCompile(b, len(b), name.encode(), macros, None, entry.encode(), target.encode(), 0x1000, 0, ctypes.byref(code), ctypes.byref(errs))
+    hr = d3d.D3DCompile(b, len(b), name.encode(), macros, None, entry.encode(), target.encode(), FLAGS, 0, ctypes.byref(code), ctypes.byref(errs))
     msg = ''
     if errs.value:
         vt = ctypes.cast(ctypes.cast(errs, ctypes.POINTER(ctypes.c_void_p))[0], ctypes.POINTER(ctypes.c_void_p))
@@ -75,8 +78,12 @@ if mode == 'compute':
 else:
     path, pass_name, vs, ps = sys.argv[2:6]
     text = open(path, encoding='utf-8').read()
-    inc = re.search(r'HLSLINCLUDE(.*?)ENDHLSL', text, re.S).group(1)
-    pm = re.search(r'Name\s+"' + re.escape(pass_name) + r'".*?HLSLPROGRAM(.*?)ENDHLSL', text, re.S).group(1)
+    inc = re.search(r'HLSLINCLUDE(.*?)ENDHLSL', text, re.S)
+    inc = inc.group(1) if inc else ''
+    if pass_name.startswith('#'):
+        pm = re.findall(r'HLSLPROGRAM(.*?)ENDHLSL', text, re.S)[int(pass_name[1:])]
+    else:
+        pm = re.search(r'Name\s+"' + re.escape(pass_name) + r'".*?HLSLPROGRAM(.*?)ENDHLSL', text, re.S).group(1)
     pm = '\n'.join(l for l in pm.split('\n') if not l.strip().startswith('#pragma'))
     src = inline(inc + '\n' + pm, path, set())
     d = BASE + extra(sys.argv[6:])

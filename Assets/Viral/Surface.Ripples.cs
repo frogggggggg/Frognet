@@ -1,4 +1,6 @@
+using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.LowLevel;
 
 /// <summary>
 /// Impact ripples on a Surface (was CellImpactRipples).
@@ -57,6 +59,49 @@ public partial class Surface
     MaterialPropertyBlock _block;
     int _rippleCount;
     float _nextExpiry = float.PositiveInfinity;
+    bool _rippling; // in s_rippling
+
+    // Surfaces with live ripples. One static tick a frame (in the player loop's Update) drops their faded ripples and
+    // runs the collider LOD: an Update() on every Surface was ~1000 script calls a frame for a few bits of work.
+    static readonly List<Surface> s_rippling = new List<Surface>();
+
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+    static void InstallTick()
+    {
+        s_rippling.Clear();
+        PlayerLoopSystem loop = PlayerLoop.GetCurrentPlayerLoop();
+        for (int i = 0; i < loop.subSystemList.Length; i++)
+        {
+            if (loop.subSystemList[i].type != typeof(UnityEngine.PlayerLoop.Update)) continue;
+            var list = new List<PlayerLoopSystem>(loop.subSystemList[i].subSystemList);
+            list.RemoveAll(sys => sys.type == typeof(Surface)); // already there (no domain reload)
+            list.Add(new PlayerLoopSystem { type = typeof(Surface), updateDelegate = TickAll });
+            loop.subSystemList[i].subSystemList = list.ToArray();
+            PlayerLoop.SetPlayerLoop(loop);
+            return;
+        }
+    }
+
+    static void TickAll()
+    {
+        if (!Application.isPlaying) return;
+        StepColliderLod(); // Surface.Collider.cs
+        float now = Time.time;
+        for (int i = s_rippling.Count - 1; i >= 0; i--)
+        {
+            Surface s = s_rippling[i];
+            if (s && s._rippleCount > 0 && now < s._nextExpiry) continue;
+            if (s)
+            {
+                s.DropFaded(now);
+                s.PushRipples();
+                if (s._rippleCount > 0) continue;
+                s._rippling = false;
+            }
+            s_rippling[i] = s_rippling[s_rippling.Count - 1];
+            s_rippling.RemoveAt(s_rippling.Count - 1);
+        }
+    }
 
     void EnsureRipples()
     {
@@ -64,18 +109,6 @@ public partial class Surface
         _points ??= new Vector4[MaxRipples];
         _values ??= new Vector4[MaxRipples];
         _block ??= new MaterialPropertyBlock();
-    }
-
-    // Drop ripples as they fade, so the shader stops looping over them.
-    void Update()
-    {
-        StepColliderLod(); // Surface.Collider.cs; once a frame
-        if (_rippleCount > 0 && Time.time >= _nextExpiry)
-        {
-            EnsureRipples();
-            DropFaded(Time.time);
-            PushRipples();
-        }
     }
 
     /// <summary>
@@ -104,6 +137,7 @@ public partial class Surface
 
         _nextExpiry = EarliestEnd();
         PushRipples();
+        if (!_rippling) { _rippling = true; s_rippling.Add(this); } // TickAll drops them as they fade
 
         MeshRenderer r = Renderer;
         RippleField.Add(space, localPoint, r ? r.localBounds.center : Vector3.zero, now, strength,

@@ -183,7 +183,7 @@ public class LegPathShape : ScriptableObject
         {
             // each corner's own radius, clamped to half of either adjoining segment so cuts never overlap
             cutBuffer[i] = points[i].junction == JunctionType.Curve
-                ? Mathf.Min(points[i].roundingRadius, 0.5f * segLenBuffer[i - 1], 0.5f * segLenBuffer[i])
+                ? Mathf.Min(Mathf.Min(points[i].roundingRadius, 0.5f * segLenBuffer[i - 1]), 0.5f * segLenBuffer[i])
                 : 0f;
         }
 

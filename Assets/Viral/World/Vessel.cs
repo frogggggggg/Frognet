@@ -37,7 +37,8 @@ using UnityEngine.Rendering.Universal;
 /// raised by noise (ImmuneSystem.Alarm) that decays back to its type's rest level.
 ///
 /// Cost: <see cref="FlowAt"/> is O(1) (an atan2, a sqrt and one table lookup) per body per physics step; the drag
-/// loop is O(streamed live objects) per physics step; regions tick once a second; the wall is one draw of a
+/// loop is at most <see cref="dragPerStep"/> bodies per physics step (and sets their interpolation by distance,
+/// <see cref="interpolateWithin"/>); regions tick once a second; the wall is one draw of a
 /// shared grid mesh placed in the vertex stage (Custom/VesselWall).
 /// </summary>
 [DefaultExecutionOrder(-40)] // clock and globals before the streamer (-30), chunks (-20) and the ticker
@@ -80,6 +81,13 @@ public class Vessel : MonoBehaviour
     public float profileExponent = 1f;
     [Min(0f), Tooltip("How fast loose bodies take the blood's velocity (1/s).")]
     public float drag = 1.2f;
+    [Min(16), Tooltip("Loose bodies given the flow per physics step, round-robin (each gets the time since its last " +
+                      "turn). Their velocity carries them in between, so a slower cycle costs nothing visible.")]
+    public int dragPerStep = 256;
+    [Min(0f), Tooltip("Loose bodies within this of the camera (metres) are interpolated (smooth between physics steps); " +
+                      "past it a physics step moves them well under a pixel, so interpolating them was wasted work " +
+                      "(~0.5 ms a frame for ~1000 streamed bodies). Set on each body's drag turn, with 10% hysteresis.")]
+    public float interpolateWithin = 200f;
     [Tooltip("Turn the world frame with the blood round the player, so their surroundings are at rest in world space " +
              "wherever they are (off: the centreline blood is at rest, and near the wall everything moves at ~v0).")]
     public bool followPlayer = true;
@@ -112,7 +120,7 @@ public class Vessel : MonoBehaviour
                       "far field's reach (FarField.distance); 0.0045 hid everything past the loaded ~400 m.")]
     public float fogDensity = 0.0012f;
     [Tooltip("Fog in the middle of the tube. Alpha 0: take the skybox's horizon colour (so fogged things fade into the sky).")]
-    public Color deepColor = new Color(0.12f, 0.2f, 0.32f, 0f);
+    public Color deepColor = new Color(0.29f, 0.126f, 0.045f, 1f); // the warm orange alert used to bring, kept always
     [Tooltip("Fog near the wall (warm, lit through the vessel wall).")]
     public Color wallGlowColor = new Color(0.5f, 0.2f, 0.2f, 1f);
     [Min(1f), Tooltip("Distance from the wall where the glow starts (metres).")]
@@ -121,6 +129,13 @@ public class Vessel : MonoBehaviour
     public Color alertColor = new Color(0.65f, 0.28f, 0.1f, 1f);
     [Range(0f, 1f), Tooltip("Fog kept in focus mode (its orthographic camera sits far back).")]
     public float focusFog;
+    [Tooltip("Atmospheric perspective (StreamFade.hlsl MixAtmosphere, on cells, chunks, white cells, antibodies and the " +
+             "far field): from Start to End metres colour drains by Desaturate and sinks into the fog colour by Strength, " +
+             "on top of the fog. Off in focus mode.")]
+    [Min(0f)] public float perspectiveStart = 40f;
+    [Min(1f)] public float perspectiveEnd = 700f;
+    [Range(0f, 1f)] public float perspectiveDesaturate = 0.45f;
+    [Range(0f, 1f)] public float perspectiveStrength = 0.85f;
 
     [Header("Wall")]
     [Tooltip("The wall's look (Custom/VesselWall: colours, ink, haze, highlights), an asset you can edit live. " +
@@ -151,6 +166,10 @@ public class Vessel : MonoBehaviour
 
     /// <summary>The blood's velocity at a world point (zero without a vessel).</summary>
     public static Vector3 FlowAt(Vector3 p) => s_active ? s_active.Flow(p) : Vector3.zero;
+
+    /// <summary>Whether a loose body at p should be interpolated (near the camera; always without a vessel).</summary>
+    public static bool Interpolates(Vector3 p) =>
+        !s_active || (p - SimulationTicker.CameraPosition).sqrMagnitude < s_active.interpolateWithin * s_active.interpolateWithin;
 
     /// <summary>World time (seconds, saved): what drift and the wall's position are measured by.</summary>
     public static double Clock => s_active ? s_active._clock : 0.0;
@@ -356,22 +375,35 @@ public class Vessel : MonoBehaviour
 
     void FixedUpdate()
     {
-        float dt = Time.fixedDeltaTime, k = 1f - Mathf.Exp(-drag * dt);
+        float dt = Time.fixedDeltaTime;
         FollowPlayer(dt);
 
         // Loose dynamic bodies (cells...) take the blood's velocity. Organisms fly relative to it themselves.
+        // Budgeted round-robin: every live body every step was thousands of native Rigidbody calls per step, times
+        // the catch-up steps of a slow frame (100-260 ms frames). Each body gets the time since its last turn.
         IReadOnlyList<WorldEntity> live = WorldStreamer.Live;
-        for (int i = 0; i < live.Count; i++)
+        int n = live.Count, count = Mathf.Min(n, dragPerStep);
+        if (count == 0) return;
+        float span = dt * n / count, k = 1f - Mathf.Exp(-drag * span);
+        Vector3 cam = SimulationTicker.CameraPosition;
+        float smoothIn = interpolateWithin * interpolateWithin, smoothOut = smoothIn * 1.21f;
+        for (int i = 0; i < count; i++)
         {
-            WorldEntity e = live[i];
+            if (_dragCursor >= n) _dragCursor = 0;
+            WorldEntity e = live[_dragCursor++];
             if (!e || !e.Drifts) continue;
             Rigidbody b = e.Body;
             if (b.isKinematic) continue;
-            Vector3 u = Flow(b.position), v = b.linearVelocity;
+            Vector3 p = b.position;
+            float d2 = (p - cam).sqrMagnitude;
+            bool smooth = b.interpolation != RigidbodyInterpolation.None;
+            if (smooth ? d2 > smoothOut : d2 < smoothIn)
+                b.interpolation = smooth ? RigidbodyInterpolation.None : RigidbodyInterpolation.Interpolate;
+            Vector3 u = Flow(p), v = b.linearVelocity;
             // Near the calm centre the flow is tiny: let resting bodies sleep (writing a velocity wakes them).
             if (b.IsSleeping() && u.sqrMagnitude < 0.04f) continue;
-            // Plus what the body's own damping takes back this step, so damping doesn't hold it against the flow.
-            b.linearVelocity = v + (u - v) * k + u * (b.linearDamping * dt);
+            // Plus what the body's own damping takes back until its next turn, so damping doesn't hold it against the flow.
+            b.linearVelocity = v + (u - v) * k + u * (b.linearDamping * span);
         }
     }
 
@@ -415,6 +447,8 @@ public class Vessel : MonoBehaviour
             if (o && o.Rb && !o.Rb.isKinematic) Reframe(o.Rb, change);
         }
     }
+
+    int _dragCursor;
 
     // Sleeping bodies are left asleep: the drag loop wakes them if the blood where they are now moves.
     void Reframe(Rigidbody b, float change)
@@ -681,7 +715,12 @@ public class Vessel : MonoBehaviour
         RenderSettings.fogMode = FogMode.ExponentialSquared;
         RenderSettings.fogColor = c;
         RenderSettings.fogDensity = fogDensity * Mathf.Lerp(1f, focusFog, _focus);
+        float span = Mathf.Max(perspectiveEnd - perspectiveStart, 1f);
+        Shader.SetGlobalVector(AtmosphereId, new Vector4(perspectiveStart, 1f / span, perspectiveDesaturate,
+                                                         perspectiveStrength * (1f - _focus)));
     }
+
+    static readonly int AtmosphereId = Shader.PropertyToID("_Atmosphere");
 
     Color SkyHorizon()
     {
@@ -694,6 +733,7 @@ public class Vessel : MonoBehaviour
 
     void RestoreFog()
     {
+        Shader.SetGlobalVector(AtmosphereId, Vector4.zero);
         if (!_fogSaved) return;
         _fogSaved = false;
         RenderSettings.fog = _fog;

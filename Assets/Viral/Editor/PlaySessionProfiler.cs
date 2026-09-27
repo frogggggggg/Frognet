@@ -16,33 +16,25 @@ using Object = UnityEngine.Object;
 /// Hands-off performance capture, for when nobody is watching the Profiler window. Start it from
 /// Tools > Profile Play Session, or by creating Temp/ClaudeProfile.request (so a script or another
 /// tool can ask for one). It enters play mode, lets the scene settle, then:
-///   1. GPU cost by elimination: turns one thing off at a time (SSAO, shadows, cells, legs, sky,
-///      post, the custom render passes...) and measures how much GPU / CPU time drops, from
-///      PerfOverlay's frame timings. Each thing is put back before the next.
+///   1. Cost by elimination: PerfBenchmark's experiments (the same list a build runs on F9), each
+///      bracketed by its own baselines. GPU deltas in the editor are noise (+-7 ms): measure those in a build.
 ///   2. CPU: records the Profiler for a few rounds and totals every marker's self time and GC
 ///      allocations on the main and render threads, plus what the slowest frames spent it on.
 /// Then play mode ends and the report goes to Temp/ClaudeProfile.txt. Leaving play mode early
 /// stops it (everything is restored) and writes what it has.
+///
+/// Temp/ClaudeCapture.request (or Tools > Analyze Profiler Capture) instead reports on the frames the Profiler window
+/// holds now, e.g. from a connected development build: CPU markers as above plus GPU time per sample (GPU module on
+/// while recording), to Temp/ClaudeCapture.txt. Nothing is run.
 /// </summary>
 [InitializeOnLoad]
 static class PlaySessionProfiler
 {
     const string RequestPath = "Temp/ClaudeProfile.request", ReportPath = "Temp/ClaudeProfile.txt";
+    const string CaptureRequestPath = "Temp/ClaudeCapture.request", CaptureReportPath = "Temp/ClaudeCapture.txt";
     const string PhaseKey = "PlaySessionProfiler.phase";
     const double Warmup = 6.0, Settle = 1.0, Measure = 3.0;
     const int Rounds = 4, RoundFrames = 240;
-
-    class Experiment
-    {
-        public string name;
-        public Action off, on;
-    }
-
-    struct Result
-    {
-        public string name;
-        public double fps, main, render, gpu;
-    }
 
     class Marker
     {
@@ -52,9 +44,9 @@ static class PlaySessionProfiler
     }
 
     static IEnumerator s_job;
+    static bool s_quick;
     static bool s_refreshed;
-    static Action s_restore; // puts back whatever the running experiment turned off
-    static readonly List<Result> s_results = new List<Result>();
+    static readonly List<PerfBenchmark.Result> s_results = new List<PerfBenchmark.Result>();
     static readonly Dictionary<string, Marker> s_main = new Dictionary<string, Marker>(), s_render = new Dictionary<string, Marker>();
     static readonly List<(float ms, float player, float editor, List<KeyValuePair<string, double>> top)> s_frames =
         new List<(float, float, float, List<KeyValuePair<string, double>>)>();
@@ -83,6 +75,11 @@ static class PlaySessionProfiler
 
     static void Update()
     {
+        if (s_job == null && File.Exists(CaptureRequestPath))
+        {
+            File.Delete(CaptureRequestPath);
+            AnalyzeCapture();
+        }
         if (s_job == null && File.Exists(RequestPath) && !EditorApplication.isCompiling)
         {
             // Scripts edited outside Unity aren't imported until the editor gets focus: import them first, so the
@@ -93,6 +90,7 @@ static class PlaySessionProfiler
                 AssetDatabase.Refresh();
                 if (EditorApplication.isCompiling) return;
             }
+            s_quick = File.ReadAllText(RequestPath).Contains("quick"); // "quick": skip the elimination experiments
             File.Delete(RequestPath);
             Request();
         }
@@ -119,6 +117,7 @@ static class PlaySessionProfiler
     static void Begin()
     {
         SessionState.EraseString(PhaseKey);
+        s_gcStacks.Clear(); s_gcFrames = 0;
         s_results.Clear(); s_main.Clear(); s_render.Clear(); s_frames.Clear(); s_notes.Clear();
         s_renderThread = -2;
         s_ropes.Clear();
@@ -128,8 +127,9 @@ static class PlaySessionProfiler
 
     static void Stop(string why)
     {
-        s_restore?.Invoke();
-        s_restore = null;
+        UnityEngine.Profiling.Profiler.enableAllocationCallstacks = false;
+        PerfBenchmark.Restore?.Invoke();
+        PerfBenchmark.Restore = null;
         ProfilerDriver.enabled = false;
         s_job = null;
         s_notes.AppendLine("Stopped early: " + why);
@@ -143,6 +143,7 @@ static class PlaySessionProfiler
         Application.runInBackground = true; // keep playing while the editor isn't focused
         ProfilerDriver.enabled = false;
         for (double end = Now + Warmup; Now < end;) yield return null;
+        s_notes.AppendLine($"Counts, after warm-up (t {Time.time:0}s): {Counts()}");
 
         // 0. Does the sky cache look like the live sky?
         SkyboxCache cache = Object.FindAnyObjectByType<SkyboxCache>();
@@ -157,17 +158,13 @@ static class PlaySessionProfiler
         else s_notes.AppendLine("Sky cache: not running");
 
         // 1. GPU by elimination.
-        List<Experiment> experiments = Experiments();
-        foreach (Experiment x in experiments)
+        // Shared with the in-build benchmark (PerfBenchmark, F9): each experiment bracketed by its own baselines.
+        if (!s_quick)
         {
-            x.off?.Invoke();
-            s_restore = x.on;
-            for (double end = Now + Settle; Now < end;) yield return null;
-            PerfOverlay.ResetTotals();
-            for (double end = Now + Measure; Now < end;) yield return null;
-            s_results.Add(Sample(x.name));
-            x.on?.Invoke();
-            s_restore = null;
+            bool done = false;
+            if (PerfBenchmark.Start(s_results, () => done = true))
+                while (!done) yield return null;
+            else s_notes.AppendLine("Experiments: no PerfBenchmark in the scene (or it's busy); skipped.");
         }
 
         // 2. CPU markers, a few short rounds so the Profiler's frame buffer never drops any.
@@ -183,6 +180,7 @@ static class PlaySessionProfiler
             ProfilerDriver.enabled = false;
             foreach (VirusRope rope in Object.FindObjectsByType<VirusRope>(FindObjectsSortMode.None))
                 s_ropes.Add($"round {round + 1}, {rope.name}: {rope.DebugSummary()}");
+            s_notes.AppendLine($"Counts, round {round + 1} (t {Time.time:0}s): {Counts()}");
             yield return null;
 
             // The newest frame can still be incomplete.
@@ -190,241 +188,120 @@ static class PlaySessionProfiler
                 AnalyzeFrame(f);
         }
 
+        // 3. GPU time per pass: a round with the GPU module on (it costs CPU time, so kept out of the rounds above).
+        s_gpu.Clear(); s_gpuFrames.Clear();
+#pragma warning disable CS0618 // SetAreaEnabled: still the way to switch the GPU module on from script
+        bool gpuWas = ProfilerDriver.IsAreaEnabled(UnityEngine.Profiling.ProfilerArea.GPU);
+        ProfilerDriver.SetAreaEnabled(UnityEngine.Profiling.ProfilerArea.GPU, true);
+        ProfilerDriver.ClearAllFrames();
+        ProfilerDriver.enabled = true;
+        for (double timeout = Now + 15.0; Now < timeout && (ProfilerDriver.firstFrameIndex < 0 ||
+                 ProfilerDriver.lastFrameIndex - ProfilerDriver.firstFrameIndex < RoundFrames);)
+            yield return null;
+        ProfilerDriver.enabled = false;
+        yield return null;
+        for (int f = Mathf.Max(0, ProfilerDriver.firstFrameIndex); f < ProfilerDriver.lastFrameIndex - 3; f++)
+            AnalyzeGpu(f); // GPU timings arrive a few frames late: skip the newest
+        ProfilerDriver.SetAreaEnabled(UnityEngine.Profiling.ProfilerArea.GPU, gpuWas);
+#pragma warning restore CS0618
+
+        // 4. Where the garbage comes from: one more round with allocation call stacks (slower, so kept out of the
+        // timings above), every GC.Alloc on the main thread totalled by its script call stack.
+        ProfilerDriver.ClearAllFrames();
+        UnityEngine.Profiling.Profiler.enableAllocationCallstacks = true;
+        ProfilerDriver.enabled = true;
+        for (double timeout = Now + 10.0; Now < timeout && (ProfilerDriver.firstFrameIndex < 0 ||
+                 ProfilerDriver.lastFrameIndex - ProfilerDriver.firstFrameIndex < RoundFrames / 2);)
+            yield return null;
+        ProfilerDriver.enabled = false;
+        UnityEngine.Profiling.Profiler.enableAllocationCallstacks = false;
+        yield return null;
+        for (int f = Mathf.Max(0, ProfilerDriver.firstFrameIndex); f < ProfilerDriver.lastFrameIndex; f++)
+            AllocationStacks(f);
+
         WriteReport();
         Debug.Log($"PlaySessionProfiler: report written to {Path.GetFullPath(ReportPath)}");
         s_job = null; // finished: leaving play mode now isn't an early stop
         EditorApplication.isPlaying = false;
     }
 
-    static Result Sample(string name) => new Result
+    // What the physics and the per-object loops scale with, to spot things piling up over a run.
+    static string Counts()
     {
-        name = name,
-        fps = PerfOverlay.TotalSeconds > 0 ? PerfOverlay.TotalFrames / PerfOverlay.TotalSeconds : 0,
-        main = PerfOverlay.TotalTimedFrames > 0 ? PerfOverlay.TotalMain / PerfOverlay.TotalTimedFrames : 0,
-        render = PerfOverlay.TotalTimedFrames > 0 ? PerfOverlay.TotalRender / PerfOverlay.TotalTimedFrames : 0,
-        gpu = PerfOverlay.TotalGpuFrames > 0 ? PerfOverlay.TotalGpu / PerfOverlay.TotalGpuFrames : 0,
-    };
-
-    // ------------------------------------------------------------------ experiments
-
-    static List<Experiment> Experiments() => new List<Experiment>
-    {
-        // Baselines between groups: each result is compared with the latest one, so heat
-        // building up over the run (a laptop slows down) doesn't read as an effect.
-        new Experiment { name = Baseline + " (warm-up, GPU timing can lag)" },
-        new Experiment { name = Baseline },
-        Features("SSAO off", f => f.GetType().Name == "ScreenSpaceAmbientOcclusion"),
-        Features("x-ray / stencil RenderObjects passes off", f => f.GetType().Name == "RenderObjects"),
-        Features("TransparentDepthForPost off", f => f is TransparentDepthForPostFeature),
-        new Experiment { name = Baseline },
-        PostOff(),
-        ShadowsOff(),
-        Renderers("cells cast no shadows", r => UsesShader(r, "Custom/BloodCellTriplanar"), shadowsOnly: true),
-        new Experiment { name = Baseline },
-        Renderers("cells hidden", r => UsesShader(r, "Custom/BloodCellTriplanar")),
-        Behaviours<LegRenderer>("legs hidden"),
-        Renderers("ropes hidden", r => UsesShader(r, "Custom/RopeBlood")),
-        new Experiment { name = Baseline },
-        Renderers("crystals hidden", r => UsesShader(r, "Custom/AstrophageCrystalTop")),
-        LiveSky(),
-        SkyOff(),
-        new Experiment { name = Baseline },
-        VesselWallOff(),
-        Behaviours<AmbientParticles>("ambient specks off"),
-        Behaviours<HoloMap>("holo map off"),
-        new Experiment { name = Baseline },
-        Behaviours<WhiteBloodCells>("white blood cells off (sim + draw)"),
-        Behaviours<ResourceField>("resource chunks off (sim + draw)"),
-        Behaviours<ImmuneSystem>("immune system off (antibodies, motes)"),
-        new Experiment { name = Baseline },
-    };
-
-    // Wall hidden with the sky kept off too (the vessel gives the camera back its skybox when the wall goes, so
-    // the sky material itself is removed), so it measures the wall alone.
-    static Experiment VesselWallOff()
-    {
-        Experiment sky = SkyOff();
-        Vessel vessel = null;
-        return new Experiment
+        int bodies = 0, awake = 0, colliders = Object.FindObjectsByType<Collider>(FindObjectsSortMode.None).Length;
+        foreach (Rigidbody b in Object.FindObjectsByType<Rigidbody>(FindObjectsSortMode.None))
         {
-            name = "vessel wall hidden (sky still off)",
-            off = () =>
-            {
-                vessel = Vessel.Active;
-                if (vessel) vessel.drawWall = false;
-                sky.off();
-            },
-            on = () =>
-            {
-                sky.on();
-                if (vessel) vessel.drawWall = true;
-            },
-        };
-    }
-
-    const string Baseline = "baseline";
-
-    static IEnumerable<ScriptableRendererFeature> AllFeatures()
-    {
-        foreach (string guid in AssetDatabase.FindAssets("t:UniversalRendererData"))
-        {
-            var data = AssetDatabase.LoadAssetAtPath<UniversalRendererData>(AssetDatabase.GUIDToAssetPath(guid));
-            if (data)
-                foreach (ScriptableRendererFeature f in data.rendererFeatures)
-                    if (f) yield return f;
+            bodies++;
+            if (!b.isKinematic && !b.IsSleeping()) awake++;
         }
-    }
-
-    static Experiment Features(string name, Func<ScriptableRendererFeature, bool> match)
-    {
-        var changed = new List<ScriptableRendererFeature>();
-        return new Experiment
-        {
-            name = name,
-            off = () =>
-            {
-                changed.Clear();
-                foreach (ScriptableRendererFeature f in AllFeatures())
-                    if (f.isActive && match(f)) { f.SetActive(false); changed.Add(f); }
-            },
-            on = () => { foreach (ScriptableRendererFeature f in changed) if (f) f.SetActive(true); changed.Clear(); },
-        };
-    }
-
-    static bool UsesShader(Renderer r, string shader)
-    {
-        Material m = r.sharedMaterial;
-        return m && m.shader && m.shader.name == shader;
-    }
-
-    static Experiment Renderers(string name, Func<Renderer, bool> match, bool shadowsOnly = false)
-    {
-        var changed = new List<(Renderer r, ShadowCastingMode mode)>();
-        return new Experiment
-        {
-            name = name,
-            off = () =>
-            {
-                changed.Clear();
-                foreach (Renderer r in Object.FindObjectsByType<Renderer>(FindObjectsSortMode.None))
-                {
-                    if (!r.enabled || !match(r)) continue;
-                    changed.Add((r, r.shadowCastingMode));
-                    if (shadowsOnly) r.shadowCastingMode = ShadowCastingMode.Off;
-                    else r.enabled = false;
-                }
-            },
-            on = () =>
-            {
-                foreach ((Renderer r, ShadowCastingMode mode) in changed)
-                {
-                    if (!r) continue;
-                    if (shadowsOnly) r.shadowCastingMode = mode;
-                    else r.enabled = true;
-                }
-                changed.Clear();
-            },
-        };
-    }
-
-    static Experiment Behaviours<T>(string name) where T : Behaviour
-    {
-        var changed = new List<T>();
-        return new Experiment
-        {
-            name = name,
-            off = () =>
-            {
-                changed.Clear();
-                foreach (T b in Resources.FindObjectsOfTypeAll<T>()) // includes hidden (HideAndDontSave) ones
-                    if (b.enabled && !EditorUtility.IsPersistent(b)) { b.enabled = false; changed.Add(b); } // not prefab assets
-            },
-            on = () => { foreach (T b in changed) if (b) b.enabled = true; changed.Clear(); },
-        };
-    }
-
-    static Experiment ShadowsOff()
-    {
-        var changed = new List<(Light l, LightShadows s)>();
-        return new Experiment
-        {
-            name = "all real-time shadows off",
-            off = () =>
-            {
-                changed.Clear();
-                foreach (Light l in Object.FindObjectsByType<Light>(FindObjectsSortMode.None))
-                    if (l.enabled && l.shadows != LightShadows.None) { changed.Add((l, l.shadows)); l.shadows = LightShadows.None; }
-            },
-            on = () => { foreach ((Light l, LightShadows s) in changed) if (l) l.shadows = s; changed.Clear(); },
-        };
-    }
-
-    static Experiment PostOff()
-    {
-        var changed = new List<UniversalAdditionalCameraData>();
-        return new Experiment
-        {
-            name = "post-processing off",
-            off = () =>
-            {
-                changed.Clear();
-                foreach (Camera c in Camera.allCameras)
-                    if (c.TryGetComponent(out UniversalAdditionalCameraData d) && d.renderPostProcessing)
-                    { d.renderPostProcessing = false; changed.Add(d); }
-            },
-            on = () => { foreach (UniversalAdditionalCameraData d in changed) if (d) d.renderPostProcessing = true; changed.Clear(); },
-        };
-    }
-
-    static Experiment LiveSky()
-    {
-        var changed = new List<SkyboxCache>();
-        return new Experiment
-        {
-            name = "sky drawn live (cache off)",
-            off = () =>
-            {
-                changed.Clear();
-                foreach (SkyboxCache c in Object.FindObjectsByType<SkyboxCache>(FindObjectsSortMode.None))
-                    if (c.useCache) { c.useCache = false; changed.Add(c); }
-            },
-            on = () => { foreach (SkyboxCache c in changed) if (c) c.useCache = true; changed.Clear(); },
-        };
-    }
-
-    static Experiment SkyOff()
-    {
-        Material sky = null;
-        var changed = new List<Camera>();
-        var caches = new List<SkyboxCache>();
-        return new Experiment
-        {
-            name = "skybox off (solid colour)",
-            off = () =>
-            {
-                caches.Clear();
-                foreach (SkyboxCache c in Object.FindObjectsByType<SkyboxCache>(FindObjectsSortMode.None))
-                    if (c.enabled) { c.enabled = false; caches.Add(c); } // puts the live sky back, then it's removed
-                sky = RenderSettings.skybox;
-                RenderSettings.skybox = null;
-                changed.Clear();
-                foreach (Camera c in Camera.allCameras)
-                    if (c.clearFlags == CameraClearFlags.Skybox) { c.clearFlags = CameraClearFlags.SolidColor; changed.Add(c); }
-            },
-            on = () =>
-            {
-                RenderSettings.skybox = sky;
-                foreach (Camera c in changed) if (c) c.clearFlags = CameraClearFlags.Skybox;
-                changed.Clear();
-                foreach (SkyboxCache c in caches) if (c) c.enabled = true;
-                caches.Clear();
-            },
-        };
+        return $"{WorldStreamer.Live.Count} streamed live, {Organism.All.Count} organisms, {bodies} rigidbodies ({awake} awake), " +
+               $"{colliders} colliders, managed {GC.GetTotalMemory(false) / (1024 * 1024)} MB";
     }
 
     // ------------------------------------------------------------------ profiler frames
 
     static int s_renderThread = -2; // -2: not looked up yet, -1: none
+    static readonly Dictionary<string, Marker> s_gpu = new Dictionary<string, Marker>();
+    static readonly List<float> s_gpuFrames = new List<float>();
+
+    [MenuItem("Tools/Analyze Profiler Capture")]
+    static void AnalyzeCapture()
+    {
+        s_gcStacks.Clear(); s_gcFrames = 0;
+        s_results.Clear(); s_main.Clear(); s_render.Clear(); s_frames.Clear(); s_notes.Clear(); s_ropes.Clear();
+        s_gpu.Clear(); s_gpuFrames.Clear();
+        s_renderThread = -2;
+        int first = ProfilerDriver.firstFrameIndex, last = ProfilerDriver.lastFrameIndex;
+        if (first < 0 || last < first)
+        {
+            File.WriteAllText(CaptureReportPath, "No frames in the Profiler window.\n");
+            return;
+        }
+        first = Math.Max(first, last - 2000); // the latest ~2000
+        s_notes.AppendLine($"Profiler capture: frames {first}..{last}, connection '{ProfilerDriver.GetConnectionIdentifier(ProfilerDriver.connectedProfiler)}'.");
+        for (int f = first; f <= last; f++)
+        {
+            AnalyzeFrame(f);
+            AnalyzeGpu(f);
+        }
+        WriteReport(CaptureReportPath);
+        Debug.Log($"PlaySessionProfiler: capture report written to {CaptureReportPath}.");
+    }
+
+    // GPU time per sample: what the Profiler window's GPU module shows (ProfilerProperty with onlyShowGPUSamples; the
+    // GPU module on while recording). Column 9 = self GPU time (HierarchyFrameDataView.columnSelfGpuTime, internal).
+    const int SelfGpuColumn = 9;
+
+    static void AnalyzeGpu(int frame)
+    {
+        var prop = new ProfilerProperty();
+        try
+        {
+            prop.SetRoot(frame, SelfGpuColumn, 0);
+            prop.onlyShowGPUSamples = true;
+            if (!prop.frameDataReady) return;
+            float total = 0f;
+            var seen = new HashSet<string>();
+            var parents = new List<string> { "" };
+            while (prop.Next(true))
+            {
+                int depth = prop.depth;
+                string name = prop.propertyName;
+                while (parents.Count > depth) parents.RemoveAt(parents.Count - 1);
+                string parent = parents[parents.Count - 1];
+                parents.Add(name);
+                float self = prop.GetColumnAsSingle(SelfGpuColumn);
+                if (self <= 0f) continue;
+                total += self;
+                Marker m = Get(s_gpu, name, parent);
+                m.self += self;
+                if (seen.Add(name)) m.frames++;
+                m.maxSelf = Math.Max(m.maxSelf, self);
+            }
+            s_gpuFrames.Add(total);
+        }
+        finally { prop.Cleanup(); }
+    }
 
     static void AnalyzeFrame(int frame)
     {
@@ -453,6 +330,40 @@ static class PlaySessionProfiler
                    HierarchyFrameDataView.ViewModes.MergeSamplesWithTheSameName, HierarchyFrameDataView.columnSelfTime, false))
             if (view != null && view.valid)
                 Walk(view, s_render, null, out _, out _);
+    }
+
+    static readonly Dictionary<string, long> s_gcStacks = new Dictionary<string, long>();
+    static int s_gcFrames;
+    static readonly List<ulong> s_stack = new List<ulong>();
+
+    static void AllocationStacks(int frame)
+    {
+        using (RawFrameDataView raw = ProfilerDriver.GetRawFrameDataView(frame, 0))
+        {
+            if (raw == null || !raw.valid) return;
+            s_gcFrames++;
+            int gc = raw.GetMarkerId("GC.Alloc");
+            var key = new StringBuilder();
+            for (int i = 0; i < raw.sampleCount; i++)
+            {
+                if (raw.GetSampleMarkerId(i) != gc) continue;
+                long bytes = raw.GetSampleMetadataAsLong(i, 0);
+                raw.GetSampleCallstack(i, s_stack);
+                key.Clear();
+                int shown = 0;
+                foreach (ulong address in s_stack)
+                {
+                    string method = raw.ResolveMethodInfo(address).methodName;
+                    if (string.IsNullOrEmpty(method)) continue;
+                    if (shown++ > 0) key.Append(" <- ");
+                    key.Append(method);
+                    if (shown == 5) break;
+                }
+                string k = shown == 0 ? "(no script frames)" : key.ToString();
+                s_gcStacks.TryGetValue(k, out long total);
+                s_gcStacks[k] = total + bytes;
+            }
+        }
     }
 
     static readonly List<int> s_children = new List<int>();
@@ -501,7 +412,7 @@ static class PlaySessionProfiler
 
     // ------------------------------------------------------------------ report
 
-    static void WriteReport()
+    static void WriteReport(string path = ReportPath)
     {
         var sb = new StringBuilder();
         sb.AppendLine($"Play session profile, {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
@@ -514,14 +425,10 @@ static class PlaySessionProfiler
 
         if (s_results.Count > 0)
         {
-            sb.AppendLine().AppendLine("== Cost by elimination (each thing off on its own, vs the latest baseline; negative delta = it was costing that much) ==");
-            sb.AppendLine($"{"experiment",-44} {"fps",6} {"GPU ms",8} {"dGPU",7} {"main ms",8} {"dMain",7} {"render ms",9}");
-            Result b = s_results[0];
-            foreach (Result r in s_results)
-            {
-                if (r.name == Baseline) b = r;
-                sb.AppendLine($"{r.name,-44} {r.fps,6:0} {r.gpu,8:0.00} {r.gpu - b.gpu,7:+0.00;-0.00} {r.main,8:0.00} {r.main - b.main,7:+0.00;-0.00} {r.render,9:0.00}");
-            }
+            sb.AppendLine().AppendLine("== Cost by elimination (each thing off on its own, vs the mean of the baselines right before and after it; negative delta = it was costing that much) ==");
+            sb.AppendLine($"{"experiment",-44} {"fps",6} {"GPU ms",8} {"base",7} {"dGPU",7} {"main ms",8} {"base",7} {"dMain",7}");
+            foreach (PerfBenchmark.Result r in s_results)
+                sb.AppendLine($"{r.name,-44} {r.fps,6:0} {r.gpu,8:0.00} {r.baseGpu,7:0.00} {r.gpu - r.baseGpu,7:+0.00;-0.00} {r.main,8:0.00} {r.baseMain,7:0.00} {r.main - r.baseMain,7:+0.00;-0.00}");
         }
         foreach (string line in s_ropes) sb.AppendLine("Ropes: " + line);
 
@@ -536,7 +443,21 @@ static class PlaySessionProfiler
 
             AppendMarkers(sb, "Top main-thread self time (avg ms per frame)", s_main, n, 35);
             AppendGc(sb, s_main, n);
+            if (s_gcFrames > 0)
+            {
+                sb.AppendLine().AppendLine($"-- GC allocations by call stack ({s_gcFrames} frames with call stacks; bytes per frame) --");
+                foreach (var p in s_gcStacks.OrderByDescending(p => p.Value).Take(15))
+                    sb.AppendLine($"{p.Value / s_gcFrames,9}  {p.Key}");
+            }
             if (s_render.Count > 0) AppendMarkers(sb, "Top render-thread self time (avg ms per frame)", s_render, n, 20);
+            if (s_gpuFrames.Count > 0)
+            {
+                var gpu = s_gpuFrames.Where(g => g > 0f).OrderBy(g => g).ToList();
+                sb.AppendLine().AppendLine(gpu.Count > 0
+                    ? $"== GPU: frame median {gpu[gpu.Count / 2]:0.00} ms, p95 {gpu[(int)(0.95f * (gpu.Count - 1))]:0.00} ms ({gpu.Count} frames with GPU time) =="
+                    : "== GPU: no GPU frame times (GPU module off while recording?) ==");
+                if (s_gpu.Count > 0) AppendMarkers(sb, "Top GPU self time by sample (avg ms per frame)", s_gpu, s_gpuFrames.Count, 40);
+            }
 
             sb.AppendLine().AppendLine($"== Slowest frames (median is {Pct(0.5f):0.0} ms) ==");
             foreach (var f in s_frames.OrderByDescending(f => f.ms).Take(10))
@@ -546,7 +467,7 @@ static class PlaySessionProfiler
             }
         }
 
-        File.WriteAllText(ReportPath, sb.ToString());
+        File.WriteAllText(path, sb.ToString());
     }
 
     static void AppendMarkers(StringBuilder sb, string title, Dictionary<string, Marker> markers, int frames, int count)

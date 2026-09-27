@@ -2,8 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using Unity.Collections;
 using Unity.Profiling;
 using UnityEngine;
+using UnityEngine.Jobs;
 using Debug = UnityEngine.Debug;
 
 /// <summary>
@@ -174,11 +176,25 @@ public class WorldStreamer : MonoBehaviour
     public static Transform Root => s_instance ? s_instance._root : null;
     public static IReadOnlyList<WorldEntity> Live => s_live;
 
+    // The live list's transforms and far looks, index for index, for jobs (FarField reads every live pose in one).
+    // Made with the first live object, disposed with the last (every one untracks on its way out).
+    static TransformAccessArray s_liveTransforms;
+    static NativeList<int> s_liveLooks;
+    internal static TransformAccessArray LiveTransforms => s_liveTransforms;
+    internal static NativeList<int> LiveLooks => s_liveLooks;
+
     internal static void Track(WorldEntity e)
     {
         if (e.index >= 0 && e.index < s_live.Count && s_live[e.index] == e) return;
+        if (!s_liveTransforms.isCreated)
+        {
+            s_liveTransforms = new TransformAccessArray(256);
+            s_liveLooks = new NativeList<int>(256, Allocator.Persistent);
+        }
         e.index = s_live.Count;
         s_live.Add(e);
+        s_liveTransforms.Add(e.T);
+        s_liveLooks.Add(e.farLook);
     }
 
     internal static void Untrack(WorldEntity e)
@@ -186,11 +202,29 @@ public class WorldStreamer : MonoBehaviour
         int i = e.index;
         e.index = -1;
         if (i < 0 || i >= s_live.Count || s_live[i] != e) return;
+        RemoveLive(i);
+    }
+
+    /// <summary>Its far look changed (set after it was tracked, on spawn).</summary>
+    internal static void Relook(WorldEntity e)
+    {
+        if (e.index >= 0 && e.index < s_live.Count && s_live[e.index] == e && s_liveLooks.IsCreated) s_liveLooks[e.index] = e.farLook;
+    }
+
+    // Swap-back removal, mirrored in the native arrays.
+    static void RemoveLive(int i)
+    {
         int last = s_live.Count - 1;
         WorldEntity moved = s_live[last];
         s_live[i] = moved;
         if (moved) moved.index = i;
         s_live.RemoveAt(last);
+        if (!s_liveTransforms.isCreated) return;
+        s_liveTransforms.RemoveAtSwapBack(i);
+        s_liveLooks.RemoveAtSwapBack(i);
+        if (s_live.Count > 0) return;
+        s_liveTransforms.Dispose();
+        s_liveLooks.Dispose();
     }
 
     // A game scene (it has the player) with no streamer gets the one in Resources/ViralBuildAssets.
@@ -256,6 +290,12 @@ public class WorldStreamer : MonoBehaviour
     readonly Dictionary<long, float> _farDistance = new Dictionary<long, float>();
     float _nextFarScan;
     long _lastFarSector = long.MinValue;
+    // The far scan runs a couple of radial bands a frame (all ~10k cell tests at once was a 5-7 ms frame every second).
+    const int FarBandsPerFrame = 2;
+    int _farBand, _farBandEnd = -1; // bands still to scan: _farBand.._farBandEnd (none while _farBand > _farBandEnd)
+    Vector3 _farCentre;
+    Vessel.Tube _farTube;
+    readonly HashSet<long> _farSeen = new HashSet<long>();
     bool FarOn => _far && _far.On;
     Transform _root, _player;
     Vector3 _home;
@@ -336,11 +376,17 @@ public class WorldStreamer : MonoBehaviour
             _lastSector = sector;
             Scan(centre);
         }
-        if (FarOn && (Time.unscaledTime >= _nextFarScan || sector != _lastFarSector))
+        if (FarOn)
         {
-            _nextFarScan = Time.unscaledTime + _far.scanInterval;
-            _lastFarSector = sector;
-            using (FarScanMarker.Auto()) FarScan(centre);
+            bool scanning = _farBand <= _farBandEnd;
+            if (!scanning && (Time.unscaledTime >= _nextFarScan || sector != _lastFarSector))
+            {
+                _nextFarScan = Time.unscaledTime + _far.scanInterval;
+                _lastFarSector = sector;
+                BeginFarScan(centre);
+                scanning = true;
+            }
+            if (scanning) using (FarScanMarker.Auto()) StepFarScan();
         }
         using (SweepMarker.Auto()) Sweep();
         _clock.Restart();
@@ -383,6 +429,7 @@ public class WorldStreamer : MonoBehaviour
         _pathsDirty = true;
         _nextPaths = 0f;
         _nextFarScan = 0f; // the far field fills in over the next frames, nearest first
+        _farBandEnd = -1;  // a scan in progress was round the old position
     }
 
     // ---------------- sectors ----------------
@@ -459,7 +506,7 @@ public class WorldStreamer : MonoBehaviour
         {
             if (_cursor >= s_live.Count) _cursor = 0;
             WorldEntity e = s_live[_cursor];
-            if (!e) { s_live[_cursor] = s_live[s_live.Count - 1]; if (s_live[_cursor]) s_live[_cursor].index = _cursor; s_live.RemoveAt(s_live.Count - 1); continue; }
+            if (!e) { RemoveLive(_cursor); continue; }
             long key = KeyOf(e.T.position);
             if (_loaded.Contains(key) || e.Pinned) { _cursor++; continue; }
             SectorRecord into = Record(key);
@@ -496,9 +543,31 @@ public class WorldStreamer : MonoBehaviour
     // Sectors within the far field's distance that aren't loaded: generated ones are drawn (FarField), the rest are
     // queued for generation, nearest first. Pristine sectors (generated, never loaded or stored into) that left the
     // range are dropped: they come back from the seed, so memory is bounded by the far field, not by where you've been.
+    void BeginFarScan(Vector3 centre)
+    {
+        _farCentre = centre;
+        _farNear.Clear();
+        _farSeen.Clear();
+        _farBand = 0;
+        _farBandEnd = 0;
+        if (!_vessel) { Near(centre, _far.distance, _farNear); return; } // one pass: StepFarScan just finishes
+        _farTube = _vessel.ToTube(centre);
+        _farBand = Band(_farTube.r - _far.distance);
+        _farBandEnd = Band(_farTube.r + _far.distance);
+    }
+
+    void StepFarScan()
+    {
+        if (_vessel)
+            for (int n = 0; n < FarBandsPerFrame && _farBand <= _farBandEnd; n++)
+                NearBand(_farCentre, _far.distance, _farNear, _farSeen, _farTube, _farBand++);
+        else _farBand = _farBandEnd + 1;
+        if (_farBand > _farBandEnd) FarScan(_farCentre);
+    }
+
+    // With the cells in range gathered (_farNear): queue the new ones, drop the ones that left.
     void FarScan(Vector3 centre)
     {
-        Near(centre, _far.distance, _farNear);
         _farNow.Clear();
         foreach (long key in _farNear)
         {
@@ -655,7 +724,11 @@ public class WorldStreamer : MonoBehaviour
         if (!e) e = go.AddComponent<WorldEntity>();
         e.key = r.key;
         e.seed = r.seed;
+        e.farLook = t.farLook;
+        Relook(e);
         e.Bind();
+        // A new chunk's size is its scale (no state string: generating far sectors made one per chunk, garbage).
+        if (t.kind == Kind.Chunk && r.states == null && go.TryGetComponent(out ResourceChunk chunk)) chunk.Resize(r.scale.x);
         e.Apply(r);
         _pathsDirty = true;
     }
@@ -669,7 +742,7 @@ public class WorldStreamer : MonoBehaviour
         float density = Density(key);
         float volume = VolumeScale(key);
         Vector3 middle = CellCentre(key);
-        _placed.Clear();
+        ClearPlaced(middle);
         _anchors.Clear();
         Occupied(into, 0); // anything stored here before it was generated (swept in)
         // Big things straddle sector borders: keep clear of what the neighbours hold but haven't spawned (live
@@ -699,15 +772,13 @@ public class WorldStreamer : MonoBehaviour
 
                 Vector3 scale;
                 float radius, room, size = 1f;
-                List<string> states = null;
                 if (t.kind == Kind.Chunk)
                 {
                     ResourceChunk ch = t.chunk;
                     float lo = Mathf.Min(ch.sizeRange.x, ch.sizeRange.y), hi = Mathf.Max(ch.sizeRange.x, ch.sizeRange.y);
                     float r = ch.radius > 0f ? ch.radius : Mathf.Lerp(lo, hi, Mathf.Pow(rng.Value, ch.sizeSkew));
-                    scale = Vector3.one * r;
+                    scale = Vector3.one * r; // its radius: Spawn resizes it to this
                     radius = r;
-                    states = new List<string> { r.ToString("R", CultureInfo.InvariantCulture) };
                 }
                 else
                 {
@@ -718,7 +789,7 @@ public class WorldStreamer : MonoBehaviour
                 room = Room(t, scale);
 
                 if (!FindSpot(ref rng, layer, key, room, out Vector3 p)) continue;
-                _placed.Add(new Vector4(p.x, p.y, p.z, room));
+                AddPlaced(new Vector4(p.x, p.y, p.z, room));
                 if (layer.anchor) _anchors.Add(new Vector4(p.x, p.y, p.z, radius));
 
                 float cube = t.kind == Kind.Chunk ? 1f : (layer.sizing == Sizing.Multiplier ? size : size / Mathf.Max(1e-4f, MaxAbs(t.prefab.transform.localScale)));
@@ -730,7 +801,6 @@ public class WorldStreamer : MonoBehaviour
                     rotation = layer.randomRotation ? rng.Rotation() : t.prefab.transform.rotation,
                     scale = scale,
                     mass = layer.massWithSize && t.mass > 0f && t.kind == Kind.Generic ? t.mass * cube * cube * cube : 0f,
-                    states = states,
                     time = Now,
                     // The frame's angle too: left at 0, Advance turned it by the whole frame turn so far, and once the
                     // player had been out by the wall (where the frame turns fast) new sectors' contents landed far
@@ -751,8 +821,58 @@ public class WorldStreamer : MonoBehaviour
             EntityRecord r = records[i];
             if (r == null || r.key == null || !_catalog.TryGetValue(r.key, out Template t)) continue;
             Advance(r);
-            _placed.Add(new Vector4(r.position.x, r.position.y, r.position.z, Room(t, r.scale)));
+            AddPlaced(new Vector4(r.position.x, r.position.y, r.position.z, Room(t, r.scale)));
         }
+    }
+
+    // What's placed round the sector being generated, bucketed in a grid over the sector and its neighbours (points
+    // outside clamp to the edge cells, which keeps queries exact). A flat list here was hundreds of neighbour records
+    // x 24 tries x every new object: ~3 ms a sector, and the far field generates one or more every frame.
+    const int PlacedGrid = 16;
+    readonly int[] _placedHead = new int[PlacedGrid * PlacedGrid * PlacedGrid];
+    readonly List<int> _placedNext = new List<int>();
+    Vector3 _placedOrigin;
+    float _placedCell, _placedMaxRoom;
+
+    void ClearPlaced(Vector3 middle)
+    {
+        _placed.Clear();
+        _placedNext.Clear();
+        _placedMaxRoom = 0f;
+        _placedCell = sectorSize * 3f / PlacedGrid;
+        _placedOrigin = middle - Vector3.one * (sectorSize * 1.5f);
+        Array.Fill(_placedHead, -1);
+    }
+
+    int PlacedAxis(float v) => Mathf.Clamp(Mathf.FloorToInt(v / _placedCell), 0, PlacedGrid - 1);
+
+    void AddPlaced(Vector4 o)
+    {
+        Vector3 q = (Vector3)o - _placedOrigin;
+        int cell = (PlacedAxis(q.z) * PlacedGrid + PlacedAxis(q.y)) * PlacedGrid + PlacedAxis(q.x);
+        _placedNext.Add(_placedHead[cell]);
+        _placedHead[cell] = _placed.Count;
+        _placed.Add(o);
+        _placedMaxRoom = Mathf.Max(_placedMaxRoom, o.w);
+    }
+
+    bool PlacedFree(Vector3 p, float room, float spacing)
+    {
+        float reach = room + _placedMaxRoom + spacing;
+        Vector3 q = p - _placedOrigin;
+        int x0 = PlacedAxis(q.x - reach), x1 = PlacedAxis(q.x + reach);
+        int y0 = PlacedAxis(q.y - reach), y1 = PlacedAxis(q.y + reach);
+        int z0 = PlacedAxis(q.z - reach), z1 = PlacedAxis(q.z + reach);
+        for (int z = z0; z <= z1; z++)
+        for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++)
+            for (int i = _placedHead[(z * PlacedGrid + y) * PlacedGrid + x]; i >= 0; i = _placedNext[i])
+            {
+                Vector4 o = _placed[i];
+                float gap = room + o.w + spacing;
+                if (((Vector3)o - p).sqrMagnitude < gap * gap) return false;
+            }
+        return true;
     }
 
     // Centre inside the sector (so it belongs there), clear of what's placed here and in the neighbours' records,
@@ -771,13 +891,7 @@ public class WorldStreamer : MonoBehaviour
             else p = SamplePoint(ref rng, key);
             if (_vessel && _vessel.Density(p, Role.Other, room) <= 0f) continue; // in the tube, clear of its wall
 
-            bool free = true;
-            foreach (Vector4 o in _placed)
-            {
-                float gap = room + o.w + layer.spacing;
-                if (((Vector3)o - p).sqrMagnitude < gap * gap) { free = false; break; }
-            }
-            if (free && !Physics.CheckSphere(p, room + layer.spacing * 0.5f, blockingLayers, QueryTriggerInteraction.Ignore)) return true;
+            if (PlacedFree(p, room, layer.spacing) && !Physics.CheckSphere(p, room + layer.spacing * 0.5f, blockingLayers, QueryTriggerInteraction.Ignore)) return true;
         }
         p = default;
         return false;
@@ -885,8 +999,8 @@ public class WorldStreamer : MonoBehaviour
         Vector3 rootScale = root.transform.localScale;
         Matrix4x4 toRoot = Matrix4x4.Scale(rootScale) * root.transform.worldToLocalMatrix;
         float Reach(Matrix4x4 m, Vector3 centre, Vector3 extents) =>
-            m.MultiplyPoint3x4(centre).magnitude + Mathf.Max(m.MultiplyVector(new Vector3(extents.x, 0f, 0f)).magnitude,
-                                                             m.MultiplyVector(new Vector3(0f, extents.y, 0f)).magnitude,
+            m.MultiplyPoint3x4(centre).magnitude + Mathf.Max(Mathf.Max(m.MultiplyVector(new Vector3(extents.x, 0f, 0f)).magnitude,
+                                                                       m.MultiplyVector(new Vector3(0f, extents.y, 0f)).magnitude),
                                                              m.MultiplyVector(new Vector3(0f, 0f, extents.z)).magnitude);
         foreach (MeshFilter f in root.GetComponentsInChildren<MeshFilter>(true))
             if (f.sharedMesh) radius = Mathf.Max(radius, Reach(toRoot * f.transform.localToWorldMatrix, f.sharedMesh.bounds.center, f.sharedMesh.bounds.extents));
@@ -904,7 +1018,7 @@ public class WorldStreamer : MonoBehaviour
         return radius > 0f ? radius : 1f;
     }
 
-    static float MaxAbs(Vector3 v) => Mathf.Max(Mathf.Abs(v.x), Mathf.Abs(v.y), Mathf.Abs(v.z));
+    static float MaxAbs(Vector3 v) => Mathf.Max(Mathf.Max(Mathf.Abs(v.x), Mathf.Abs(v.y)), Mathf.Abs(v.z));
 
     // ---------------- saving ----------------
 
@@ -1146,30 +1260,31 @@ public class WorldStreamer : MonoBehaviour
         }
 
         Vessel.Tube t = _vessel.ToTube(p);
-        double now = Now;
-        int b0 = Band(t.r - dist), b1 = Band(t.r + dist);
-        float along = dist / Mathf.Max(_vessel.LoopRadius - _vessel.MaxRadius, 1f); // loop angle dist spans (inner side)
         _nearSeen.Clear();
-        for (int b = b0; b <= b1; b++)
+        for (int b = Band(t.r - dist), b1 = Band(t.r + dist); b <= b1; b++) NearBand(p, dist, into, _nearSeen, t, b);
+    }
+
+    // Near's cells in one radial band (seen: keys already tested this query).
+    void NearBand(Vector3 p, float dist, List<long> into, HashSet<long> seen, in Vessel.Tube t, int b)
+    {
+        float along = dist / Mathf.Max(_vessel.LoopRadius - _vessel.MaxRadius, 1f); // loop angle dist spans (inner side)
+        double frame = t.phi - BandAngle(b, Now, FrameNow);
+        long k0 = (long)Math.Floor((frame - along) / _dPhi), k1 = (long)Math.Floor((frame + along) / _dPhi);
+        if (k1 - k0 + 1 >= _nS) { k0 = 0; k1 = _nS - 1; }
+        int n = _nT[b];
+        float dTh = Tau / n, span = dist / Mathf.Max(Mathf.Min(b * sectorSize, t.r), 1f);
+        long j0 = 0, j1 = n - 1;
+        if (span < Mathf.PI)
         {
-            double frame = t.phi - BandAngle(b, now, FrameNow);
-            long k0 = (long)Math.Floor((frame - along) / _dPhi), k1 = (long)Math.Floor((frame + along) / _dPhi);
-            if (k1 - k0 + 1 >= _nS) { k0 = 0; k1 = _nS - 1; }
-            int n = _nT[b];
-            float dTh = Tau / n, span = dist / Mathf.Max(Mathf.Min(b * sectorSize, t.r), 1f);
-            long j0 = 0, j1 = n - 1;
-            if (span < Mathf.PI)
-            {
-                j0 = (long)Math.Floor((t.theta - span) / dTh);
-                j1 = (long)Math.Floor((t.theta + span) / dTh);
-                if (j1 - j0 + 1 >= n) { j0 = 0; j1 = n - 1; }
-            }
-            for (long k = k0; k <= k1; k++)
-            for (long j = j0; j <= j1; j++)
-            {
-                long key = Pack(new Vector3Int(b, (int)Wrap(k, _nS), (int)Wrap(j, n)));
-                if (_nearSeen.Add(key) && Distance(key, p, t) <= dist) into.Add(key);
-            }
+            j0 = (long)Math.Floor((t.theta - span) / dTh);
+            j1 = (long)Math.Floor((t.theta + span) / dTh);
+            if (j1 - j0 + 1 >= n) { j0 = 0; j1 = n - 1; }
+        }
+        for (long k = k0; k <= k1; k++)
+        for (long j = j0; j <= j1; j++)
+        {
+            long key = Pack(new Vector3Int(b, (int)Wrap(k, _nS), (int)Wrap(j, n)));
+            if (seen.Add(key) && Distance(key, p, t) <= dist) into.Add(key);
         }
     }
 

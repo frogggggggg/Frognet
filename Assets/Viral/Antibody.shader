@@ -198,7 +198,7 @@ Shader "Custom/Antibody"
                 float3 col = albedo * (SampleSH(n) * ao + l.color * (wrap * atten + back));
                 col += l.color * spec * atten;
                 col += _Rim.rgb * fres * (0.4 + 0.6 * ao);                   // glassy edges
-                col = MixFog(col, i.fog);
+                col = MixFog(MixAtmosphere(col, i.positionWS), i.fog);
                 return half4(col, 1);
             }
             ENDHLSL
