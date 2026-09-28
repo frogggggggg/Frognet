@@ -21,6 +21,9 @@ cameras, UI.
   used stays within maxAngle of `TargetRotation` (`Wanted`).
 - `keepUpright`, `Face(dir)`, `Rotate(t)`, `SetExternalRotation(bool)` (rope torque), `BodyOffset` (visual lift along
   `up`), `Shown` (the turned, leaned, lifted visual), `Fluid` (blood flow velocity, set each FixedTick; see World).
+- Awake forces `ContinuousSpeculative` collision: a dash (30 m/s = 0.6 m a step) went through thin parts of cells.
+  Don't use Continuous / ContinuousDynamic (they only sweep against static / CCD bodies; cells are dynamic; kinematic
+  bodies warn). Cost: broadphase bounds grow by velocity x dt, contacts generated a little early; no extra sweeps.
 - **Rotation gotcha:** if `body` is empty *or* the Rigidbody's own object, rotation goes through
   `Rigidbody.MoveRotation` in the physics tick (`RotatesRoot`). Writing the transform of an interpolated Rigidbody every
   frame fights interpolation (rotation sticks / jitters with frame timing). Real bug; don't undo it.

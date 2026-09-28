@@ -74,6 +74,9 @@ Gridless potential-flow field (sink + doublets), trap-free. `GetField/GetDirecti
   `OverlapSphereNonAlloc` per cluster (a creature within a third of the radius of an earlier centre shares it); any
   creature more than two thirds from every centre triggers a new gather (checked per physics step while queried). A
   whole-scene `FindObjectsByType<Collider>` was 12-17 ms per streamer change with ~1k streamed cells.
+- A scan allocates nothing in steady state: per-sphere arrays grow only, each collider's owner (Organism / Surface) is
+  cached while its parent is unchanged (`owners`, cleared past 16k entries). The two `GetComponentInParent` per
+  collider per scan were most of a ~7 ms `Simulation.Brains` spike with ~4k colliders; the 250 m overlap is ~2 ms.
 
 ## Open items
 - With legs off the colliders, landing could use SurfaceMap too, letting cells go back to one hull.

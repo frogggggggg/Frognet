@@ -719,9 +719,9 @@ public class WorldStreamer : MonoBehaviour
 
         go.name = t.prefab.name;
         go.transform.localScale = r.scale;
+        // TryGetComponent: a GetComponent that finds nothing allocates an error object in the editor.
         if (t.kind == Kind.WhiteCell) WhiteBloodCells.Prepare(go.GetComponent<WhiteBloodCell>());
-        WorldEntity e = go.GetComponent<WorldEntity>();
-        if (!e) e = go.AddComponent<WorldEntity>();
+        if (!go.TryGetComponent(out WorldEntity e)) e = go.AddComponent<WorldEntity>();
         e.key = r.key;
         e.seed = r.seed;
         e.farLook = t.farLook;

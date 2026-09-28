@@ -52,9 +52,9 @@ public sealed class WorldEntity : MonoBehaviour
     internal void Bind()
     {
         _t = transform;
-        _body = GetComponent<Rigidbody>();
+        TryGetComponent(out _body); // Try*: a failed GetComponent allocates an error object in the editor
         _states = GetComponents<IWorldState>();
-        Drifts = _body && !GetComponent<Organism>();
+        Drifts = _body && !TryGetComponent(out Organism _);
         // Drifting cells move by physics steps; off the calm middle they move relative to the camera, and
         // uninterpolated they stepped at the physics rate against the frame rate (judder). Nothing writes their
         // transform directly, so interpolation is safe. Only near the camera, though: the Vessel's drag loop turns it

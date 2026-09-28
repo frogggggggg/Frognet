@@ -114,21 +114,18 @@ public class ResourceChunk : MonoBehaviour, IWorldState
         T.GetPositionAndRotation(out Pos, out Rot);
 
         // The walkable hull (shared by every chunk of this shape), never drawn: ResourceField draws them.
-        var filter = GetComponent<MeshFilter>();
-        if (!filter) filter = gameObject.AddComponent<MeshFilter>();
+        // Try*: a GetComponent that finds nothing allocates an error object in the editor (every streamed chunk).
+        if (!TryGetComponent(out MeshFilter filter)) filter = gameObject.AddComponent<MeshFilter>();
         Mesh walk = ChunkMesh.Walk(shape);
         filter.sharedMesh = walk;
-        var r = GetComponent<MeshRenderer>();
-        if (!r) r = gameObject.AddComponent<MeshRenderer>();
+        if (!TryGetComponent(out MeshRenderer r)) r = gameObject.AddComponent<MeshRenderer>();
         r.forceRenderingOff = true;
         r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
         r.sharedMaterial = ResourceField.SharedChunkMaterial(); // its _Ripple* values shape this chunk's ripples
 
         // Collide with exactly what's walked, so touchdown, feet and sight lines all meet the same surface.
-        var old = GetComponent<SphereCollider>(); // prefabs from before
-        if (old) Destroy(old);
-        var col = GetComponent<MeshCollider>();
-        if (!col) col = gameObject.AddComponent<MeshCollider>();
+        if (TryGetComponent(out SphereCollider old)) Destroy(old); // prefabs from before
+        if (!TryGetComponent(out MeshCollider col)) col = gameObject.AddComponent<MeshCollider>();
         col.convex = false;
         col.sharedMesh = walk;
 
@@ -141,7 +138,7 @@ public class ResourceChunk : MonoBehaviour, IWorldState
         _body.interpolation = RigidbodyInterpolation.None; // moved by transform in Update, before anyone rides it
         Init();
 
-        if (!GetComponent<Selectable>())
+        if (!TryGetComponent(out Selectable _))
             Selectable.Add(gameObject, Selectable.Category.Target, Title(substance.name),
                            CommandBoard.Jobs.Extract | CommandBoard.Jobs.MoveTo);
     }

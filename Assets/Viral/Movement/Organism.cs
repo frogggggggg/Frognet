@@ -184,6 +184,9 @@ public class Organism : MonoBehaviour, ISurfaceContact
         Rb.constraints = RigidbodyConstraints.FreezeRotation;
         Rb.useGravity = airGravity;
         Rb.interpolation = RigidbodyInterpolation.Interpolate;
+        // Burst moves ~0.6 m a step, past a thin part of a cell. Continuous / ContinuousDynamic only sweep against
+        // static (or other CCD) bodies and cells are dynamic; speculative covers everything and allows kinematic.
+        Rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
         TargetRotation = RotTarget.rotation;
 
         Add(flying);

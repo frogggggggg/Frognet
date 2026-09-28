@@ -80,6 +80,9 @@ Unity is usually open on this project, so a second Editor instance can't be laun
   (e.g. a connected dev build). **GPU costs: measure in a build** (F9 = `PerfBenchmark`, writes `benchmark.txt` next to
   the player log in `%LOCALAPPDATA%Low/DefaultCompany/Mouse Simulator`); editor GPU deltas and D3D11 per-sample GPU
   times are noise. Unity imports edited scripts only on focus.
+  `Temp/ClaudeMemory.request` (content `play`: edit mode, then 40 s into play) -> `Temp/ClaudeMemory.txt`: live managed
+  heap + bytes held per Assembly-CSharp field. The editor itself holds ~700 MB, so the overlay's "managed" is mostly editor.
+  `Temp/ClaudeQuality.request` (a tier name) switches the editor's quality tier. Both in `Editor/EditorRequests.cs`.
 - Nothing here has been run in play mode by Claude. Say so when reporting.
 - **Sounds:** synthesized clips can be rendered to WAV outside Unity: compile the scripts as above
   into a dll, then a tiny console program (Unity's `NetCoreRuntime/dotnet.exe`, a `runtimeconfig.json`

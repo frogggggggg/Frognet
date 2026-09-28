@@ -89,9 +89,10 @@ public class PathManager : MonoBehaviour
         foreach (var c in Gather())
         {
             if (!c.enabled || c.isTrigger || (obstacleLayers.value & (1 << c.gameObject.layer)) == 0) continue;
-            Organism o = c.GetComponentInParent<Organism>();
-            if (o && ignoreOrganisms) continue;
-            Component owner = o ? (oneSpherePerCreature ? o : null) : c.GetComponentInParent<Surface>();
+            Component owner = Owner(c);
+            bool creature = owner is Organism;
+            if (creature && ignoreOrganisms) continue;
+            if (creature && !oneSpherePerCreature) owner = null;
             if (owner)
             {
                 if (!merged.TryGetValue(owner, out var list)) merged.Add(owner, list = listPool.Count > 0 ? listPool.Pop() : new List<Collider>());
@@ -103,16 +104,26 @@ public class PathManager : MonoBehaviour
             if (kv.Value.Count == 1 && !(kv.Key is Organism)) AddCollider(kv.Value[0]);
             else AddMerged(kv.Key.transform, kv.Value);
 
-        n = lt.Count; tr = lt.ToArray(); rb = lb.ToArray(); loc = ll.ToArray(); rad = lr.ToArray(); grp = lg.ToArray();
-        off = new Vector3[n]; wr = new float[n]; moving = new bool[n];
+        int was = n;
+        n = lt.Count;
+        if (tr == null || tr.Length < n)
+        {
+            int cap = Mathf.Max(64, Mathf.NextPowerOfTwo(n + n / 4));
+            tr = new Transform[cap]; rb = new Rigidbody[cap]; loc = new Vector3[cap]; rad = new float[cap]; grp = new int[cap];
+            off = new Vector3[cap]; wr = new float[cap]; moving = new bool[cap];
+            p = new Vector3[cap]; u = new Vector3[cap]; e = new float[cap]; key = new long[cap]; order = new int[cap];
+        }
+        else if (was > n) { Array.Clear(tr, n, was - n); Array.Clear(rb, n, was - n); } // don't hold on to what left
+        lt.CopyTo(tr); lb.CopyTo(rb); ll.CopyTo(loc); lr.CopyTo(rad); lg.CopyTo(grp);
         for (int i = 0; i < n; i++)
         {
             wr[i] = rad[i] * MaxScale(tr[i]);
             moving[i] = rb[i] != null;
             if (moving[i]) off[i] = Quaternion.Inverse(rb[i].rotation) * (tr[i].TransformPoint(loc[i]) - rb[i].position);
         }
-        p = new Vector3[n]; u = new Vector3[n]; e = new float[n]; key = new long[n]; order = new int[n];
-        int size = 16; while (size < 2 * n) size <<= 1; mask = size - 1; start = new int[size + 1]; fill = new int[size];
+        int size = 16; while (size < 2 * n) size <<= 1;
+        if (fill == null || fill.Length < size) { start = new int[size + 1]; fill = new int[size]; }
+        mask = fill.Length - 1; // a bigger table than needed is fine (fewer collisions)
         Refresh(true);
     }
 
@@ -121,6 +132,19 @@ public class PathManager : MonoBehaviour
     readonly HashSet<Collider> gathered = new();
     readonly List<Vector3> scanCentres = new();
     Collider[] overlap = new Collider[4096];
+    // Each collider's owner (its Organism, else its Surface, else null), looked up once while its parent stays the
+    // same: two GetComponentInParent per collider per scan were most of a scan's cost with ~4k streamed colliders.
+    readonly Dictionary<Collider, (Component owner, Transform parent)> owners = new();
+
+    Component Owner(Collider c)
+    {
+        Transform parent = c.transform.parent;
+        if (owners.TryGetValue(c, out var o) && o.parent == parent) return o.owner;
+        Component owner = c.GetComponentInParent<Organism>();
+        if (!owner) owner = c.GetComponentInParent<Surface>();
+        owners[c] = (owner, parent);
+        return owner;
+    }
 
     // Colliders within scanRadius of any creature: one overlap per cluster of creatures (a creature near an earlier
     // centre shares it). A whole-scene FindObjectsByType was 12-17 ms per streamer change with ~1k streamed cells.
@@ -128,6 +152,7 @@ public class PathManager : MonoBehaviour
     {
         gathered.Clear();
         scanCentres.Clear();
+        if (owners.Count > 16384) owners.Clear(); // streamed-out colliders' entries: dropped wholesale now and then
         float share = scanRadius / 3f;
         foreach (Organism o in Organism.All)
         {
@@ -199,12 +224,11 @@ public class PathManager : MonoBehaviour
         Transform t = body ? body.transform : owner;
 
         Vector3 centre = Vector3.zero;
-        var spheres = new (Vector3 c, float r)[colliders.Count];
-        for (int i = 0; i < colliders.Count; i++) { spheres[i] = BoundingSphere(colliders[i]); centre += spheres[i].c; }
+        foreach (Collider c in colliders) centre += BoundingSphere(c).c;
         centre /= colliders.Count;
 
-        float radius = 0f;
-        foreach (var sp in spheres) radius = Mathf.Max(radius, Vector3.Distance(centre, sp.c) + sp.r);
+        float radius = 0f; // second pass recomputes the spheres rather than allocating an array for them
+        foreach (Collider c in colliders) { var sp = BoundingSphere(c); radius = Mathf.Max(radius, Vector3.Distance(centre, sp.c) + sp.r); }
 
         lt.Add(t); lb.Add(body); ll.Add(t.InverseTransformPoint(centre)); lr.Add(radius / Mathf.Max(MaxScale(t), 1e-6f));
         lg.Add(body ? body.GetInstanceID() : t.GetInstanceID());
