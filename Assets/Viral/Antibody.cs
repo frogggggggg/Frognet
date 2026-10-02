@@ -290,6 +290,53 @@ public class Antibody : MonoBehaviour
         _agitation = 2f;
     }
 
+    // ---------------- saving (ImmuneSystem.Capture / Restore) ----------------
+
+    [System.Serializable]
+    public class Saved
+    {
+        public Vector3 position, velocity;
+        public Quaternion rotation = Quaternion.identity;
+        public State state;
+        public string prey; // SaveRef of what it chases / holds
+        public float seed, agitation, grip, wrap, health, healthMax;
+    }
+
+    public Saved Capture() => new Saved
+    {
+        position = transform.position, rotation = transform.rotation, velocity = _velocity, state = Current,
+        prey = Current == State.Chase || Current == State.Stuck ? SaveRef.Of(Prey) : "",
+        seed = _seed, agitation = _agitation, grip = _grip, wrap = _wrap, health = _health, healthMax = _healthMax,
+    };
+
+    /// <summary>Back as saved (call once the creatures are back: its prey is looked up). A stuck one takes the slot
+    /// nearest where it sat, already settled, with the grip it had left.</summary>
+    public void Restore(Saved s, ImmuneSystem system)
+    {
+        transform.SetPositionAndRotation(s.position, s.rotation);
+        _velocity = s.velocity;
+        _seed = s.seed;
+        _agitation = s.agitation;
+        _grip = s.grip;
+        _wrap = s.wrap;
+        Current = s.state == State.Patrol ? State.Patrol : State.Drift;
+        Organism prey = SaveRef.Resolve<Organism>(s.prey);
+        if (!prey || !prey.isActiveAndEnabled || (s.state != State.Chase && s.state != State.Stuck)) return;
+        Prey = prey;
+        if (s.state == State.Chase)
+        {
+            Current = State.Chase;
+            _preyLast = prey.transform.position;
+            _preyVelocity = Vector3.zero;
+            return;
+        }
+        Stick(system);
+        if (Current != State.Stuck) return;
+        _settle = 1f;
+        _healthMax = Mathf.Max(s.healthMax, 0.01f);
+        _health = Mathf.Clamp(s.health, 0f, _healthMax);
+    }
+
     void Ignore(Organism o, float until)
     {
         _ignored = o;

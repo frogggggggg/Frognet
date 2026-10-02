@@ -1,0 +1,117 @@
+// Places, culls and lists every platelet (Platelets.cs), one thread each, from its index alone (a seed) and the
+// vessel clock: nothing per platelet is stored between frames. Each sits in a window round the camera in tube
+// coordinates (loop angle phi x angle round the tube theta, both whole fractions of a turn, so the copies meet), at a
+// fixed depth in from the wall, carried round the loop at a rate quantized to whole windows per period (exact, no
+// float creep). Visible ones are appended to the near or far list; _Args[g * 5 + 1] counts them.
+#pragma kernel Place
+
+struct Posed { float4 position, rotation, extra; }; // xyz + body radius; quaternion; x seed, y fade
+
+RWStructuredBuffer<Posed> _Posed;
+RWStructuredBuffer<uint> _Visible; // near list at 0, far list at _Count
+RWStructuredBuffer<uint> _Args;    // 2 x IndirectDrawIndexedArgs
+Texture2D<float4> _RadiusTex; SamplerState sampler_RadiusTex; // Vessel's: r = tube radius at S / L
+
+uint _Count;
+float4 _Planes[6];
+float4 _CameraPos; // xyz, w pixels per (metre at 1 m)
+float4 _VesselC;   // xyz loop centre, w loop radius R
+float4 _VesselE1;  // xyz, w circumference L
+float4 _VesselE2;  // xyz, w wall offset S0
+float4 _VesselA;   // xyz loop axis, w nominal tube radius
+float4 _Window;    // x phi window, y theta window (radians), z period (s)
+float4 _Phase;     // x (clock mod period) / period, y (-frame angle - camera phi) / phi window, z camera theta / theta window, w time
+float4 _CamTube;   // x camera phi, y camera theta
+float4 _Flow;      // x centre speed / R, y profile exponent
+float4 _Band;      // x, y depth from the wall (m), z bias, w weave (m)
+float4 _Shape;     // x, y body radius; z, w own speed (m/s)
+float4 _Tumble;    // x, y tumble rate (rad/s), z reach, w solid radius (body radii)
+float4 _Range;     // x draw distance, y least pixels, z LOD pixels, w edge fade (m)
+float4 _Thin;      // x start (m), y 1 / (distance - start), z share kept at distance, w dissolve band (FarField's)
+
+uint Pcg(uint v)
+{
+    uint s = v * 747796405u + 2891336453u;
+    uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+
+float Rnd(inout uint s)
+{
+    s = Pcg(s);
+    return s * (1.0 / 4294967296.0);
+}
+
+void Place1(uint i)
+{
+    uint s = Pcg(i * 9781u + 0x9e3779b9u);
+    float u = Rnd(s), v = Rnd(s), dk = Rnd(s), sz = Rnd(s), sp = Rnd(s), seed = Rnd(s);
+    float w1 = Rnd(s), w2 = Rnd(s), tr = Rnd(s), thin = Rnd(s);
+    float3 axis = float3(Rnd(s), Rnd(s), Rnd(s)) * 2.0 - 1.0;
+
+    float depth = lerp(_Band.x, _Band.y, pow(dk, _Band.z));
+    float speed = lerp(_Shape.z, _Shape.w, sp);
+    float R = _VesselC.w, L = _VesselE1.w;
+
+    // Carried round the loop: the blood's turn rate at this depth (Vessel.Flow, nominal radius) plus its own speed,
+    // quantized to whole windows per period. The frame's turn and the camera's angle are folded into _Phase.y.
+    float x = saturate((_VesselA.w - depth) / _VesselA.w);
+    float omega = -_Flow.x * pow(x, _Flow.y) + speed / R;
+    float n = round(omega * _Window.z / _Window.x);
+    float relPhi = frac(u + frac(n * _Phase.x) + _Phase.y + 0.5) - 0.5;
+    float relTheta = frac(v - _Phase.z + 0.5) - 0.5;
+
+    // A lazy weave across the lane.
+    float t = _Phase.w;
+    float lane = max(_VesselA.w - depth, 1.0);
+    float phi = _CamTube.x + relPhi * _Window.x;
+    float theta = _CamTube.y + relTheta * _Window.y + sin(t * (0.2 + 0.3 * w1) + seed * 40.0) * _Band.w / lane;
+    float S = phi * R + _VesselE2.w;
+    float a = _RadiusTex.SampleLevel(sampler_RadiusTex, float2(S / L, 0.5), 0).r;
+    float r = a - depth + sin(t * (0.25 + 0.3 * w2) + seed * 23.0) * _Band.w;
+
+    float sp_, cp, st, ct;
+    sincos(phi, sp_, cp);
+    sincos(theta, st, ct);
+    float3 radial = _VesselE1.xyz * cp + _VesselE2.xyz * sp_;
+    float3 p = _VesselC.xyz + radial * (R + r * ct) + _VesselA.xyz * (r * st);
+
+    // Fades: exactly FarField.compute's (edge of reach, least pixels, distance thinning), so platelets go the way
+    // every other far object does; times the window's edges (past the reach anyway; hides the wrap).
+    float d = distance(p, _CameraPos.xyz);
+    float fade = (1.0 - smoothstep(0.4, 0.5, max(abs(relPhi), abs(relTheta)))) * saturate((_Range.x - d) / max(_Range.w, 1.0));
+    float keep = lerp(1.0, _Thin.z, smoothstep(0.0, 1.0, saturate((d - _Thin.x) * _Thin.y)));
+    fade *= saturate((keep + _Thin.w - thin) / max(_Thin.w, 1e-3));
+    if (fade <= 0.0) return;
+
+    float size = lerp(_Shape.x, _Shape.y, sz * sz);
+    float reach = size * _Tumble.z;
+    for (int k = 0; k < 6; k++)
+        if (dot(_Planes[k].xyz, p) + _Planes[k].w < -reach) return;
+    float pixels = size * _Tumble.w * _CameraPos.w / max(d, 1.0); // the body: tendrils are mostly air
+    fade *= saturate(pixels / max(_Range.y, 1e-3) - 1.0);       // fades in from least pixels to twice that
+    if (fade <= 0.0) return;
+
+    // Tumbling about its own axis.
+    float angle = t * lerp(_Tumble.x, _Tumble.y, tr) + seed * 6.2831853;
+    float sa, ca;
+    sincos(angle * 0.5, sa, ca);
+    float4 q = float4(normalize(axis + float3(0.0, 1e-3, 0.0)) * sa, ca);
+
+    uint lod = reach * _CameraPos.w / max(d, 1.0) < _Range.z ? 1u : 0u;
+    uint slot;
+    InterlockedAdd(_Args[lod * 5u + 1u], 1u, slot);
+    if (slot >= _Count) return;
+    Posed o;
+    o.position = float4(p, size);
+    o.rotation = q;
+    o.extra = float4(seed, fade, 0.0, 0.0);
+    _Posed[i] = o;
+    _Visible[lod * _Count + slot] = i;
+}
+
+[numthreads(64, 1, 1)]
+void Place(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x < _Count) Place1(id.x);
+}

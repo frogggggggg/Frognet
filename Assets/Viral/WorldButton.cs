@@ -162,6 +162,7 @@ public class WorldButton : MonoBehaviour
 
     bool Pressed()
     {
+        if (CommandLine.Typing) return false;
         if (holdAction && holdAction.action != null) return holdAction.action.IsPressed();
         Keyboard k = Keyboard.current;
         return k != null && holdKey != Key.None && k[holdKey].isPressed;

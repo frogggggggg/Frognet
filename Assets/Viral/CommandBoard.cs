@@ -402,6 +402,127 @@ public static class CommandBoard
         return b.SqrDistance(agent.transform.position) <= ArriveDistance * ArriveDistance;
     }
 
+    // ---------------- saving ----------------
+
+    [Serializable]
+    public class SavedMember
+    {
+        public string at;      // SaveRef
+        public Selectable.Category category;
+        public string kind, groupName;
+        public Jobs affords;
+    }
+
+    [Serializable]
+    public class SavedGroup
+    {
+        public bool squad;
+        public string name;
+        public Color color;
+        public List<SavedMember> members = new List<SavedMember>();
+    }
+
+    [Serializable]
+    public class SavedLink
+    {
+        public int squad, task; // into Squads / Tasks
+        public Job job;
+        public bool oneAtATime;
+        public string active;
+    }
+
+    [Serializable]
+    public class SavedPlan
+    {
+        public List<SavedGroup> squads = new List<SavedGroup>(), tasks = new List<SavedGroup>();
+        public List<SavedLink> links = new List<SavedLink>();
+        public List<Vector2Int> chains = new List<Vector2Int>(); // task -> task
+        public List<string> numberNames = new List<string>();
+        public List<int> numbers = new List<int>();
+        public int colors;
+    }
+
+    /// <summary>The whole plan, members by SaveRef (call before the world changes).</summary>
+    public static SavedPlan Capture()
+    {
+        var save = new SavedPlan { colors = s_colors };
+        foreach (Squad q in Squads) save.squads.Add(SaveGroup(q, true));
+        foreach (Task t in Tasks) save.tasks.Add(SaveGroup(t, false));
+        foreach (Link l in s_links)
+            save.links.Add(new SavedLink
+            {
+                squad = Squads.IndexOf(l.squad), task = Tasks.IndexOf(l.task), job = l.job, oneAtATime = l.oneAtATime,
+                active = l.active ? SaveRef.Of(l.active) : "",
+            });
+        foreach ((Task from, Task to) c in s_chains) save.chains.Add(new Vector2Int(Tasks.IndexOf(c.from), Tasks.IndexOf(c.to)));
+        foreach (KeyValuePair<string, int> kv in s_numbers) { save.numberNames.Add(kv.Key); save.numbers.Add(kv.Value); }
+        return save;
+    }
+
+    static SavedGroup SaveGroup(Group g, bool squad)
+    {
+        var saved = new SavedGroup { squad = squad, name = g.name, color = g.color };
+        foreach (Selectable m in g.members)
+        {
+            if (!m) continue;
+            string at = SaveRef.Of(m);
+            if (at.Length == 0) continue;
+            saved.members.Add(new SavedMember { at = at, category = m.category, kind = m.kind, groupName = m.groupName, affords = m.affords });
+        }
+        return saved;
+    }
+
+    /// <summary>Puts a saved plan in place of this one (call once the world, player and antibodies are back): members
+    /// that didn't come back are left out, ones without a Selectable yet get one; orders are given again.</summary>
+    public static void Restore(SavedPlan save)
+    {
+        Squads.Clear();
+        Tasks.Clear();
+        s_links.Clear();
+        s_chains.Clear();
+        s_numbers.Clear();
+        s_colors = 0;
+        if (save != null)
+        {
+            s_colors = save.colors;
+            for (int i = 0; i < save.numberNames.Count && i < save.numbers.Count; i++) s_numbers[save.numberNames[i]] = save.numbers[i];
+            foreach (SavedGroup g in save.squads) Squads.Add((Squad)LoadGroup(g, new Squad()));
+            foreach (SavedGroup g in save.tasks) Tasks.Add((Task)LoadGroup(g, new TargetTask()));
+            foreach (SavedLink l in save.links)
+            {
+                if (l.squad < 0 || l.squad >= Squads.Count || l.task < 0 || l.task >= Tasks.Count) continue;
+                Transform active = SaveRef.Resolve(l.active);
+                s_links.Add(new Link
+                {
+                    squad = Squads[l.squad], task = Tasks[l.task], job = l.job, oneAtATime = l.oneAtATime,
+                    active = active ? active.GetComponent<Selectable>() : null,
+                });
+            }
+            foreach (Vector2Int c in save.chains)
+                if (c.x >= 0 && c.x < Tasks.Count && c.y >= 0 && c.y < Tasks.Count) s_chains.Add((Tasks[c.x], Tasks[c.y]));
+        }
+        Changed?.Invoke();
+        Dispatch();
+    }
+
+    static Group LoadGroup(SavedGroup saved, Group g)
+    {
+        g.name = saved.name;
+        g.color = saved.color;
+        foreach (SavedMember m in saved.members)
+        {
+            Transform t = SaveRef.Resolve(m.at);
+            if (!t) continue;
+            if (!t.TryGetComponent(out Selectable s))
+            {
+                s = Selectable.Add(t.gameObject, m.category, m.kind, m.affords);
+                s.groupName = m.groupName;
+            }
+            g.members.Add(s);
+        }
+        return g;
+    }
+
     /// <summary>Forget everything (a new scene).</summary>
     public static void Clear()
     {

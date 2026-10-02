@@ -34,6 +34,8 @@ public class Crafting : MonoBehaviour
         [Tooltip("A strand's: what it works on and what it does there (GeneEffects).")]
         public GeneTarget targets = GeneTarget.RedBloodCell;
         public GeneEffect effect;
+        [Min(0f), Tooltip("A strand's: seconds after the injection before it takes effect.")]
+        public float delay;
         public Cost[] costs = new Cost[0];
         [Tooltip("Off: makes a DNA strand (a gene with the code, name and colour above). On: 'amount' of a " +
                  "substance with them, into a store.")]
@@ -41,8 +43,8 @@ public class Crafting : MonoBehaviour
         [Min(0f)] public float amount = 50f;
     }
 
-    static Substance Glucose => new Substance { name = "GLUCOSE", code = "GLU", color = new Color(1f, 0.95f, 0.86f) };
-    static Substance Protein => new Substance { name = "PROTEIN", code = "PRO", color = new Color(1f, 0.64f, 0.3f) };
+    static Substance Glucose => SubstanceCatalog.Copy(SubstanceCatalog.Glucose);
+    static Substance Protein => SubstanceCatalog.Copy(SubstanceCatalog.Protein);
     static Cost[] Costs(float glucose, float protein)
     {
         var list = new List<Cost>();
@@ -56,6 +58,10 @@ public class Crafting : MonoBehaviour
         // Blight: black tendrils spread over a red cell from the injection and it stops calling for help.
         new Recipe { code = "BLT-1", name = "BLIGHT", color = new Color(0.07f, 0.03f, 0.1f), glyph = Glyph.Tendrils,
                      targets = GeneTarget.RedBloodCell, effect = GeneEffect.Blight, costs = Costs(20f, 20f) },
+        // Kill: a few seconds after the injection the cell (red or white) bursts into blobs. A test gene for now: cheap.
+        new Recipe { code = "KIL-1", name = "KILL", color = new Color(1f, 0.82f, 0.18f), glyph = Glyph.Burst,
+                     targets = GeneTarget.RedBloodCell | GeneTarget.WhiteBloodCell, effect = GeneEffect.Kill,
+                     delay = 3f, costs = Costs(10f, 10f) },
     };
 
     /// <summary>What the recipe would take from which store slot (last slot first, as the stores are
@@ -64,7 +70,7 @@ public class Crafting : MonoBehaviour
     {
         into.Clear();
         bool enough = true;
-        IReadOnlyList<VirusInventory.Slot> slots = inv.Slots;
+        IReadOnlyList<StoreSlot> slots = inv.Slots;
         foreach (Cost c in r.costs)
         {
             float left = c.amount;
@@ -128,7 +134,7 @@ public class Crafting : MonoBehaviour
     /// the gene's index.</summary>
     public static int Deliver(Recipe r, VirusInventory inv, Genome genome, int mount)
     {
-        genome.genes.Add(new Genome.Gene { code = r.code, name = r.name, color = r.color, targets = r.targets, effect = r.effect });
+        genome.genes.Add(new Genome.Gene { code = r.code, name = r.name, color = r.color, targets = r.targets, effect = r.effect, delay = r.delay });
         int index = genome.genes.Count - 1;
         if (mount >= 0 && mount < inv.ring.Count && inv.ring[mount].kind == VirusInventory.Kind.Gene && inv.ring[mount].index < 0)
             inv.ring[mount].index = index;

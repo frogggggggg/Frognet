@@ -98,6 +98,9 @@ public class WorldStreamer : MonoBehaviour
     [Min(0f), Tooltip("Streamed things dissolve over this many metres before the load edge (StreamFade.hlsl), so " +
                       "nothing pops in or out in view. 0 = off.")]
     public float fadeLength = 120f;
+    [Min(1f), Tooltip("Fade length while the far field draws stand-ins (they take the dropped pixels, so the band only " +
+                      "hides the swap): short, so few objects are dithered at once.")]
+    public float crossFadeLength = 25f;
     [Min(0f), Tooltip("Gone this far inside Load Distance: slack for sector-distance rounding and spawns placed " +
                       "a little outside their sector.")]
     public float fadeMargin = 15f;
@@ -127,11 +130,15 @@ public class WorldStreamer : MonoBehaviour
     {
         public string key;
         public int seed;
+        [Tooltip("WorldEntity.uid once it has been spawned (0: never was): what SaveRef names it by.")]
+        public long uid;
         public Vector3 position;
         public Quaternion rotation = Quaternion.identity;
         public Vector3 scale = Vector3.one;
         public Vector3 velocity, spin;
         public float mass;
+        [Tooltip("IWorldState type names, one per state (null in older records: states by position).")]
+        public List<string> stateKeys;
         public List<string> states;
         [Tooltip("Vessel clock when this pose was taken: a stored record has drifted since.")]
         public double time;
@@ -160,6 +167,8 @@ public class WorldStreamer : MonoBehaviour
         [Tooltip("How sector ids were made (cubes, or the vessel's cells): a save with another layout is re-sorted by position.")]
         public string layout;
         public Vessel.Save vessel;
+        [Tooltip("The next WorldEntity.uid to hand out.")]
+        public long nextUid;
         public List<SectorRecord> sectors = new List<SectorRecord>();
     }
 
@@ -167,6 +176,11 @@ public class WorldStreamer : MonoBehaviour
 
     static WorldStreamer s_instance;
     static readonly List<WorldEntity> s_live = new List<WorldEntity>();
+    static readonly Dictionary<long, WorldEntity> s_byUid = new Dictionary<long, WorldEntity>();
+    static long s_nextUid = 1;
+
+    /// <summary>The live streamed object with this uid (SaveRef), or null.</summary>
+    public static WorldEntity Find(long uid) => s_byUid.TryGetValue(uid, out WorldEntity e) && e ? e : null;
 
     public static WorldStreamer Instance => s_instance;
     /// <summary>A streamer is running the world: the old one-shot spawners (SpawnManager, ResourceField,
@@ -193,6 +207,7 @@ public class WorldStreamer : MonoBehaviour
         }
         e.index = s_live.Count;
         s_live.Add(e);
+        if (e.uid != 0) s_byUid[e.uid] = e;
         s_liveTransforms.Add(e.T);
         s_liveLooks.Add(e.farLook);
     }
@@ -201,6 +216,7 @@ public class WorldStreamer : MonoBehaviour
     {
         int i = e.index;
         e.index = -1;
+        if (e.uid != 0 && s_byUid.TryGetValue(e.uid, out WorldEntity known) && known == e) s_byUid.Remove(e.uid);
         if (i < 0 || i >= s_live.Count || s_live[i] != e) return;
         RemoveLive(i);
     }
@@ -355,7 +371,7 @@ public class WorldStreamer : MonoBehaviour
     // sector loads when its nearest point comes within loadDistance, so anything not loaded yet is past that.
     void PublishFade(Vector3 centre)
     {
-        float end = Mathf.Max(1f, loadDistance - fadeMargin), length = Mathf.Min(fadeLength, end);
+        float end = Mathf.Max(1f, loadDistance - fadeMargin), length = Mathf.Min(FadeLength, end);
         Shader.SetGlobalVector(StreamFadeId, new Vector4(centre.x, centre.y, centre.z, length > 0f ? 1f / length : 0f));
         Shader.SetGlobalFloat(StreamFadeEndId, end);
     }
@@ -643,8 +659,12 @@ public class WorldStreamer : MonoBehaviour
     {
         centre = Centre();
         float end = Mathf.Max(1f, loadDistance - fadeMargin);
-        start = fadeLength > 0f ? end - Mathf.Min(fadeLength, end) : end;
+        start = FadeLength > 0f ? end - Mathf.Min(FadeLength, end) : end;
     }
+
+    // With stand-ins behind them the dissolve is a swap, not a vanish: a 120 m band dithered ~90% of live objects
+    // (two differently shaded meshes interleaved, crawling as they moved across the fixed screen pattern).
+    float FadeLength => FarOn && fadeLength > 0f ? Mathf.Min(fadeLength, crossFadeLength) : fadeLength;
 
     /// <summary>Loaded sectors' records not spawned yet.</summary>
     internal void PendingRecords(List<EntityRecord> into)
@@ -702,13 +722,13 @@ public class WorldStreamer : MonoBehaviour
 
     static readonly Comparison<Pending> ByDistance = (a, b) => a.distance.CompareTo(b.distance);
 
-    void Spawn(EntityRecord r)
+    GameObject Spawn(EntityRecord r)
     {
-        if (r == null || string.IsNullOrEmpty(r.key)) return;
+        if (r == null || string.IsNullOrEmpty(r.key)) return null;
         if (!_catalog.TryGetValue(r.key, out Template t))
         {
             if (_missing.Add(r.key)) Debug.LogWarning($"WorldStreamer: no prefab named '{r.key}' in the layers or catalog; those aren't spawned.", this);
-            return;
+            return null;
         }
         Advance(r); // where it has drifted to while stored
         // Seeded, so anything the prefab randomizes on Awake (a chunk's tint and bob) comes back the same.
@@ -724,6 +744,10 @@ public class WorldStreamer : MonoBehaviour
         if (!go.TryGetComponent(out WorldEntity e)) e = go.AddComponent<WorldEntity>();
         e.key = r.key;
         e.seed = r.seed;
+        if (r.uid == 0) r.uid = s_nextUid++;
+        else if (r.uid >= s_nextUid) s_nextUid = r.uid + 1;
+        e.uid = r.uid;
+        s_byUid[e.uid] = e;
         e.farLook = t.farLook;
         Relook(e);
         e.Bind();
@@ -731,6 +755,38 @@ public class WorldStreamer : MonoBehaviour
         if (t.kind == Kind.Chunk && r.states == null && go.TryGetComponent(out ResourceChunk chunk)) chunk.Resize(r.scale.x);
         e.Apply(r);
         _pathsDirty = true;
+        return go;
+    }
+
+    /// <summary>The catalog's prefab names (layers + catalog): what <see cref="SpawnNew"/> takes.</summary>
+    public IEnumerable<string> Keys => _catalog.Keys;
+
+    /// <summary>A new object of a catalog prefab at 'position' (the command line's spawn): streamed, saved and faded
+    /// like anything generated. 'key' ignores case, spaces and '_'. 'size': a chunk's radius / a scale multiplier (0:
+    /// the prefab's own; a chunk rolls one in its size range). Null if there's no such prefab.</summary>
+    public GameObject SpawnNew(string key, Vector3 position, float size = 0f)
+    {
+        Template t = null;
+        if (!_catalog.TryGetValue(key ?? "", out t))
+            foreach (Template c in _catalog.Values)
+                if (Squash(c.key) == Squash(key)) { t = c; break; }
+        if (t == null) return null;
+        var r = new EntityRecord
+        {
+            key = t.key, seed = UnityEngine.Random.Range(1, int.MaxValue), position = position,
+            rotation = UnityEngine.Random.rotationUniform, scale = t.prefab.transform.localScale, time = Now, frame = FrameNow,
+        };
+        if (t.chunk) r.scale = Vector3.one * (size > 0f ? size : UnityEngine.Random.Range(t.chunk.sizeRange.x, t.chunk.sizeRange.y));
+        else if (size > 0f) r.scale *= size;
+        if (t.mass > 0f) r.mass = t.mass * (t.chunk ? 1f : Mathf.Pow(r.scale.x / Mathf.Max(1e-4f, t.prefab.transform.localScale.x), 3f));
+        return Spawn(r);
+    }
+
+    static string Squash(string s)
+    {
+        var sb = new System.Text.StringBuilder();
+        if (s != null) foreach (char c in s) if (char.IsLetterOrDigit(c)) sb.Append(char.ToLowerInvariant(c));
+        return sb.ToString();
     }
 
     // ---------------- generation ----------------
@@ -1026,7 +1082,7 @@ public class WorldStreamer : MonoBehaviour
     /// sector they stand in.</summary>
     public WorldSave Capture()
     {
-        var save = new WorldSave { seed = _seed, home = _home, layout = Layout(), vessel = _vessel ? _vessel.Capture() : null };
+        var save = new WorldSave { seed = _seed, home = _home, layout = Layout(), vessel = _vessel ? _vessel.Capture() : null, nextUid = s_nextUid };
         var byId = new Dictionary<long, SectorRecord>();
         SectorRecord Get(long id)
         {
@@ -1043,7 +1099,7 @@ public class WorldStreamer : MonoBehaviour
         foreach (Pending p in _pending)
             for (int i = p.next; i < p.list.Count; i++) Get(p.key).entities.Add(p.list[i]);
         foreach (WorldEntity e in s_live)
-            if (e) Get(KeyOf(e.T.position)).entities.Add(Stamp(e.Capture()));
+            if (e && !e.Dying) Get(KeyOf(e.T.position)).entities.Add(Stamp(e.Capture())); // bursting / swallowed: gone
         return save;
     }
 
@@ -1053,6 +1109,7 @@ public class WorldStreamer : MonoBehaviour
     {
         foreach (WorldEntity e in s_live.ToArray()) if (e) Remove(e);
         s_live.Clear();
+        s_byUid.Clear();
         _pending.Clear();
         _ungenerated.Clear();
         _loaded.Clear();
@@ -1066,6 +1123,7 @@ public class WorldStreamer : MonoBehaviour
         {
             _seed = save.seed;
             _home = save.home;
+            s_nextUid = Math.Max(s_nextUid, save.nextUid); // and past every uid in it, as they spawn
         }
         SetupVessel(save?.vessel);
         if (save != null)

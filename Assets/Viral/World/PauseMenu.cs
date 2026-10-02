@@ -76,7 +76,7 @@ public class PauseMenu : MonoBehaviour
             _buttons.Clear();
         }
 
-        Keyboard k = Keyboard.current;
+        Keyboard k = CommandLine.Keys; // Escape while typing closes the command line, not this
         if (k != null && k.escapeKey.wasPressedThisFrame)
         {
             if (IsOpen) Close();

@@ -31,6 +31,7 @@ Shader "Custom/BloodCellTriplanar"
         _DistantBumpMultiplier ("Distant Bump Multiplier", Range(0,1)) = 0.18
         _DistantDisplacementMultiplier ("Distant Displacement Multiplier", Range(0,1)) = 0.30
         _DistantTextureDetailMultiplier ("Distant Texture Detail Multiplier", Range(0,1)) = 0.15
+        _FarTone ("Far Tone (colour the lumps fade to; 0 = off)", Range(0,1)) = 0
 
         [Header(Rendering_Stability)]
         [Enum(UnityEngine.Rendering.CullMode)] _Cull ("Cull Mode", Float) = 2
@@ -86,6 +87,7 @@ Shader "Custom/BloodCellTriplanar"
 
         HLSLINCLUDE
         #define STREAM_FADE_OBJECTS 1 // dissolve at the streaming edge (streamed cells only)
+        #define CELL_BURST 1          // swells, blisters and tears open when killed (CellBurst.cs)
         #include "BloodCellCore.hlsl"
 
         // ---------------------------------------------------------------
@@ -164,6 +166,7 @@ Shader "Custom/BloodCellTriplanar"
             float3 c    = (p0 + p1 + p2) * (1.0 / 3.0);
             float  edge = max(max(distance(p0, p1), distance(p1, p2)), distance(p2, p0));
             float  r    = edge * (1.0 + _PhongStrength) + abs(_Displace) + RippleReach() + 0.25;
+            if (_Burst.w > 0.0) r += 0.3 * BurstRadiusWS(); // swelling, blebs
 
             float4x4 m = GetWorldToHClipMatrix();
             float4 planes[4] = { m[3] + m[0], m[3] - m[0], m[3] + m[1], m[3] - m[1] };
@@ -260,7 +263,13 @@ Shader "Custom/BloodCellTriplanar"
             relief *= 1.0 - InvertSweepCover(baseWS);
         #endif
 
-            c.positionWS = baseWS + normalize(TransformObjectToWorldNormal(displaceOS)) * (relief + c.ripple.x);
+            float3 displaceWS = normalize(TransformObjectToWorldNormal(displaceOS));
+            c.positionWS = baseWS + displaceWS * (relief + c.ripple.x);
+
+            // Bursting (CellBurst): swells and blisters before it tears (the clip is per pixel, every pass).
+            if (_Burst.w > 0.0)
+                c.positionWS += displaceWS * BurstSwell(BurstQ(positionOS), _Time.y - _Burst.w, _Burst.xyz, BurstSeed())
+                              * BurstRadiusWS();
 
             // Legs, ropes etc. drawn with this shader ride the ripples of whatever cell they're near.
             if (_FollowRipples > 0.5)
@@ -276,7 +285,7 @@ Shader "Custom/BloodCellTriplanar"
             DepthVaryings o;
             float3 positionWS = EvaluateCell(patch, bary).positionWS;
             o.positionHCS = TransformWorldToHClip(positionWS);
-        #if defined(INVERT_BACKFACES)
+        #if defined(DEPTH_POSITION_WS)
             o.positionWS  = positionWS;
         #endif
             return o;
@@ -292,7 +301,7 @@ Shader "Custom/BloodCellTriplanar"
             CellSample c = EvaluateCell(patch, bary);
             NormalVaryings o;
             o.positionHCS = TransformWorldToHClip(c.positionWS);
-        #if defined(INVERT_BACKFACES)
+        #if defined(DEPTH_POSITION_WS)
             o.positionWS  = c.positionWS;
         #endif
             o.normalWS    = BumpNormal(c.normalWS, SurfaceHeight(c.mapPos, c.fade, PixelMetres(c.positionWS)),
@@ -409,6 +418,9 @@ Shader "Custom/BloodCellTriplanar"
 
                 DepthVaryings o;
                 o.positionHCS = positionCS;
+            #if defined(DEPTH_POSITION_WS)
+                o.positionWS  = c.positionWS;
+            #endif
                 return o;
             }
             ENDHLSL

@@ -80,15 +80,17 @@ public class GenomeView : MonoBehaviour
 
     [Header("Injection")]
     [Min(0.05f), Tooltip("Seconds from the sphere into the head (eased in and out).")]
-    public float toHeadTime = 1.1f;
+    public float toHeadTime = 0.7f;
     [Min(0.05f), Tooltip("Seconds from the head through the body to the top of the drill.")]
-    public float toDrillTime = 0.6f;
+    public float toDrillTime = 0.4f;
     [Min(0f), Tooltip("Seconds it waits at the top of the drill before the virus pumps.")]
-    public float drillPause = 0.5f;
+    public float drillPause = 0.25f;
     [Min(0.05f), Tooltip("Seconds to shoot down the drill once pushed (fast off the push, slowing into the tip).")]
-    public float zoomTime = 0.6f;
+    public float zoomTime = 0.45f;
     [Min(2f), Tooltip("The travelling strand's smallest width on screen (1080p pixels), however thin the tube.")]
     public float minInjectWidth = 14f;
+    [Min(0.1f), Tooltip("Seconds the delivery shows: the shockwave at the tip, the sphere flashing the gene's colour, the verdict line.")]
+    public float verdictTime = 2.2f;
 
     [Header("Synthesizer")]
     [Range(0.04f, 0.2f), Tooltip("Radius of the rotating hub in the middle (sphere radii). Its nozzle reaches out to the mounts' inner ends.")]
@@ -139,6 +141,19 @@ public class GenomeView : MonoBehaviour
     /// <summary>Whether a strand click injects it (down the drill: focus mode) or only loads it (the
     /// inventory, opened anywhere with E). Set by VirusMovement.</summary>
     public bool CanInject { get; set; } = true;
+
+    /// <summary>A strand is on its way down the drill. VirusMovement holds the virus in focus until it's in.</summary>
+    public bool Injecting => _injecting >= 0;
+
+    /// <summary>Stops the injection under way (the virus left focus: its cell burst, it was seized, it died).
+    /// Stopped before the tip the strand is kept; already delivered, it's spent as usual.</summary>
+    public void CancelInjection()
+    {
+        if (_injecting < 0) return;
+        if (_delivered && _genome && _injecting < _genome.genes.Count) Spend(_injecting);
+        _injecting = -1;
+        InjectSpeed = 0f;
+    }
 
     /// <summary>The stores on the ring, and where extraction flows to. Empty: found from the genome.</summary>
     public VirusInventory Inventory { get; set; }
@@ -220,6 +235,9 @@ public class GenomeView : MonoBehaviour
     Vector2 _pulseAt, _burstAt;
     float _pulseTime = -10f, _burstTime = -10f;
     Color _burstColor;
+    // The last delivery's verdict (took the cell over or not), shown as the state line for verdictTime.
+    bool _took;
+    string _deliveredName;
     Organism _organism;
     // Drawn like the ring (command buffer into a render texture, canvas-sized, shown by a full-screen
     // image): as a UIShape on the canvas it never showed.
@@ -337,7 +355,13 @@ public class GenomeView : MonoBehaviour
         _shown = Mathf.MoveTowards(_shown, _open ? 1f : 0f, dt / animationTime);
         if ((_shown <= 0f && !_open && _injecting < 0) || !_genome)
         {
-            FinishCraft(); // shut mid-way: made at once
+            if (!_genome) FinishCraft(); // the virus is gone: made at once
+            else if (_job != null) // shut mid-way: the job carries on unseen, so reopening shows it still going
+            {
+                Gather();
+                Craft(dt, Time.unscaledTime);
+                Settle(dt);
+            }
             _injecting = -1;
             InjectSpeed = 0f;
             ReleaseTravel();
@@ -386,6 +410,15 @@ public class GenomeView : MonoBehaviour
         Vector2 end = Vector2.LerpUnclamped(start, goal, reach);
         float grown = tube * Mathf.Clamp01(u * 5f);
         float sphereR = Mathf.Max(grown, Mathf.LerpUnclamped(grown, R, swell));
+        // A delivery kicks the sphere (a quick swell, rings down) and flashes its outline the gene's colour
+        // (red when it didn't take), fading over verdictTime.
+        float verdict = (now - _burstTime) / verdictTime, flash = 0f;
+        if (verdict >= 0f && verdict < 1f)
+        {
+            float k = now - _burstTime;
+            sphereR *= 1f + 0.07f * Mathf.Exp(-k * 6f) * Mathf.Sin(k * 22f);
+            flash = (1f - verdict) * (1f - verdict) * (1f - verdict);
+        }
         _sphere = end;
         _sphereR = sphereR;
         Vector2 toHead = headAt - end;
@@ -397,8 +430,12 @@ public class GenomeView : MonoBehaviour
         _bubbleMat.SetFloat(DnaId, Mathf.Clamp01((u - 0.55f) / 0.35f));
         _bubbleMat.SetFloat(HeadId, Mathf.Clamp01(u * 4f));
         LookFromFocus();
-        _bubbleMat.SetColor(FillId, _fill);
-        _bubbleMat.SetColor(OutlineId, _outline);
+        Color flashColor = _took ? _burstColor : TerminalUI.Blood;
+        Color fill = Color.Lerp(_fill, flashColor, 0.3f * flash), outline = Color.Lerp(_outline, flashColor, flash);
+        fill.a = _fill.a;
+        outline.a = _outline.a;
+        _bubbleMat.SetColor(FillId, fill);
+        _bubbleMat.SetColor(OutlineId, outline);
 
         // Everything else sits on the sphere: a click catcher, the labels above.
         float open = Mathf.Clamp01((u - 0.6f) / 0.4f);
@@ -568,7 +605,7 @@ public class GenomeView : MonoBehaviour
             else l.angle += Mathf.DeltaAngle(l.angle, target) * k;
 
             if (m.kind != Kind.Store || !inv || m.index < 0 || m.index >= inv.slots.Count) continue;
-            VirusInventory.Slot slot = inv.slots[m.index];
+            StoreSlot slot = inv.slots[m.index];
             float amount = Delayed(l, slot.Empty ? 0f : slot.amount, now, dt);
             if (amount > l.last + 1e-3f) l.flashAt = now;
             l.last = amount;
@@ -597,7 +634,7 @@ public class GenomeView : MonoBehaviour
     {
         Mouse m = Mouse.current;
         VirusInventory inv = Inv;
-        if (!_open || u < 0.95f || m == null || !inv)
+        if (!_open || u < 0.95f || m == null || !inv || _injecting >= 0) // nothing else until the strand is in
         {
             EndDrag();
             _hover = -1;
@@ -723,6 +760,14 @@ public class GenomeView : MonoBehaviour
             _state.text.color = live;
             return;
         }
+        if (_injecting < 0 && _deliveredName != null && Time.unscaledTime - _burstTime < verdictTime)
+        {
+            _code.Set("DELIVERED " + _deliveredName);
+            _code.text.color = _burstColor;
+            _state.Set(_took ? "[OK] GENE TOOK HOLD" : "[X] REJECTED // ALARM RAISED");
+            _state.text.color = _took ? live : TerminalUI.Blood;
+            return;
+        }
         if (_option >= 0)
         {
             Crafting.Recipe r = Recipes.recipes[_option];
@@ -762,7 +807,7 @@ public class GenomeView : MonoBehaviour
         }
         else if (kind == Kind.Store && inv && index >= 0 && index < inv.slots.Count && !inv.slots[index].Empty)
         {
-            VirusInventory.Slot slot = inv.slots[index];
+            StoreSlot slot = inv.slots[index];
             _code.Set(slot.code + " // " + slot.substance);
             _code.text.color = slot.color;
             _state.Set(Mathf.FloorToInt(LookOf(m).shown) + " / " + Mathf.RoundToInt(inv.capacity), false);
@@ -865,7 +910,7 @@ public class GenomeView : MonoBehaviour
         }
 
         VirusInventory inv = Inv;
-        VirusInventory.Slot slot = inv && m.index >= 0 && m.index < inv.slots.Count ? inv.slots[m.index] : null;
+        StoreSlot slot = inv && m.index >= 0 && m.index < inv.slots.Count ? inv.slots[m.index] : null;
         float take = 0f; // what the recipe pointed at would draw from it
         foreach (var p in _preview)
             if (p.slot == m.index) take += p.amount;
@@ -899,7 +944,7 @@ public class GenomeView : MonoBehaviour
     // crawling toward the hub, boxed in green if the recipe can be made or red if not, with a white line
     // where it would leave the level. 'missing' (share of capacity) is what the recipe is short of: a red
     // dashed stretch past the fill, as far as the fill would have to reach.
-    void Bar(Vector2 dir, float amp, float reveal, VirusInventory.Slot slot, Look l, bool hot, float now, float take = 0f, float missing = 0f)
+    void Bar(Vector2 dir, float amp, float reveal, StoreSlot slot, Look l, bool hot, float now, float take = 0f, float missing = 0f)
     {
         bool empty = slot == null || slot.Empty;
         Vector2 root = dir * Rim, along = -dir, across = new Vector2(-dir.y, dir.x);
@@ -996,7 +1041,7 @@ public class GenomeView : MonoBehaviour
             }
             else
             {
-                VirusInventory.Slot slot = inv && m.index >= 0 && m.index < inv.slots.Count ? inv.slots[m.index] : null;
+                StoreSlot slot = inv && m.index >= 0 && m.index < inv.slots.Count ? inv.slots[m.index] : null;
                 bool has = slot != null && !slot.Empty;
                 s = has ? slot.code + " " + Mathf.FloorToInt(l.shown) : "--";
                 if (has) c = Color.Lerp(c, Saturated(slot.color), hot ? 1f : 0.6f);
@@ -1138,7 +1183,7 @@ public class GenomeView : MonoBehaviour
                     float room = -1f;
                     for (int s = 0; s < inv.Slots.Count; s++)
                     {
-                        VirusInventory.Slot slot = inv.Slots[s];
+                        StoreSlot slot = inv.Slots[s];
                         if (slot.Empty || slot.substance != c.substance.name || inv.capacity - slot.amount <= room) continue;
                         best = s;
                         room = inv.capacity - slot.amount;
@@ -1690,10 +1735,12 @@ public class GenomeView : MonoBehaviour
             bool took = false;
             if (_drill)
             {
-                _drill.Deliver();
                 if (_drill.Site(out Vector3 site, out Vector3 siteNormal))
                     took = ImmuneSystem.Deliver(_drill.Cell, genes[gene], site, siteNormal); // takes effect if it works on this cell
+                _drill.Deliver(took ? 1.6f : 1f); // the cell heaves where it went in
             }
+            _took = took;
+            _deliveredName = genes[gene].code + " // " + genes[gene].name;
             Reach(InjectStage.Delivered, took);
             _genome.Delivered(gene);
         }
@@ -1701,10 +1748,16 @@ public class GenomeView : MonoBehaviour
         {
             _injecting = -1;
             InjectSpeed = 0f;
-            // One use: the strand is spent, its mount left as an empty DNA slot (dashes) for a new one.
-            Inv.GeneRemoved(gene);
-            _genome.Consume(gene);
+            Spend(gene);
         }
+    }
+
+    // One use: the strand is spent, its mount left as an empty DNA slot (dashes) for a new one.
+    void Spend(int gene)
+    {
+        VirusInventory inv = Inv;
+        if (inv) inv.GeneRemoved(gene);
+        _genome.Consume(gene);
     }
 
     // Expanding rings: a white pulse where the push lands at the top of the drill, and the gene's
@@ -1718,15 +1771,35 @@ public class GenomeView : MonoBehaviour
             c.a = (1f - p) * 0.9f;
             Ring(_pulseAt, Mathf.Lerp(6f, 36f, CubicOut(p)), 3f, c, 40);
         }
-        float b = (now - _burstTime) / 0.6f;
-        if (b >= 0f && b < 1f)
+        // Delivered: three shockwaves one after another (the first widest), a white one inside, spikes
+        // flung out, a flash on the tip. Red spikes when the gene didn't take.
+        float since = now - _burstTime;
+        if (since < 0f || since >= 1.2f) return;
+        for (int i = 0; i < 3; i++)
         {
+            float x = (since - i * 0.13f) / 0.9f;
+            if (x <= 0f || x >= 1f) continue;
             Color c = _burstColor;
-            c.a = 1f - b;
-            Ring(_burstAt, Mathf.Lerp(4f, 60f, CubicOut(b)), 4f * (1f - b) + 1f, c, 48);
-            Ring(_burstAt, Mathf.Lerp(2f, 34f, CubicOut(b * 1.3f)), 3f, new Color(1f, 1f, 1f, c.a * 0.8f), 40);
-            if (b < 0.3f) Disc(_burstAt, 10f * (1f - b / 0.3f), new Color(1f, 1f, 1f, 1f - b / 0.3f), 20);
+            c.a = 1f - x;
+            Ring(_burstAt, Mathf.Lerp(6f, 170f - 40f * i, CubicOut(x)), (6f - 1.5f * i) * (1f - x) + 1f, c, 64);
         }
+        float b = since / 0.6f;
+        if (b < 1f) Ring(_burstAt, Mathf.Lerp(2f, 48f, CubicOut(b)), 3f, new Color(1f, 1f, 1f, (1f - b) * 0.85f), 40);
+        float s = since / 0.8f;
+        if (s < 1f)
+        {
+            Color spike = _took ? _burstColor : TerminalUI.Blood;
+            spike.a = 1f - s;
+            float near = Mathf.Lerp(10f, 120f, CubicOut(s)), far = near + 26f * (1f - s) + 4f;
+            for (int k = 0; k < 12; k++)
+            {
+                float a = (k + 0.5f * (k & 1)) * Mathf.PI * 2f / 12f;
+                Vector2 d = new Vector2(Mathf.Cos(a), Mathf.Sin(a));
+                float reach = (k & 1) == 0 ? 1f : 0.7f;
+                Quad(_burstAt + d * (near * reach), _burstAt + d * (far * reach), 3f * (1f - s) + 1f, spike, spike);
+            }
+        }
+        if (since < 0.25f) Disc(_burstAt, 18f * (1f - since / 0.25f), new Color(1f, 1f, 1f, 1f - since / 0.25f), 24);
     }
 
     // ---------------- extraction flow ----------------

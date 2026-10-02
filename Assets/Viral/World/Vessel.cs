@@ -236,6 +236,13 @@ public class Vessel : MonoBehaviour
     public float LoopRadius => _R;
     public Vector3 Axis => _axis;
     public Vector3 LoopCentre => _centre;
+    /// <summary>The loop's in-plane frame: phi = 0 along E1, pi / 2 along E2 (ToTube's phi).</summary>
+    public Vector3 E1 => _e1;
+    public Vector3 E2 => _e2;
+    /// <summary>S0: wall-frame offset (S = s + S0), metres.</summary>
+    public float WallOffset => (float)_wallS;
+    /// <summary>Per S sample: r = tube radius, g = da/dS, b = the wall pattern's warp (see UploadRadius).</summary>
+    public Texture RadiusTexture => _radiusTex;
     public int RegionCount => _regions != null ? _regions.Length : 0;
     /// <summary>Largest the tube gets anywhere (metres).</summary>
     public float MaxRadius => radius * (1f + widthVariation);

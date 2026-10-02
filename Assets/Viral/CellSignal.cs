@@ -9,9 +9,10 @@ using UnityEngine;
 ///
 /// A cell stops signalling for good once it's yours: a gene that works on it (GeneEffects, e.g. the
 /// blight) <see cref="Silence"/>s it. A gene that doesn't sets it off instead (ImmuneSystem.Deliver).
-/// Added to Surfaces on demand (<see cref="For"/>); add one yourself to set its limits.
+/// Added to Surfaces on demand (<see cref="For"/>); add one yourself to set its limits. Streamed and saved with its
+/// cell (IWorldState: signal, hotspot, converted), so a cell you took stays yours.
 /// </summary>
-public class CellSignal : MonoBehaviour, ICompletable
+public class CellSignal : MonoBehaviour, ICompletable, IWorldState
 {
     [Min(1f), Tooltip("Loudest it gets.")]
     public float maxSignal = 100f;
@@ -66,6 +67,26 @@ public class CellSignal : MonoBehaviour, ICompletable
         Converted = true;
         Signal = 0f;
     }
+
+    [System.Serializable]
+    struct Saved { public float signal; public Vector3 hotspot; public bool converted; public double time; }
+
+    string IWorldState.SaveState() => Converted || Signal > 0.01f
+        ? JsonUtility.ToJson(new Saved { signal = Signal, hotspot = _hotspot, converted = Converted, time = Vessel.Clock })
+        : "";
+
+    // Stored, it died away as it would have live (by the vessel clock: no time passes over a save and load).
+    void IWorldState.LoadState(string state)
+    {
+        Saved s = JsonUtility.FromJson<Saved>(state);
+        Signal = Mathf.Clamp(s.signal, 0f, maxSignal);
+        _hotspot = s.hotspot;
+        float away = (float)(Vessel.Clock - s.time);
+        if (away > 0f) Decay(away, ImmuneSystem.SignalHalfLife);
+        if (s.converted) Silence();
+    }
+
+    bool IWorldState.Pinned => false;
 
     /// <summary>Its bounding sphere (world): centre and the radius inside its flattest side, so
     /// something kept outside it doesn't hover far off a cube's faces.</summary>

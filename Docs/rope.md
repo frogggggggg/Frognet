@@ -65,5 +65,8 @@ monospace text). Focus mode, clicking a rope base opens it on the base: Straight
 (bottom panel, blood-red progress bar). Self-built uGUI (legacy font, generated disc/ring sprites); talks to the rope
 only by handle. Click elsewhere or Escape closes it. It and the head view close each other.
 
-## Open items
-Ropes aren't saved (cleared on load).
+## Saving
+`Capture` / `Restore` (SaveGame): particles (`x`), rest lengths, pins, anchors (`Anchor.Save` / `Load`: SaveRef of the
+support / body + world point and normal; a target that's gone = lost, the end comes loose), held rope, straight,
+suspended, slurping, target length, cauterize front; sealed ropes are `Seal`ed again as they lie (weld rebuilt). Rope
+ids (handles) are new after a load.

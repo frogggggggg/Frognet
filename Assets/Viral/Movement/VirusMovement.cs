@@ -9,7 +9,7 @@ using UnityEngine.InputSystem;
 ///
 /// WASD / stick: move relative to the camera. Space / South: jump on the
 /// ground, charge in the air. Hold the WorldButton (F, its input action): drill -> Focus.
-/// F or Escape: leave Focus.
+/// F or Escape: leave Focus. Space / South in Focus: leave it and jump off the cell.
 ///
 /// Rope: LMB pays rope out (starting one if none is held: anchored under you on a
 /// surface, trailing a loose end in the air). On a surface LMB also raises the body,
@@ -24,7 +24,8 @@ using UnityEngine.InputSystem;
 /// (GenomeView: the DNA it carries and its stores, mounted round it; click a strand to inject it).
 /// Resource chunks in reach show their core (ResourceField): clicking one starts (or stops) extracting
 /// it into its VirusInventory, and opens the head view to show it flowing in. A click elsewhere or
-/// Escape closes whichever is open.
+/// Escape closes whichever is open; while extracting the head view stays open until closed on purpose
+/// (E, Escape, leaving focus), which stops the extraction.
 ///
 /// Inventory: the stores are always in the top-left corner (InventoryView); E anywhere opens the head
 /// view (out of focus a strand click only loads it; the cursor is freed while it's open).
@@ -69,6 +70,12 @@ public class VirusMovement : MonoBehaviour
     public Key focusKey = Key.F;
     [Tooltip("Focus: the least distance (pixels) from a resource chunk's core that counts as clicking it.")]
     [Min(1f)] public float corePickRadius = 26f;
+    [Tooltip("Focus: the stats shown under the cell stood on. Empty: made on first use.")]
+    public CellReadout cellReadout;
+    [Tooltip("Focus: the least distance (pixels) from a cell's nucleus that counts as clicking it.")]
+    [Min(1f)] public float nucleusPickRadius = 30f;
+    [Tooltip("Focus: the view a click on a cell's nucleus opens. Empty: made on first use.")]
+    public NucleusView nucleusView;
     [Min(0.05f), Tooltip("Seconds between two RMB clicks that count as a double click (a tug).")]
     public float doubleClickTime = 0.3f;
     [Min(0.05f), Tooltip("RMB released within this many seconds is a click (cut the rope at your end); held longer, it reels.")]
@@ -144,24 +151,45 @@ public class VirusMovement : MonoBehaviour
         if (!_cam && Camera.main) _cam = Camera.main.transform;
         RefreshButton(); // toggles only on mismatch, so an active hold is never reset
         bool focus = IsFocusMode, commanding = CommandMode.Active;
+        if (focus && Injecting)
+        {
+            // Held until the strand is in: no leaving, jumping, menus or clicks (only leaving the surface, the
+            // cell bursting or dying ends focus, which cancels it: OnStateChanged).
+            SetRope(false, false);
+            if (rope) rope.PhantomEnd = -1;
+            UpdateCores(true, true);
+            UpdateCell(true, true);
+            UpdateCursor(true);
+            UniversalCamera.PointerCaptured = commanding;
+            return;
+        }
         UpdateInventoryKey(focus, commanding);
         int hoveredBase = UpdateRopeBases(focus && !commanding);
         bool headCaptured = UpdateHeadView(focus && !commanding, hoveredBase >= 0);
         bool coreCaptured = UpdateCores(focus && !commanding, hoveredBase >= 0 || headCaptured);
+        bool cellCaptured = UpdateCell(focus, commanding || hoveredBase >= 0 || headCaptured || coreCaptured || HeldOpen);
+        if (!ViewOpen && Extracting) ResourceField.Instance.StopExtracting(Inventory); // closing the head view stops it
         UpdateCursor(focus);
-        UniversalCamera.PointerCaptured = commanding || hoveredBase >= 0 || _pressedBase >= 0 || headCaptured || coreCaptured ||
-                                          headView && headView.Dragging || ((MenuOpen || ViewOpen) && PointerOverUI());
+        UniversalCamera.PointerCaptured = commanding || hoveredBase >= 0 || _pressedBase >= 0 || headCaptured || coreCaptured || cellCaptured ||
+                                          headView && headView.Dragging || ((MenuOpen || ViewOpen || NucleusOpen) && PointerOverUI());
 
         if (IsFocusMode)
         {
             SetRope(false, false);
             if (rope) rope.PhantomEnd = -1;
-            Keyboard k = commanding ? null : Keyboard.current;
-            if (k != null && k[focusKey].wasPressedThisFrame) ExitFocusMode();
+            Keyboard k = commanding ? null : CommandLine.Keys;
+            if (!commanding && ActionPressed())
+            {
+                // Jump = the quick way out: Jumping outranks Grounded, so focus (and its views) drop as it launches.
+                ExitFocusMode();
+                _o.Press(Intent.Jump);
+            }
+            else if (k != null && k[focusKey].wasPressedThisFrame) ExitFocusMode();
             else if (k != null && k.escapeKey.wasPressedThisFrame)
             {
                 if (MenuOpen) ropeMenu.Close(); // Escape closes the menu or head view first
                 else if (ViewOpen) headView.Close();
+                else if (NucleusOpen) nucleusView.Close();
                 else ExitFocusMode();
             }
             return;
@@ -273,7 +301,7 @@ public class VirusMovement : MonoBehaviour
 
         bool overUI = PointerOverUI();
         int hovered = -1;
-        bool free = focus && m != null && (!held || clicked) && !overUI;
+        bool free = focus && !HeldOpen && m != null && (!held || clicked) && !overUI;
         if (free) hovered = rope.BaseAt(ViewCamera, m.position.ReadValue(), ropeBaseRadius);
 
         if (hovered >= 0 && clicked)
@@ -317,7 +345,7 @@ public class VirusMovement : MonoBehaviour
             if (MenuOpen) ropeMenu.Close();
             headView.Open(_genome, cam);
         }
-        else if (clicked && !overUI && ViewOpen) headView.Close();
+        else if (clicked && !overUI && ViewOpen && !HeldOpen) headView.Close();
         _genome.Hovered = onHead || ViewOpen; // grows while pointed at, and stays grown while open
         return onHead;
     }
@@ -336,7 +364,7 @@ public class VirusMovement : MonoBehaviour
     // The key toggles it (the drill into focus is F's now: WorldButton).
     void UpdateInventoryKey(bool focus, bool commanding)
     {
-        Keyboard k = Keyboard.current;
+        Keyboard k = CommandLine.Keys;
         if (k == null) return;
         if (commanding)
         {
@@ -414,8 +442,60 @@ public class VirusMovement : MonoBehaviour
         return chunk;
     }
 
+    // Focus: the cell under the virus shows its insides (CellInteriorView) and its stats underneath (CellReadout).
+    // Focus: the cell under the virus shows its insides (CellInteriorView) and its stats underneath (CellReadout).
+    // Pointing at its nucleus lights it; a click opens the nucleus (NucleusView, like the head view; the stats hide
+    // meanwhile), again or anywhere else closes it. It and the head view / rope menu close each other. Rope bases,
+    // the head and chunk cores win the click. Returns whether the cursor is on the nucleus.
+    bool UpdateCell(bool focus, bool blocked)
+    {
+        CellInterior cell = focus ? CellInterior.For(_o.Surface) : null;
+        if (NucleusOpen && (nucleusView.Cell != cell || ViewOpen || MenuOpen)) nucleusView.Close();
+        if (cell) CellInteriorView.Show(cell);
+        if (cell || cellReadout)
+        {
+            if (!cellReadout) cellReadout = CellReadout.Create();
+            cellReadout.Show(NucleusOpen ? null : cell, ViewCamera);
+        }
+        if (!cell) return false;
+
+        CellInteriorView view = CellInteriorView.Instance;
+        Mouse m = Mouse.current;
+        Camera cam = ViewCamera;
+        CellInterior hit = null;
+        if (m != null && cam)
+        {
+            Vector2 pointer = m.position.ReadValue();
+            bool clicked = m.leftButton.wasPressedThisFrame, overUI = PointerOverUI();
+            hit = !blocked && !overUI && (!m.leftButton.isPressed || clicked) ? view.NucleusAt(cam, pointer, nucleusPickRadius) : null;
+            if (clicked && !blocked && !overUI)
+            {
+                if (hit && !(NucleusOpen && nucleusView.Cell == hit))
+                {
+                    if (ViewOpen) headView.Close();
+                    if (MenuOpen) ropeMenu.Close();
+                    if (!nucleusView) nucleusView = NucleusView.Create();
+                    nucleusView.Open(hit, cam);
+                }
+                else if (NucleusOpen) nucleusView.Close();
+            }
+        }
+        view.Hovered = hit;
+        view.Opened = NucleusOpen ? nucleusView.Cell : null;
+        return hit;
+    }
+
+    bool NucleusOpen => nucleusView && nucleusView.IsOpen;
+
     bool MenuOpen => ropeMenu && ropeMenu.IsOpen;
     bool ViewOpen => headView && headView.IsOpen;
+    /// <summary>A strand is going down the drill: the virus stays in focus until it's delivered.</summary>
+    public bool Injecting => headView && headView.Injecting;
+
+    // Extracting holds the head view open (the flow into the stores is shown there): a click off it, a rope base or
+    // a nucleus can't shut it; only closing it on purpose (E, Escape, leaving focus) does, and that stops extracting.
+    bool Extracting => ResourceField.Any && ResourceField.Instance && ResourceField.Instance.IsExtractingInto(Inventory);
+    bool HeldOpen => ViewOpen && Extracting;
 
     Camera ViewCamera
     {
@@ -429,12 +509,13 @@ public class VirusMovement : MonoBehaviour
     // The head view's sphere is asked directly: its click catcher is an invisible image, which the
     // EventSystem can skip (not drawn, so not hit), and a click on a strand then closed the view.
     bool PointerOverUI() => EventSystem.current && EventSystem.current.IsPointerOverGameObject()
-                            || ViewOpen && Mouse.current != null && headView.Covers(Mouse.current.position.ReadValue());
+                            || ViewOpen && Mouse.current != null && headView.Covers(Mouse.current.position.ReadValue())
+                            || NucleusOpen && Mouse.current != null && nucleusView.Covers(Mouse.current.position.ReadValue());
 
     static Vector2 ReadMove()
     {
         Vector2 v = Vector2.zero;
-        Keyboard k = Keyboard.current;
+        Keyboard k = CommandLine.Keys;
 
         if (k != null)
             v = new Vector2((k.dKey.isPressed ? 1f : 0f) - (k.aKey.isPressed ? 1f : 0f),
@@ -445,7 +526,7 @@ public class VirusMovement : MonoBehaviour
     }
 
     static bool ActionPressed() =>
-        (Keyboard.current != null && Keyboard.current.spaceKey.wasPressedThisFrame) ||
+        (CommandLine.Keys != null && CommandLine.Keys.spaceKey.wasPressedThisFrame) ||
         (Gamepad.current != null && Gamepad.current.buttonSouth.wasPressedThisFrame);
 
     // ---------------- focus ----------------
@@ -464,6 +545,7 @@ public class VirusMovement : MonoBehaviour
 
     public void ToggleFocusMode()
     {
+        if (IsFocusMode && Injecting) return; // held until the strand is in
         if (IsFocusMode || _o.InState(_o.grounded.drilling)) ExitFocusMode();
         else EnterFocusMode();
     }
@@ -483,6 +565,7 @@ public class VirusMovement : MonoBehaviour
             _o.Hold(Intent.Tether, 0f);
         }
 
+        if (wasFocus && !isFocus && headView) headView.CancelInjection(); // knocked out of focus (cell burst, seized, died)
         if (wasFocus != isFocus && ViewOpen) headView.Close(); // injecting vs loading changes: start over
         if (wasFocus && !isFocus) onFocusModeExit?.Invoke(); // reverse the screen effect before the camera moves
         RefreshButton();

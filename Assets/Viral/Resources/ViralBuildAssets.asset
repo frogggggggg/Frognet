@@ -13,6 +13,7 @@ MonoBehaviour:
   m_Name: ViralBuildAssets
   m_EditorClassIdentifier: 
   shaders:
+  - {fileID: 4800000, guid: 55d0e9362cea4496b2025a670532baae, type: 3}
   - {fileID: 4800000, guid: 4fe42934d7c7eb3439337e194841b027, type: 3}
   - {fileID: 4800000, guid: 9e0c7045d72f7434488b1aaf005cd418, type: 3}
   - {fileID: 4800000, guid: 49532895b3c235b42974c2911f4149d7, type: 3}
@@ -34,13 +35,22 @@ MonoBehaviour:
   - {fileID: 4800000, guid: 8ea863846e72c7f4ea653484d14ba539, type: 3}
   - {fileID: 4800000, guid: 1b1ad72005adbb6448fd9606b97425bc, type: 3}
   - {fileID: 4800000, guid: 5073c5d9586f7804e940bfe63f4a0d89, type: 3}
+  - {fileID: 4800000, guid: 0b68b2c1e4f347a5a290e7c9c6f1357f, type: 3}
   - {fileID: 4800000, guid: 0d44eba6a365c9141b1954828a42e83f, type: 3}
   - {fileID: 4800000, guid: 7a778cb8a7664523aa88afbc420c599a, type: 3}
   - {fileID: 4800000, guid: dc5cb830b3b94b18a0e4d9e073bcd038, type: 3}
   - {fileID: 4800000, guid: c521b829bbed4d5c81ca6f65d74a7adb, type: 3}
+  - {fileID: 4800000, guid: ec2d36a4cb324a99a265da02a4615e7b, type: 3}
+  - {fileID: 4800000, guid: 6bd5e074ebaa4c3aacafa84e97194468, type: 3}
+  - {fileID: 4800000, guid: fd0b5b2666414c578286707da85d2aaa, type: 3}
+  - {fileID: 4800000, guid: 3fe8b3144b7049e9aef385a1f92fcf17, type: 3}
   whiteBloodCellBake: {fileID: 7200000, guid: 173faba0258243deac2e0d59e6fe5d2c, type: 3}
   legSimulation: {fileID: 7200000, guid: 3d7ae7460664431dbd54648a23f8089c, type: 3}
   farField: {fileID: 7200000, guid: 20b98e4c7e3c4ecd9f989a7572589217, type: 3}
+  platelets: {fileID: 7200000, guid: 892b78b8ecce4165a2d3a9496c240eb5, type: 3}
   whiteBloodCells: {fileID: 1000000000000000001, guid: d224e2afc78f461daf1ebda30f5383ce, type: 3}
   resourceField: {fileID: 1000000000000000001, guid: f90844798d96425eb0c775977f3c18ab, type: 3}
   worldStreamer: {fileID: 1000000000000000001, guid: e9ce9516f5ef4f75aab4fe434932927c, type: 3}
+  pathogens:
+  - {fileID: 7700538085705047315, guid: e5dbf22b7b6e40fc8189d1d6c16d9128, type: 3}
+  defaultCellProfile: {fileID: 11400000, guid: f9f0fa32b97c4d229de084db8d9a7761, type: 2}

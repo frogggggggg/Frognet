@@ -76,8 +76,8 @@ public class WhiteBloodCells : MonoBehaviour
     static WhiteBloodCells s_instance;
 
     // Every cell in one buffer (near ones first, then far), two instanced draws.
-    struct Instance { public Vector4 positionRadius, rotation, reach, motion, state, sway, extra, merge, side; }
-    const int InstanceStride = 144;
+    struct Instance { public Vector4 positionRadius, rotation, reach, motion, state, sway, extra, merge, side, burst; }
+    const int InstanceStride = 160;
     Instance[] _near, _far;
     GraphicsBuffer _buffer;
     MaterialPropertyBlock _nearProps, _farProps;
@@ -277,6 +277,7 @@ public class WhiteBloodCells : MonoBehaviour
                 extra = new Vector4(1f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(lod2 * 0.5f, lod2, d2)), c.Gape, c.Squeeze, wrapSlot),
                 merge = c.MergeShape,
                 side = c.Side,
+                burst = c.BurstState,
             };
             if (d2 < lod2) _near[near++] = inst; else _far[far++] = inst;
             var b = new Bounds(pos, Vector3.one * reach * 2f);
@@ -359,6 +360,9 @@ public class WhiteBloodCells : MonoBehaviour
         if (!bake && ViralBuildAssets.Instance) bake = ViralBuildAssets.Instance.whiteBloodCellBake;
         return bake;
     }
+
+    /// <summary>The white cells' material (what a burst one's blobs look like, CellBurst).</summary>
+    public static Material Look => s_instance ? s_instance.Material() : null;
 
     Material Material()
     {

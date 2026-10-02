@@ -67,6 +67,9 @@ public class FarField : MonoBehaviour
              "chunk's substance, white cells lilac.")]
     public List<Look> looks = new List<Look>();
     public Shader shader;
+    [Tooltip("Stand-ins for prefabs with a cell material (red / white cells): Custom/FarFieldCell, the cells' own " +
+             "surface on a copy of that material. Empty: found by name.")]
+    public Shader cellShader;
     public ComputeShader cull;
 
     // ---------------- data ----------------
@@ -134,7 +137,8 @@ public class FarField : MonoBehaviour
                         StreamFadeEndId = Shader.PropertyToID("_StreamFadeEnd"),
                         FarPosedId = Shader.PropertyToID("_FarPosed"), FarVisibleId = Shader.PropertyToID("_FarVisible"),
                         GroupBaseId = Shader.PropertyToID("_FarGroupBase"), ColorId = Shader.PropertyToID("_Color"),
-                        DeepColorId = Shader.PropertyToID("_DeepColor"), RimId = Shader.PropertyToID("_Rim");
+                        DeepColorId = Shader.PropertyToID("_DeepColor"), RimId = Shader.PropertyToID("_Rim"),
+                        NoiseScaleId = Shader.PropertyToID("_NoiseScale");
 
     /// <summary>Drawing and generating (the streamer scans and generates far sectors only while this is on).</summary>
     public bool On => isActiveAndEnabled && distance > 0f && !_broken;
@@ -192,6 +196,7 @@ public class FarField : MonoBehaviour
         _streamer = WorldStreamer.Instance;
         if (!_streamer || !_streamer.Ready) return false;
         if (!shader) shader = Shader.Find("Custom/FarField");
+        if (!cellShader) cellShader = Shader.Find("Custom/FarFieldCell");
         if (!cull && ViralBuildAssets.Instance) cull = ViralBuildAssets.Instance.farField;
         if (!shader || !cull || !SystemInfo.supportsComputeShaders)
         {
@@ -331,7 +336,7 @@ public class FarField : MonoBehaviour
     // ---------------- the crossover band ----------------
 
     // Live objects the real fade has started on (their stand-ins take the dropped pixels) and loaded records
-    // waiting to spawn. Fade starts ~215 m into a ~450 m bubble, so that's ~90% of live objects every frame: their
+    // waiting to spawn. Only the last crossFadeLength (25 m) before the load edge, but the slot per live object stays: their
     // poses are read in one Burst job over WorldStreamer.LiveTransforms, one slot per live object (-1 look: not in
     // the band; the cull skips it). On the main thread it was ~0.7 ms of transform reads.
     void FillDynamic()
@@ -533,10 +538,22 @@ public class FarField : MonoBehaviour
                     look.reach = 1.15f * radius;
                 }
             }
-            look.material = new Material(shader) { name = "Far " + prefab.name, hideFlags = HideFlags.DontSave, enableInstancing = true };
-            look.material.SetColor(ColorId, color);
-            look.material.SetColor(DeepColorId, shade);
-            look.material.SetFloat(RimId, rim);
+            Material cell = CellMaterial(prefab);
+            if (cell)
+            {
+                // The real cell's look (lumps, mottle, bands, rim) on a copy of its material; a Look entry still
+                // overrides the colours.
+                look.material = new Material(cellShader) { name = "Far " + prefab.name, hideFlags = HideFlags.DontSave, enableInstancing = true };
+                look.material.CopyPropertiesFromMaterial(cell);
+                if (set != null) { look.material.SetColor(ColorId, set.color); look.material.SetColor(DeepColorId, set.shade); }
+            }
+            else
+            {
+                look.material = new Material(shader) { name = "Far " + prefab.name, hideFlags = HideFlags.DontSave, enableInstancing = true };
+                look.material.SetColor(ColorId, color);
+                look.material.SetColor(DeepColorId, shade);
+                look.material.SetFloat(RimId, rim);
+            }
             look.nearProps = new MaterialPropertyBlock();
             look.farProps = new MaterialPropertyBlock();
             _looks[i] = look;
@@ -545,6 +562,21 @@ public class FarField : MonoBehaviour
         _lookReach = new NativeArray<float>(_looks.Length, Allocator.Persistent);
         for (int i = 0; i < _looks.Length; i++) _lookReach[i] = _looks[i] != null ? _looks[i].reach : 0f;
         _posedCapacity = 0;
+    }
+
+    // The cell-family material (BloodCellCore: has _NoiseScale) a prefab is drawn with, for Custom/FarFieldCell; null
+    // for anything else. White cells' renderers are hidden (WhiteBloodCells draws them): their shared material.
+    Material CellMaterial(GameObject prefab)
+    {
+        if (!cellShader || !cellShader.isSupported) return null;
+        Material m;
+        if (prefab.GetComponent<WhiteBloodCell>()) m = WhiteBloodCells.Look;
+        else
+        {
+            Renderer r = prefab.GetComponentInChildren<Renderer>(true);
+            m = r ? r.sharedMaterial : null;
+        }
+        return m && m.HasProperty(NoiseScaleId) ? m : null;
     }
 
     static void Colours(GameObject prefab, out Color color, out Color shade, out float rim)

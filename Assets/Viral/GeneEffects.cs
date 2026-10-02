@@ -18,6 +18,8 @@ public enum GeneEffect
     /// <summary>Black tendrils creep over the cell from the injection (in the gene's colour) and it stops
     /// calling the immune system for good.</summary>
     Blight,
+    /// <summary>The cell bursts (CellBurst): swells, tears open from the injection and breaks into blobs. Loud.</summary>
+    Kill,
 }
 
 /// <summary>
@@ -46,8 +48,23 @@ public static class GeneEffects
         gene != null && (gene.targets & KindOf(body)) != GeneTarget.None;
 
     /// <summary>The gene takes effect in 'body' (one it works on), injected at 'at' (world, on its
-    /// surface, 'normal' out of it).</summary>
+    /// surface, 'normal' out of it), after the gene's own delay.</summary>
     public static void Apply(Genome.Gene gene, Transform body, Vector3 at, Vector3 normal)
+    {
+        if (!body || gene == null) return;
+        if (gene.delay > 0f) Later(gene, body, body.InverseTransformPoint(at), body.InverseTransformDirection(normal));
+        else Now(gene, body, at, normal);
+    }
+
+    // The injection point is kept in the body's space, so it rides the cell while it waits. Game time (a pause
+    // holds it); a body gone in the meantime (eaten, streamed out) is skipped.
+    static async void Later(Genome.Gene gene, Transform body, Vector3 localAt, Vector3 localNormal)
+    {
+        await Awaitable.WaitForSecondsAsync(gene.delay);
+        if (body) Now(gene, body, body.TransformPoint(localAt), body.TransformDirection(localNormal));
+    }
+
+    static void Now(Genome.Gene gene, Transform body, Vector3 at, Vector3 normal)
     {
         Surface surface = body ? body.GetComponentInParent<Surface>() : null;
         switch (gene.effect)
@@ -55,6 +72,10 @@ public static class GeneEffects
             case GeneEffect.Blight:
                 CellSignal.For(body)?.Silence();
                 if (surface) surface.Infect(at, normal, gene.color, BlightRadiusTime);
+                break;
+            case GeneEffect.Kill:
+                ImmuneSystem.Lysed(body, at, normal); // before it goes: the alarm comes from the cell
+                CellBurst.Kill(body, at);
                 break;
         }
     }

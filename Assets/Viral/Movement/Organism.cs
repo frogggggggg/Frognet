@@ -27,7 +27,7 @@ public interface IOrganismBrain
 /// effects (OrganismEffects.cs). Controllers (player, AI) only write intent.
 /// </summary>
 [RequireComponent(typeof(Rigidbody))]
-public class Organism : MonoBehaviour, ISurfaceContact
+public class Organism : MonoBehaviour, ISurfaceContact, IWorldState
 {
     [Tooltip("Optional visual child that turns. Empty: the whole object turns.")] public Transform body;
     [Tooltip("Child moved by BodyOffset. Never the root; falls back to Body.")] public Transform visual;
@@ -216,6 +216,7 @@ public class Organism : MonoBehaviour, ISurfaceContact
 
     public void Tick(float dt)
     {
+        if (_regrounding) Reground();
         Refresh();
         speed = Rb.isKinematic ? 0f : Rb.linearVelocity.magnitude;
         Run(Phase.Update, dt);
@@ -249,6 +250,51 @@ public class Organism : MonoBehaviour, ISurfaceContact
         // Dynamic root (no separate body child): rotate through physics so interpolation doesn't fight it.
         if (RotatesRoot && !Rb.isKinematic && !_externalRotation)
             Rb.MoveRotation(Quaternion.Slerp(Rb.rotation, _lean * Wanted, RotationWeight(dt)));
+    }
+
+    // ---------------- saving (IWorldState): what it stands on ----------------
+    // Streamed and saved: the surface it stands on (SaveRef) and where, in that surface's space. Put back by landing
+    // there again, once that surface exists (it may spawn after this one: retried each tick for a few seconds).
+
+    [Serializable]
+    struct SavedGround { public string on; public Vector3 point, normal; }
+
+    SavedGround _reground;
+    float _regroundUntil;
+    bool _regrounding;
+
+    string IWorldState.SaveState()
+    {
+        Surface s = OnSurface ? grounded.surface.nav.Surface : null;
+        string on = SaveRef.Of(s);
+        if (on.Length == 0) return "";
+        Transform t = s.transform;
+        Vector3 at = transform.position - up * grounded.surface.nav.hoverHeight;
+        return JsonUtility.ToJson(new SavedGround { on = on, point = t.InverseTransformPoint(at), normal = t.InverseTransformDirection(up) });
+    }
+
+    void IWorldState.LoadState(string state)
+    {
+        _reground = JsonUtility.FromJson<SavedGround>(state);
+        _regroundUntil = Time.time + 3f;
+        _regrounding = true;
+        Reground();
+    }
+
+    bool IWorldState.Pinned => false;
+
+    void Reground()
+    {
+        Surface s = SaveRef.Resolve<Surface>(_reground.on);
+        if (!s)
+        {
+            if (Time.time > _regroundUntil) _regrounding = false; // gone: it floats
+            return;
+        }
+        _regrounding = false;
+        if (OnSurface) return;
+        Transform t = s.transform;
+        grounded.surface.Land(t.TransformPoint(_reground.point), t.TransformDirection(_reground.normal).normalized, s);
     }
 
     void OnCollisionEnter(Collision c) => ForEachEffect(e => e.OnCollision(c));

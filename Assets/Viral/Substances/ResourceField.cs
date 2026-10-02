@@ -64,6 +64,8 @@ public class ResourceField : MonoBehaviour
     public Shader chunkShader;
     [Tooltip("Custom/ResourceCore.")]
     public Shader coreShader;
+    [Tooltip("Custom/ResourceCoreMotes: the lumps inside the core. Found by name when empty.")]
+    public Shader coreMotesShader;
     [Tooltip("Hidden/DustCloud, handed to DustClouds.")]
     public Shader dustShader;
 
@@ -134,8 +136,9 @@ public class ResourceField : MonoBehaviour
     // ---------------- runtime ----------------
 
     struct Instance64 { public Vector4 positionScale, rotation, tint, look; }
-    struct CoreInstance { public Vector4 positionScale, color, state; }
-    const int ChunkStride = 64, CoreStride = 48;
+    struct CoreInstance { public Vector4 positionScale, color, state, look; } // look: x SubstanceLook, y fullness
+    const int CoreLumps = 24; // ResourceCoreMotes' LUMPS
+    const int ChunkStride = 64, CoreStride = 64;
 
     static readonly int ChunksId = Shader.PropertyToID("_Chunks"), OffsetId = Shader.PropertyToID("_InstanceOffset"),
                         CoresId = Shader.PropertyToID("_Cores");
@@ -146,7 +149,7 @@ public class ResourceField : MonoBehaviour
     GraphicsBuffer _chunkBuffer, _coreBuffer;
     MaterialPropertyBlock[] _groupProps;
     MaterialPropertyBlock _coreProps;
-    Material _coreMat;
+    Material _coreMat, _coreMotesMat;
     CoreInstance[] _coreData = new CoreInstance[64];
 
     readonly List<ResourceChunk> _cores = new List<ResourceChunk>();
@@ -188,6 +191,7 @@ public class ResourceField : MonoBehaviour
         _chunkBuffer?.Release();
         _coreBuffer?.Release();
         if (_coreMat) Destroy(_coreMat);
+        if (_coreMotesMat) Destroy(_coreMotesMat);
     }
 
     /// <summary>Show the core of the chunk 'viewer' stands on this frame (call every frame while in focus mode).</summary>
@@ -228,6 +232,26 @@ public class ResourceField : MonoBehaviour
         c.Blocked = false;
         if (!_extracting.Contains(c)) _extracting.Add(c);
         Started?.Invoke(c, into);
+    }
+
+    /// <summary>Whether anything is being extracted into 'into'.</summary>
+    public bool IsExtractingInto(VirusInventory into)
+    {
+        if (!into) return false;
+        foreach (ResourceChunk c in _extracting)
+            if (c && c.Extractor == into) return true;
+        return false;
+    }
+
+    /// <summary>Stops every extraction into 'into'.</summary>
+    public void StopExtracting(VirusInventory into)
+    {
+        if (!into) return;
+        for (int i = _extracting.Count - 1; i >= 0; i--)
+        {
+            ResourceChunk c = _extracting[i];
+            if (c && c.Extractor == into) Stop(c);
+        }
     }
 
     void Stop(ResourceChunk c)
@@ -321,6 +345,9 @@ public class ResourceField : MonoBehaviour
                 Color col = c.Tint;
                 col.a = 0.85f;
                 DustClouds.Stream(from, to, side, r * Random.Range(0.18f, 0.3f), col, Random.Range(0.7f, 1.1f));
+                // and a lump of the substance itself, as it looks inside cells and the core.
+                Color lump = c.Tint;
+                DustClouds.Stream(from, to, side * 0.7f, r * Random.Range(0.09f, 0.13f), lump, Random.Range(0.8f, 1.2f), c.substance.look);
             }
             _streamOwed[c] = owed;
 
@@ -336,6 +363,7 @@ public class ResourceField : MonoBehaviour
         Color col = c.Tint;
         col.a = 0.9f;
         DustClouds.Burst(centre, c.CurrentRadius * 1.3f, col, 36);
+        DustClouds.Burst(centre, c.CurrentRadius * 0.9f, c.Tint, 14, 1.6f, c.substance.look);
         Drained?.Invoke(c, into);
         if (Hovered == c) Hovered = null;
         // Anyone standing on it is let go, drifting on with it.
@@ -396,6 +424,7 @@ public class ResourceField : MonoBehaviour
                 positionScale = new Vector4(p.x, p.y, p.z, r),
                 color = new Vector4(col.r, col.g, col.b, c.Hover),
                 state = new Vector4(c.Extracted / poofAt, c.Agitation, c.Seed, c.Blocked ? 1f : 0f),
+                look = new Vector4((float)c.substance.look, Mathf.Clamp01(1f - c.Extracted / poofAt), 0f, 0f),
             };
             if (i == 0) bounds = new Bounds(p, Vector3.one * r * 3f); else bounds.Encapsulate(new Bounds(p, Vector3.one * r * 3f));
         }
@@ -408,6 +437,17 @@ public class ResourceField : MonoBehaviour
         _coreProps.SetBuffer(CoresId, _coreBuffer);
         var rp = new RenderParams(mat) { worldBounds = bounds, matProps = _coreProps, shadowCastingMode = ShadowCastingMode.Off, receiveShadows = false };
         Graphics.RenderMeshPrimitives(rp, ChunkMesh.Ball(), 0, n);
+        // The lumps of its substance inside (the same shapes as inside cells).
+        if (!_coreMotesMat)
+        {
+            Shader ms = coreMotesShader ? coreMotesShader : Shader.Find("Custom/ResourceCoreMotes");
+            if (ms) _coreMotesMat = new Material(ms) { name = "Resource Core Motes", hideFlags = HideFlags.DontSave };
+        }
+        if (_coreMotesMat)
+        {
+            rp.material = _coreMotesMat;
+            Graphics.RenderPrimitives(rp, MeshTopology.Triangles, CoreLumps * 6, n);
+        }
     }
 
     static Color Saturated(Color c)

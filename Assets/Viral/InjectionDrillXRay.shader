@@ -40,6 +40,7 @@ Shader "Custom/InjectionDrillXRay"
             #pragma target 3.5
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "FocusSweep.hlsl"
 
             CBUFFER_START(UnityPerMaterial)
                 half4 _Color;
@@ -50,7 +51,6 @@ Shader "Custom/InjectionDrillXRay"
                 float _PulseStrength;
             CBUFFER_END
 
-            float4 _InvertSweep; // xyz world centre, w eased progress; w = 0 when not sweeping
 
             struct Attributes
             {
@@ -77,25 +77,6 @@ Shader "Custom/InjectionDrillXRay"
                 return o;
             }
 
-            // Same circle as ScreenInvertSweep / InvertSweepCover in BloodCellCore.
-            float SweepCover(float3 positionWS)
-            {
-                if (_InvertSweep.w <= 0.0) return 0.0;
-                float aspect = _ScreenParams.x / max(_ScreenParams.y, 1.0);
-                float2 scale = float2(aspect, 1.0);
-
-                float4 c = TransformWorldToHClip(_InvertSweep.xyz);
-                float2 projected = c.xy / max(abs(c.w), 1e-5);
-                float2 centre = (c.w < 0.0 ? -projected : projected) * scale;
-
-                float4 h = TransformWorldToHClip(positionWS);
-                float2 here = h.xy / max(abs(h.w), 1e-5) * scale;
-
-                float maxRadius = max(max(distance(centre, float2(-aspect, -1.0)), distance(centre, float2(aspect, -1.0))),
-                                      max(distance(centre, float2(-aspect,  1.0)), distance(centre, float2(aspect,  1.0))));
-                float radius = maxRadius * saturate(_InvertSweep.w);
-                return 1.0 - smoothstep(radius - 0.01, radius, distance(here, centre));
-            }
 
             half4 frag(Varyings i) : SV_Target
             {

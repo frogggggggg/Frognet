@@ -20,8 +20,10 @@ float _MouthGlow, _MouthWet, _MouthFolds, _MouthFoldDepth, _Lumps, _LumpScale, _
 float _Wobble, _Flow, _Lobes, _Spikes, _SpikeScale, _SpikeWidth, _SpikeSharpness, _SpikeFlow;
 float _Pull, _Flare, _Lag, _Peristalsis, _Cup, _Lip, _Tendrils, _TendrilLength, _Speed;
 
-// merge: MergeShape; side: the reach frame's x axis (world), carried along as the arm swings (WhiteBloodCell.Side)
-struct Instance { float4 positionRadius, rotation, reach, motion, state, sway, extra, merge, side; };
+// merge: MergeShape; side: the reach frame's x axis (world), carried along as the arm swings (WhiteBloodCell.Side);
+// burst: bursting (CellBurst): xyz entry point in body radii from the centre (world axes: it never turns), w start time,
+// 0 = whole (WhiteBloodCell.Burst)
+struct Instance { float4 positionRadius, rotation, reach, motion, state, sway, extra, merge, side, burst; };
 StructuredBuffer<Instance> _Cells;
 uint _InstanceOffset;
 float _LodDetail; // 1 near (ruffles and spikes in the geometry, creases per pixel), 0 far

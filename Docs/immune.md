@@ -12,6 +12,7 @@ a cell raises that cell's signal (`idleRate` / `walkRate` / `focusRate`, around 
 `halfLife`. `CellSignal.Pull` = gravity toward loud cells (strength / (1 + (d/falloff)^2)). `Silence()` (blight) stops
 it for good. Noise also raises the vessel region's alert (`Vessel.Alert`).
 - `ImmuneSystem.Alarm(cell, point, normal, signal)` raises + emits motes: **use it for new noisy actions.**
+- An infected cell (`CellInfection`, `Assets/Viral/Pathogens`) alarms itself every 0.5 s until it bursts.
 - `ImmuneSystem.Landed` (from the `LandAlarm` effect: `landSignal` x impact speed); `Deliver(cell, gene, site, normal)`
   (`Docs/head-genome.md`), wrong gene = `wrongGeneBurst`.
 
@@ -58,8 +59,13 @@ round a loud cell's hotspot while it still calls (`calling`). GPU-animated: the 
 into a ring buffer (one upload per frame); `Hidden/AlarmMote` moves them (exponential spurt + drift + wander),
 stretches along motion, throbs and fades; one `RenderPrimitives`. Emission off screen / past `drawDistance` is dropped.
 
+## Saving
+`ImmuneSystem.Capture` / `Restore` (every antibody: pose, velocity, state, prey by SaveRef, seed / agitation /
+grip / wrap / grip health; stuck ones re-`Stick` at their saved pose, settled). CellSignal is an IWorldState (signal,
+hotspot, converted; decays by `SignalHalfLife` over vessel time while stored), so it streams and saves with its cell.
+Not kept: `_ignored`, reinforcements owed.
+
 ## Open items
 - Antibodies are O(antibodies x organisms) in `Look` (every ~0.25 s) and O(antibodies x cells) in `Avoid` / `Patrolled`
   per tick; at thousands they need the spatial hash, and past that a data-only (Burst jobs) simulation instead of a
   GameObject each.
-- Not saved: antibodies, cell signals / converted cells.

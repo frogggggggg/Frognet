@@ -57,4 +57,6 @@ one column before its earliest task, columns ordered by neighbours' average heig
 crossings), nodes and board easing to their new places.
 
 ## Open items
-Groups aren't saved. Selectables only for cells present when the mode opens.
+Selectables only for cells present when the mode opens. Saved: `CommandBoard.Capture` / `Restore` (groups with members
+by SaveRef + their Selectable settings, links, chains, numbering, colours; a member without a Selectable gets one;
+`Dispatch` re-gives orders). Members that streamed out are gone (as before).

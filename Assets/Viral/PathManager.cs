@@ -43,6 +43,9 @@ public class PathManager : MonoBehaviour
 
     [Header("Field")]
     [Tooltip("Sink strength: flow speed toward the target is S/d^2. Tune against body speeds (velocity-aware compares them)")] public float sinkStrength = 1000f;
+    [Min(1f), Tooltip("Past this distance from its target an agent's pull stays as strong as here (the field is scaled per query, so it stays trap-free). " +
+                      "Without it the pull fell off as 1/d^2 and any moving body swamped it: far agents drifted round cells instead of coming.")]
+    public float sinkReach = 20f;
     [Tooltip("Sphere safety radius = radius * this + agentRadius")] public float safety = 1.3f;
     [Tooltip("Radius of your agents; added to every sphere so a whole agent fits through the margin")] public float agentRadius = 0.5f;
     [Tooltip("Moving bodies push agents away (uses rigidbody velocity)")] public bool velocityAware = true;
@@ -290,25 +293,30 @@ public class PathManager : MonoBehaviour
     static long Pack(int x, int y, int z) => ((long)(x & 0x1FFFFF) << 42) | ((long)(y & 0x1FFFFF) << 21) | (long)(z & 0x1FFFFF);
     int Bucket(long k) => (int)(((ulong)k * 0x9E3779B97F4A7C15UL) >> 40) & mask;   // hash collisions are harmless: candidates are re-checked by key and distance
 
-    Vector3 Sink(Vector3 d) { float m = d.sqrMagnitude + 1e-6f; return -sinkStrength * d / (m * Mathf.Sqrt(m)); }
+    static Vector3 Sink(Vector3 d, float s) { float m = d.sqrMagnitude + 1e-6f; return -s * d / (m * Mathf.Sqrt(m)); }
 
     /// <summary>Raw (unnormalized) field velocity at a point for a given target. Thread-safe between physics steps.
-    /// ignoreA/ignoreB: PathManager.Id(...) of bodies to treat as non-obstacles for this query (yourself, the thing you want to hit).</summary>
-    public Vector3 GetField(Vector3 x, Vector3 target, int ignoreA = 0, int ignoreB = 0)
+    /// ignoreA/B/C: PathManager.Id(...) of bodies to treat as non-obstacles for this query (yourself, the thing you want to hit,
+    /// the cell it sits on). frame: the velocity the agent moves relative to (its blood flow, Organism.Fluid). Bodies drifting with the same blood
+    /// aren't coming at it; in world space the sheared flow made every cell far from the player look like a fast mover.</summary>
+    public Vector3 GetField(Vector3 x, Vector3 target, int ignoreA = 0, int ignoreB = 0, int ignoreC = 0, Vector3 frame = default)
     {
         Ensure();
-        Vector3 V = Sink(x - target), eject = Vector3.zero, nGuard = Vector3.zero; bool hit = false; float guard = 0f, invW0 = 1f / (1f - 1f / (cutoff * cutoff));
+        // One scale for every sink term of this query keeps the field harmonic (trap-free); it only sets how the pull
+        // compares with body velocities, which is the point: never weaker than at sinkReach.
+        float s = sinkStrength * Mathf.Max(1f, (x - target).sqrMagnitude / (sinkReach * sinkReach));
+        Vector3 V = Sink(x - target, s), eject = Vector3.zero, nGuard = Vector3.zero; bool hit = false; float guard = 0f, invW0 = 1f / (1f - 1f / (cutoff * cutoff));
         int cx = Mathf.FloorToInt(x.x * inv), cy = Mathf.FloorToInt(x.y * inv), cz = Mathf.FloorToInt(x.z * inv);
         for (int dx = -1; dx <= 1; dx++) for (int dy = -1; dy <= 1; dy++) for (int dz = -1; dz <= 1; dz++)
         {
             long k = Pack(cx + dx, cy + dy, cz + dz); int b = Bucket(k);
             for (int j = start[b], j1 = start[b + 1]; j < j1; j++)
             {
-                int i = order[j]; if (key[i] != k || grp[i] == ignoreA || grp[i] == ignoreB) continue;
+                int i = order[j]; if (key[i] != k || grp[i] == ignoreA || grp[i] == ignoreB || grp[i] == ignoreC) continue;
                 Vector3 d = x - p[i]; float r2 = d.sqrMagnitude, ei = e[i];
                 if (r2 < ei * ei) { eject += d / Mathf.Sqrt(r2 + 1e-9f); hit = true; continue; }   // solid interior: push outward
                 float D2 = cutoff * cutoff * ei * ei; if (r2 > D2) continue;
-                Vector3 U = Sink(p[i] - target) - u[i];                                              // flow the sphere sees relative to itself
+                Vector3 U = Sink(p[i] - target, s) - (u[i] - frame);                                              // flow the sphere sees relative to itself
                 float r = Mathf.Sqrt(r2), i3 = 1f / (r2 * r), w = (1f - r2 / D2) * invW0;             // w: smooth fade to zero at the cutoff, exactly 1 on the surface (keeps zero flux there)
                 V += w * w * 0.5f * ei * ei * ei * i3 * (U - 3f * Vector3.Dot(U, d) / r2 * d);       // doublet: (e^3/2)[U/r^3 - 3(U.d)d/r^5]
                 float g = (guardBand * ei - r) / ((guardBand - 1f) * ei);                            // 1 on the surface -> 0 at the edge of the guard band
@@ -321,9 +329,10 @@ public class PathManager : MonoBehaviour
     }
 
     /// <summary>Unit direction an agent at agentPosition should move to reach targetPosition around all obstacles.</summary>
-    public Vector3 GetDirection(Vector3 agentPosition, Vector3 targetPosition, int ignoreA = 0, int ignoreB = 0)
+    public Vector3 GetDirection(Vector3 agentPosition, Vector3 targetPosition, int ignoreA = 0, int ignoreB = 0, int ignoreC = 0,
+                                Vector3 frame = default)
     {
-        Vector3 v = GetField(agentPosition, targetPosition, ignoreA, ignoreB); float m = v.magnitude;
+        Vector3 v = GetField(agentPosition, targetPosition, ignoreA, ignoreB, ignoreC, frame); float m = v.magnitude;
         return m > 1e-8f ? v / m : Vector3.zero;
     }
 

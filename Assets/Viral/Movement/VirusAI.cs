@@ -404,14 +404,14 @@ public class VirusAI : MonoBehaviour, IOrganismBrain, ICommandable
 
     static Vector3Int Key(Vector3 p) => Vector3Int.FloorToInt(p / s_gridSize);
 
-    // Through the flow field toward a point, easing off before 'stop'.
-    Vector3 AirMove(Vector3 pos, Vector3 goal, float stop, int ignore)
+    // Through the flow field toward a point, easing off before 'stop'. ignore/ignore2: bodies that aren't obstacles.
+    Vector3 AirMove(Vector3 pos, Vector3 goal, float stop, int ignore, int ignore2 = 0)
     {
         float dist = Vector3.Distance(pos, goal);
         if (dist <= stop) return Vector3.zero;
 
         Vector3 dir = PathManager.I
-            ? PathManager.I.GetDirection(pos, goal, _selfId, ignore)
+            ? PathManager.I.GetDirection(pos, goal, _selfId, ignore, ignore2, _o.Fluid)
             : (goal - pos) / dist;
 
         return dir * Mathf.Clamp01((dist - stop) / slowDownDistance);
@@ -446,7 +446,9 @@ public class VirusAI : MonoBehaviour, IOrganismBrain, ICommandable
             goal = b.center + (up.sqrMagnitude > 1e-6f ? up.normalized : Vector3.up) * radius;
         }
 
-        return AirMove(pos, goal, 0f, _cellId);
+        // The creature on it isn't an obstacle either: the goal (the surface under it) is inside its bubble, so the
+        // virus skimmed round that bubble instead of landing.
+        return AirMove(pos, goal, 0f, _cellId, _chase ? _goalId : 0);
     }
 
     static bool SameBody(Transform a, Transform b)

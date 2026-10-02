@@ -75,6 +75,27 @@ public partial class Surface : MonoBehaviour
     public SurfaceMap Map => _map ??= SurfaceMap.For(Mesh);
     SurfaceMap _map;
 
+    /// <summary>Every enabled Surface (cells, chunks, bodies): the command line's "all" reads it. Swap-removed.</summary>
+    public static readonly List<Surface> All = new List<Surface>();
+    int _allIndex = -1;
+
+    void OnEnable()
+    {
+        _allIndex = All.Count;
+        All.Add(this);
+    }
+
+    void OnDisable()
+    {
+        if (_allIndex < 0 || _allIndex >= All.Count || All[_allIndex] != this) _allIndex = All.IndexOf(this); // after a script reload
+        if (_allIndex < 0) return;
+        Surface last = All[All.Count - 1];
+        All[_allIndex] = last;
+        last._allIndex = _allIndex;
+        All.RemoveAt(All.Count - 1);
+        _allIndex = -1;
+    }
+
     static readonly Dictionary<Transform, Surface> BySpace = new Dictionary<Transform, Surface>();
     Transform _listedAs;
 

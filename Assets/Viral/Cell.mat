@@ -155,6 +155,7 @@ Material:
     - _LightAzimuth: 230
     - _LightBands: 2
     - _LightElevation: 65
+    - _FarTone: 0.7
     - _Max: 1
     - _Metallic: 0
     - _Min: 1

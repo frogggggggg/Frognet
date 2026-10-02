@@ -40,14 +40,17 @@ notes (not this file), tersely: facts, rules, costs, and "don't do X (why)"; no 
 | `Surface.cs`, `Surface.Collider.cs`, `Surface.Ripples.cs`, `SurfaceMap.*`, `RippleField.*`, `PathManager.cs` | `Docs/surfaces.md` |
 | `BloodCellCore/Forward.hlsl`, `BloodCellTriplanar.shader`, `ScreenInvert*`, `TransparentDepthForPost*`, `AstrophageCrystalTop`, `SkyboxCache`, `StylizedCellSky*`, `AmbientParticles`, `HoloMap*` | `Docs/rendering.md` |
 | `VirusRope.cs`, `RopeBlood.*`, `RopeRadialMenu.cs` | `Docs/rope.md` |
-| `Genome`, `GenomeView`, `GenomeBubble/Strand.shader`, `VirusHead`, `FlatMesh`, `GeneEffects`, `Surface.Tendrils.cs`, `CellTendrils.hlsl`, `InjectionDrill*`, `Substances/Crafting.cs` | `Docs/head-genome.md` |
+| `Genome`, `GenomeView`, `GenomeBubble/Strand.shader`, `VirusHead`, `FlatMesh`, `GeneEffects`, `Surface.Tendrils.cs`, `CellTendrils.hlsl`, `CellBurst.*`, `CellShards`, `CellDebris.shader`, `InjectionDrill*`, `Substances/Crafting.cs` | `Docs/head-genome.md` |
 | `CommandMode`, `CommandBoard`, `Selectable` | `Docs/command-mode.md` |
 | `ImmuneSystem`, `CellSignal`, `Antibody*`, `AntibodyHold`, `AntibodyMesh`, `BodyHull`, `AlarmMote*` | `Docs/immune.md` |
 | `WhiteBloodCell*`, `ShrinkWrap*` | `Docs/white-blood-cells.md` |
 | `UniversalCamera`, `TerminalUI`, `WorldButton`, `ControlsHint` | `Docs/camera-ui.md` |
-| `Assets/Viral/Substances/*`: chunks, ResourceField, DustClouds, VirusInventory, InventoryView | `Assets/Viral/Substances/CLAUDE.md` (auto) |
+| `Assets/Viral/Substances/*`: chunks, ResourceField, DustClouds, VirusInventory, InventoryView, SubstanceStore | `Assets/Viral/Substances/CLAUDE.md` (auto) |
+| `Assets/Viral/Cells/*`: CellInterior (organelles, stores, metabolism), CellProfile, OrganelleType, CellInteriorView, CellReadout, NucleusView | `Assets/Viral/Cells/CLAUDE.md` (auto) |
 | `Assets/Viral/World/*`: streaming, StreamFade, FarField, Vessel, SaveGame, PauseMenu; `Assets/SpawnManager.cs` | `Assets/Viral/World/CLAUDE.md` (auto) |
 | `Assets/Viral/Audio/*`: every sound + the music | `Assets/Viral/Audio/CLAUDE.md` (auto) |
+| `Assets/Viral/Console/*`: CommandLine (the / console), Cmd language, CmdWorld | `Assets/Viral/Console/CLAUDE.md` (auto) |
+| `Assets/Viral/Pathogens/*`: wild viruses (RoundVirusAI), CellInfection, population limits | `Assets/Viral/Pathogens/CLAUDE.md` (auto) |
 
 ## Verifying changes without Unity
 
@@ -109,6 +112,7 @@ Unity is usually open on this project, so a second Editor instance can't be laun
   move every frame while on screen; see the World notes.
 - **Noise:** new noisy player actions go through `ImmuneSystem.Alarm(cell, point, normal, signal)`.
 - **UI screens** use `TerminalUI` (palette, sprites, font, `Typed`).
+- **Keyboard shortcuts** read `CommandLine.Keys` (null while the command line has the keys), not `Keyboard.current`.
 - **Meshes** used by Surface / SurfaceMap / VirusHead / BodyHull need Read/Write.
 
 ## Gotchas

@@ -78,7 +78,7 @@ half3 CellShade(float3 positionWS, float4 positionHCS, float3 p, float3 geoNorma
 
     // Ridges read as thicker haemoglobin, valleys as thinner.
     // Uniform branch, so ColorSteps = 1 costs nothing.
-    float hAlbedo = h;
+    float hAlbedo = saturate(h + FarTone(PixelMetres(positionWS)));
     if (_ColorSteps > 1.0)
         hAlbedo = QuantizeBand(h, _ColorSteps, _BandSoftness);
 
@@ -138,6 +138,7 @@ half4 frag(Varyings input, FRONT_FACE_TYPE face : FRONT_FACE_SEMANTIC) : SV_Targ
     InvertSweepClip(input.positionWS, IS_FRONT_VFACE(face, true, false));
 #endif
     STREAM_FADE_OBJECT(input.positionHCS);
+    BURST_CLIP(input.positionWS);
     // Flip for back faces so Cull Off / Front light correctly.
     float3 geoNormal = normalize(input.normalWS) * IS_FRONT_VFACE(face, 1.0, -1.0);
 

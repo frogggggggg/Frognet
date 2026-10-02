@@ -16,10 +16,16 @@ public class ViralBuildAssets : ScriptableObject
     public ComputeShader legSimulation;
     [Tooltip("FarField.compute: culls the far field's stand-ins (World/FarField).")]
     public ComputeShader farField;
+    [Tooltip("Platelets.compute: places and culls the platelets (World/Platelets).")]
+    public ComputeShader platelets;
     public GameObject whiteBloodCells;
     public GameObject resourceField;
     [Tooltip("Spawned into a game scene that has no WorldStreamer. Empty: the scene's own spawners build the world.")]
     public GameObject worldStreamer;
+    [Tooltip("Pathogen prefabs a cell bursts out (CellInfection), found by name when no WorldStreamer spawns them.")]
+    public GameObject[] pathogens;
+    [Tooltip("What a cell without its own CellInterior profile is made of (hand-placed cells).")]
+    public CellProfile defaultCellProfile;
 
     static ViralBuildAssets s_instance;
     public static ViralBuildAssets Instance => s_instance ? s_instance : s_instance = Resources.Load<ViralBuildAssets>("ViralBuildAssets");

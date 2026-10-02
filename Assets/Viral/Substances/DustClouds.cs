@@ -4,7 +4,8 @@ using UnityEngine.Rendering;
 /// <summary>
 /// Soft coloured dust for anything: <see cref="Burst"/> (a cloud puffing out from a point and
 /// settling, e.g. a chunk poofing away) and <see cref="Stream"/> (a puff drawn along a curve into a
-/// target, e.g. a substance flowing into the virus being extracted).
+/// target, e.g. a substance flowing into the virus being extracted). Either can be plain dust or lumps of a
+/// substance (its <see cref="SubstanceLook"/>: the same shapes as inside cells).
 ///
 /// Every puff's motion is analytic (Hidden/DustCloud works out where it is from its birth time), so
 /// the CPU never touches a live puff: it writes new ones into a ring buffer (a partial upload of just
@@ -20,9 +21,9 @@ public class DustClouds : MonoBehaviour
     public Shader shader;
 
     // a: origin + size, b: velocity (burst) or bend point (stream) + kind, c: drift (burst) or target
-    // (stream) + drag, colour, time: birth, life, seed, growth.
-    struct Puff { public Vector4 a, b, c, color, time; }
-    const int Stride = 80;
+    // (stream) + drag, colour, time: birth, life, seed, growth, look: x SubstanceLook + 1 (0 = dust).
+    struct Puff { public Vector4 a, b, c, color, time, look; }
+    const int Stride = 96;
 
     Puff[] _puffs;
     int _next, _used, _dirtyFrom = -1, _dirtyCount;
@@ -46,8 +47,9 @@ public class DustClouds : MonoBehaviour
     }
 
     /// <summary>A cloud of 'count' puffs bursting out from 'centre' to about 'radius' and drifting apart.</summary>
-    public static void Burst(Vector3 centre, float radius, Color color, int count, float life = 2.2f)
+    public static void Burst(Vector3 centre, float radius, Color color, int count, float life = 2.2f, SubstanceLook? look = null)
     {
+        float kind = look.HasValue ? (float)look.Value + 1f : 0f;
         DustClouds d = Instance;
         for (int i = 0; i < count; i++)
         {
@@ -57,18 +59,19 @@ public class DustClouds : MonoBehaviour
             c.a = color.a * Random.Range(0.55f, 0.95f);
             d.Add(new Puff
             {
-                a = Pack(centre + dir * radius * Random.Range(0f, 0.5f), radius * Random.Range(0.35f, 0.65f)),
+                a = Pack(centre + dir * radius * Random.Range(0f, 0.5f), radius * (look.HasValue ? Random.Range(0.1f, 0.16f) : Random.Range(0.35f, 0.65f))),
                 b = Pack(dir * speed, 0f),
                 c = Pack(Random.insideUnitSphere * radius * 0.08f + Vector3.up * radius * 0.05f, drag),
                 color = c,
-                time = new Vector4(Time.time + Random.Range(0f, 0.08f), life * Random.Range(0.7f, 1.2f), Random.value, 2.2f),
+                time = new Vector4(Time.time + Random.Range(0f, 0.08f), life * Random.Range(0.7f, 1.2f), Random.value, look.HasValue ? 0.2f : 2.2f),
+                look = new Vector4(kind, 0f, 0f, 0f),
             });
         }
     }
 
     /// <summary>One puff drawn from 'from' into 'to' over 'life' seconds, bowing out along 'bend'
-    /// (a world offset at the middle of the way), shrinking as it arrives.</summary>
-    public static void Stream(Vector3 from, Vector3 to, Vector3 bend, float size, Color color, float life)
+    /// (a world offset at the middle of the way), shrinking as it arrives. With a look: a lump of that substance.</summary>
+    public static void Stream(Vector3 from, Vector3 to, Vector3 bend, float size, Color color, float life, SubstanceLook? look = null)
     {
         Instance.Add(new Puff
         {
@@ -77,6 +80,7 @@ public class DustClouds : MonoBehaviour
             c = Pack(to, 0f),
             color = color,
             time = new Vector4(Time.time, life, Random.value, 0.3f),
+            look = new Vector4(look.HasValue ? (float)look.Value + 1f : 0f, 0f, 0f, 0f),
         });
     }
 

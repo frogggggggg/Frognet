@@ -122,7 +122,7 @@ public class PerfOverlay : MonoBehaviour
 
     void Update()
     {
-        Keyboard k = Keyboard.current;
+        Keyboard k = CommandLine.Keys; // not while typing ("pos" would toggle it)
         if (k != null)
         {
             if (k[toggleKey].wasPressedThisFrame) _canvas.enabled = !_canvas.enabled;

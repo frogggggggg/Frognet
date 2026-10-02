@@ -24,6 +24,8 @@ public class Genome : MonoBehaviour
         public GeneTarget targets = GeneTarget.RedBloodCell;
         [Tooltip("What it does to what it works on (GeneEffects).")]
         public GeneEffect effect;
+        [Min(0f), Tooltip("Seconds after the injection before it takes effect (the alarm of a wrong gene is at once).")]
+        public float delay;
     }
 
     [Tooltip("Strands carried. None to start with: they're made in the head view's synthesizer (Crafting).")]

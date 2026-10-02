@@ -12,6 +12,7 @@ GameObject:
   - component: {fileID: 1000000000000000003}
   - component: {fileID: 1000000000000000004}
   - component: {fileID: 1000000000000000005}
+  - component: {fileID: 1000000000000000006}
   m_Layer: 0
   m_Name: WorldStreamer
   m_TagString: Untagged
@@ -114,6 +115,22 @@ MonoBehaviour:
     anchor: 0
     nearAnchors: 0.5
     anchorHeight: {x: 2, y: 6}
+  - name: Round viruses
+    role: 0
+    prefabs:
+    - prefab: {fileID: 7700538085705047315, guid: e5dbf22b7b6e40fc8189d1d6c16d9128, type: 3}
+      weight: 1
+    perSector: {x: 0, y: 0.6}
+    followDensity: 1
+    sizing: 0
+    size: {x: 1, y: 1}
+    sizeSkew: 1
+    randomRotation: 1
+    massWithSize: 0
+    spacing: 3
+    anchor: 0
+    nearAnchors: 0.6
+    anchorHeight: {x: 2, y: 10}
   catalog: []
   sectorSize: 200
   loadDistance: 350
@@ -156,3 +173,17 @@ MonoBehaviour:
   m_EditorClassIdentifier:
   shader: {fileID: 4800000, guid: c521b829bbed4d5c81ca6f65d74a7adb, type: 3}
   cull: {fileID: 7200000, guid: 20b98e4c7e3c4ecd9f989a7572589217, type: 3}
+--- !u!114 &1000000000000000006
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1000000000000000001}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 668fb450d8e44b4d8e8bd7bf850524ea, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+  shader: {fileID: 4800000, guid: 3fe8b3144b7049e9aef385a1f92fcf17, type: 3}
+  place: {fileID: 7200000, guid: 892b78b8ecce4165a2d3a9496c240eb5, type: 3}

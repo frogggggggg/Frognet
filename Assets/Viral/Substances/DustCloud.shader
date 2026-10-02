@@ -2,6 +2,8 @@
 // (no mesh). Each puff's motion is worked out here from its birth time, so the CPU never updates it:
 // - burst (kind 0): out from its origin at its velocity, slowed by drag, drifting on, swelling;
 // - stream (kind 1): along a quadratic curve (origin -> bend -> target), eased, shrinking as it arrives.
+// A puff with a look (look.x > 0) is a lump of that substance instead of dust (Substances/SubstanceLook.hlsl: the
+// same shapes as inside cells), e.g. what flows out of a resource blob into the virus.
 // Drawn in the Overlay queue, after the focus sweep, so extraction shows in focus mode; still depth
 // tested, and faded against the scene's depth so puffs don't cut hard into what they touch.
 Shader "Hidden/DustCloud"
@@ -15,7 +17,7 @@ Shader "Hidden/DustCloud"
             Name "DustCloud"
             Tags { "LightMode" = "SRPDefaultUnlit" }
 
-            Blend SrcAlpha OneMinusSrcAlpha
+            Blend One OneMinusSrcAlpha // premultiplied (sparks add)
             ZWrite Off
             ZTest LEqual
             Cull Off
@@ -27,8 +29,9 @@ Shader "Hidden/DustCloud"
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+            #include "SubstanceLook.hlsl"
 
-            struct Puff { float4 a, b, c, color, time; };
+            struct Puff { float4 a, b, c, color, time, look; };
             StructuredBuffer<Puff> _DustPuffs;
 
             struct Varyings
@@ -39,6 +42,7 @@ Shader "Hidden/DustCloud"
                 float2 data       : TEXCOORD2; // seed, age 0..1
                 float4 screen     : TEXCOORD3;
                 float  eyeDepth   : TEXCOORD4;
+                float  look       : TEXCOORD5; // SubstanceLook + 1, 0 dust
             };
 
             static const float2 Corners[6] = { float2(-1, -1), float2(1, -1), float2(1, 1), float2(-1, -1), float2(1, 1), float2(-1, 1) };
@@ -71,14 +75,15 @@ Shader "Hidden/DustCloud"
                     alpha = saturate(t / 0.12) * saturate((1.0 - k) / 0.15);
                 }
 
-                // Turned by its seed so the lumps differ puff to puff.
-                float ang = p.time.z * 6.2831853 + t * (p.time.z - 0.5);
+                // Turned by its seed so the lumps differ puff to puff (a substance's look turns itself).
+                float ang = p.look.x > 0.5 ? 0.0 : p.time.z * 6.2831853 + t * (p.time.z - 0.5);
                 float2 r = float2(c.x * cos(ang) - c.y * sin(ang), c.x * sin(ang) + c.y * cos(ang));
                 float3 view = TransformWorldToView(pos) + float3(r * size, 0);
                 o.positionCS = TransformWViewToHClip(view);
                 o.q = c;
                 o.color = float4(p.color.rgb, p.color.a * alpha);
                 o.data = float2(p.time.z, k);
+                o.look = p.look.x;
                 o.screen = ComputeScreenPos(o.positionCS);
                 o.eyeDepth = -view.z;
                 return o;
@@ -110,6 +115,9 @@ Shader "Hidden/DustCloud"
             {
                 float r = length(i.q);
                 if (r >= 1.0) discard;
+                float2 uv = i.screen.xy / i.screen.w;
+                float depthFade = saturate((SceneEye(SampleSceneDepth(uv)) - i.eyeDepth) / 0.8);
+                if (i.look > 0.5) return SubstanceMote(i.look - 1.0, i.q, i.data.x, i.color.rgb, i.color.a * depthFade, _Time.y);
 
                 // A soft ball roughed up by drifting noise, thinning as it ages.
                 float2 p = i.q * 2.0 + i.data.x * 17.0 + float2(0, _Time.y * 0.2);
@@ -117,11 +125,10 @@ Shader "Hidden/DustCloud"
                 float soft = saturate(1.0 - r);
                 float a = soft * soft * saturate(n * 1.5 - 0.2 + (1.0 - i.data.y) * 0.35);
 
-                float2 uv = i.screen.xy / i.screen.w;
-                a *= saturate((SceneEye(SampleSceneDepth(uv)) - i.eyeDepth) / 0.8);
+                a *= depthFade * i.color.a;
 
                 float3 col = i.color.rgb * (0.75 + 0.45 * soft); // a brighter heart
-                return half4(col, i.color.a * a);
+                return half4(col * a, a);
             }
             ENDHLSL
         }

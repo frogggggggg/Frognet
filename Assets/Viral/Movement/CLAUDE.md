@@ -21,6 +21,8 @@ cameras, UI.
   used stays within maxAngle of `TargetRotation` (`Wanted`).
 - `keepUpright`, `Face(dir)`, `Rotate(t)`, `SetExternalRotation(bool)` (rope torque), `BodyOffset` (visual lift along
   `up`), `Shown` (the turned, leaned, lifted visual), `Fluid` (blood flow velocity, set each FixedTick; see World).
+- `IWorldState`: saves the surface it stands on (SaveRef + surface-local point / normal); `LoadState` re-lands it via
+  `Ground.Land`, retried in `Tick` for 3 s until that surface exists. Streamed AI viruses keep their footing too.
 - Awake forces `ContinuousSpeculative` collision: a dash (30 m/s = 0.6 m a step) went through thin parts of cells.
   Don't use Continuous / ContinuousDynamic (they only sweep against static / CCD bodies; cells are dynamic; kinematic
   bodies warn). Cost: broadphase bounds grow by velocity x dt, contacts generated a little early; no extra sweeps.
@@ -60,18 +62,25 @@ Player controller only: input -> intent, camera modes, WorldButton, focus, rope 
 in focus mode.
 - **F** held on a surface = the WorldButton's hold (input action `Player/Inject` in `virus.inputactions`) -> focus;
   F pressed in focus leaves it (`focusKey`). **E** toggles the head view (`inventoryKey`, on press). Escape exits focus
-  only when the rope menu is closed (`ClaimsEscape` for the pause menu).
+  only when the rope menu is closed (`ClaimsEscape` for the pause menu). **Space / South** in focus exits and jumps in
+  one press (Jumping outranks Grounded; `OnStateChanged` drops the focus hold and closes the head view, which stops
+  extraction).
 - WorldButton details: `Docs/camera-ui.md`. The scene's old world-space visual (`visualRoot`) is switched off.
 - Ground movement is screen-relative using the camera's right projected on the surface (NOT
   `Cross(normal, forward)`, which flips on the far side).
 - Rope controls: `Docs/rope.md`. Head click (`headPickRadius` or its on-screen size; a rope base wins) opens
-  GenomeView. `UpdateCores` shows chunk cores in focus. `PointerOverUI` also checks `GenomeView.Covers`.
+  GenomeView. `UpdateCores` shows chunk cores in focus.
+  **Extracting holds the head view open** (`HeldOpen`: click-off, rope bases and nucleus clicks can't close it); any
+  close (E, Escape, leaving focus) stops every extraction into the inventory (checked once a frame in `Update`).
+  `UpdateCell` shows the insides of the cell stood on (CellInteriorView), its stats under it (`CellReadout`) and opens `NucleusView` on a nucleus click (`Assets/Viral/Cells/CLAUDE.md`). `PointerOverUI` also checks `GenomeView.Covers`.
+- **Injecting** (`headView.Injecting`) in focus: all input skipped (can't leave / jump / click) until the strand is in;
+  a forced exit from focus cancels it (`Docs/head-genome.md`).
 - Drops its mouse handling while `CommandMode.Active`; returns early while `PauseMenu.IsOpen`.
 
 ## VirusAI (`VirusAI.cs`)
 Autonomous viruses, same intent interface. Chases a target (the player by default):
 - Flying -> `PathManager` field. Target on a cell -> fly at the surface point under it with that cell *excluded* from
-  the field (so it lands instead of avoiding), then crawl the shortest way round via `SurfaceField` (straight at it
+  the field, and the creature on it too (the goal is inside its bubble: it skimmed round it and never landed), then crawl the shortest way round via `SurfaceField` (straight at it
   once in the goal's triangle or the next). Wrong cell -> jump off. (Crawling doesn't use PathManager: the projected
   chord got trapped on cubes and concave shapes.)
 - Crowds (shared spatial hash; 3D in air, along the surface on a shared cell): overlaps are *distances* eased apart

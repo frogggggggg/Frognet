@@ -62,6 +62,7 @@ Shader "Custom/WhiteBloodCell"
         _DetailFadeStart ("Fine Detail Fade Start", Float) = 20
         _DetailFadeEnd ("Fine Detail Fade End", Float) = 100
         _DistantTextureDetailMultiplier ("Distant Texture Detail Multiplier", Range(0,1)) = 0.15
+        _FarTone ("Far Tone (colour the lumps fade to; 0 = off)", Range(0,1)) = 0
         _DistantDetail ("Distant Fine Detail", Range(0,1)) = 0.32
         _DistantBumpMultiplier ("Distant Bump Multiplier", Range(0,1)) = 0.24
 
@@ -137,6 +138,7 @@ Shader "Custom/WhiteBloodCell"
         #include "ShrinkWrap.hlsl"       // the catch's real shape (ShrinkWrap.cs), for the lips to wrap round
 
         #include "WhiteBloodCell.hlsl"   // the shape: shared with WhiteBloodCellBake.compute
+        #include "CellBurst.hlsl"        // bursting (CellBurst.cs): swell, blebs, then hidden
 
         struct Attributes
         {
@@ -152,7 +154,8 @@ Shader "Custom/WhiteBloodCell"
         uint _BakedStride; // vertices per instance
         float _UseBaked;
 
-        struct Surfel { float3 positionWS, normalWS, mapPos; float4 mapTip; float lump, mouth, tendril; };
+        // burstQ: bursting, the point in body radii from the centre + seconds since (w -1 = whole); burstEntry: entry + seed.
+        struct Surfel { float3 positionWS, normalWS, mapPos; float4 mapTip; float lump, mouth, tendril; float4 burstQ, burstEntry; };
 
         float3 Place(Instance inst, Frame f, float3 p) { return inst.positionRadius.xyz + ToWorld(f, p) * inst.positionRadius.w; }
 
@@ -206,9 +209,27 @@ Shader "Custom/WhiteBloodCell"
                 o.mapTip = float4(mapTip.xyz * inst.positionRadius.w, mapTip.w);
             }
             Ride(p, n);
+
+            // Bursting (CellBurst): swells and blisters (after the bake: it only lasts a moment); hidden per pixel.
+            Instance cell = _Cells[_InstanceOffset + v.instanceID];
+            o.burstQ = float4(0.0, 0.0, 0.0, -1.0);
+            o.burstEntry = float4(cell.burst.xyz, cell.motion.w);
+            if (cell.burst.w > 0.0)
+            {
+                float R = max(cell.positionRadius.w, 1e-3), age = _Time.y - cell.burst.w;
+                float3 q = (p - cell.positionRadius.xyz) / R;
+                p += n * BurstSwell(q, age, cell.burst.xyz, cell.motion.w) * R;
+                o.burstQ = float4(q, age);
+            }
             o.positionWS = p;
             o.normalWS = n;
             return o;
+        }
+
+        // Fragment: hidden once its broken copy (CellDebris) takes over (every pass alike).
+        void WbcBurst(float4 q, float4 entry)
+        {
+            if (q.w >= 0.0) clip(BurstCover(q.w));
         }
 
         float Fade(Attributes v) { return StreamFade(_Cells[_InstanceOffset + v.instanceID].positionRadius.xyz); }
@@ -244,6 +265,8 @@ Shader "Custom/WhiteBloodCell"
                 nointerpolation uint id : TEXCOORD5;
                 float4 mapTip     : TEXCOORD6; // the tip's material map, w = its share
                 nointerpolation float fade : TEXCOORD7;
+                float4 burstQ     : TEXCOORD8;
+                nointerpolation float4 burstEntry : TEXCOORD9;
             };
 
             WhiteVaryings vert(Attributes v)
@@ -260,6 +283,8 @@ Shader "Custom/WhiteBloodCell"
                 o.id = _InstanceOffset + v.instanceID;
                 o.fade = Fade(v);
                 o.positionCS = StreamFadeHide(o.positionCS, o.fade);
+                o.burstQ = s.burstQ;
+                o.burstEntry = s.burstEntry;
                 return o;
             }
 
@@ -333,6 +358,7 @@ Shader "Custom/WhiteBloodCell"
             half4 WhiteFrag(WhiteVaryings i) : SV_Target
             {
                 StreamFadeClip(i.fade, i.positionCS.xy);
+                WbcBurst(i.burstQ, i.burstEntry);
                 Instance inst = _Cells[i.id];
                 float seed = inst.motion.w, hunger = inst.state.x, R = max(inst.positionRadius.w, 1e-3);
                 float crest = saturate(i.marks.x), mouth = saturate(i.marks.y), tendril = saturate(i.marks.z);
@@ -424,16 +450,25 @@ Shader "Custom/WhiteBloodCell"
             #pragma vertex vert
             #pragma fragment frag
             #pragma target 4.5
-            struct Varyings { float4 positionCS : SV_POSITION; nointerpolation float fade : TEXCOORD0; };
+            struct Varyings
+            {
+                float4 positionCS : SV_POSITION;
+                nointerpolation float fade : TEXCOORD0;
+                float4 burstQ : TEXCOORD1;
+                nointerpolation float4 burstEntry : TEXCOORD2;
+            };
 
             Varyings vert(Attributes v)
             {
+                Surfel s = Evaluate(v);
                 Varyings o;
                 o.fade = Fade(v);
-                o.positionCS = StreamFadeHide(TransformWorldToHClip(Evaluate(v).positionWS), o.fade);
+                o.positionCS = StreamFadeHide(TransformWorldToHClip(s.positionWS), o.fade);
+                o.burstQ = s.burstQ;
+                o.burstEntry = s.burstEntry;
                 return o;
             }
-            half4 frag(Varyings i) : SV_Target { StreamFadeClip(i.fade, i.positionCS.xy); return 0; }
+            half4 frag(Varyings i) : SV_Target { StreamFadeClip(i.fade, i.positionCS.xy); WbcBurst(i.burstQ, i.burstEntry); return 0; }
             ENDHLSL
         }
 
@@ -449,7 +484,14 @@ Shader "Custom/WhiteBloodCell"
             #pragma multi_compile_fragment _ _GBUFFER_NORMALS_OCT
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Packing.hlsl"
 
-            struct Varyings { float4 positionCS : SV_POSITION; float3 normalWS : TEXCOORD0; nointerpolation float fade : TEXCOORD1; };
+            struct Varyings
+            {
+                float4 positionCS : SV_POSITION;
+                float3 normalWS : TEXCOORD0;
+                nointerpolation float fade : TEXCOORD1;
+                float4 burstQ : TEXCOORD2;
+                nointerpolation float4 burstEntry : TEXCOORD3;
+            };
 
             Varyings vert(Attributes v)
             {
@@ -458,12 +500,15 @@ Shader "Custom/WhiteBloodCell"
                 o.fade = Fade(v);
                 o.positionCS = StreamFadeHide(TransformWorldToHClip(s.positionWS), o.fade);
                 o.normalWS = s.normalWS;
+                o.burstQ = s.burstQ;
+                o.burstEntry = s.burstEntry;
                 return o;
             }
 
             half4 frag(Varyings i) : SV_Target
             {
                 StreamFadeClip(i.fade, i.positionCS.xy);
+                WbcBurst(i.burstQ, i.burstEntry);
                 float3 n = normalize(i.normalWS);
             #if defined(_GBUFFER_NORMALS_OCT)
                 float2 oct = saturate(PackNormalOctQuadEncode(n) * 0.5 + 0.5);

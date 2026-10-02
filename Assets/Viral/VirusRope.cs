@@ -279,6 +279,21 @@ public class VirusRope : MonoBehaviour
 
         public void Clear() { support = null; body = null; _hadTarget = _hasNormal = false; }
 
+        public SavedAnchor Save() => new SavedAnchor
+        {
+            on = SaveRef.Of(body ? body.transform : support), body = body, held = _hadTarget,
+            point = SimPoint, normal = _hasNormal ? SimNormal : Vector3.zero,
+        };
+
+        // What it held may not be back (gone, or a scene object that's missing): then it's lost and the end comes loose.
+        public void Load(SavedAnchor s)
+        {
+            Transform t = SaveRef.Resolve(s.on);
+            Rigidbody rb = s.body && t ? t.GetComponentInParent<Rigidbody>() : null;
+            Set(rb ? rb.transform : t, rb, s.point, s.normal);
+            if (s.held && !t) _hadTarget = true;
+        }
+
         // A point held rigidly to whatever this anchor is on (sealed ropes).
         public Vector3 ToLocal(Vector3 p) =>
             body ? Quaternion.Inverse(body.rotation) * (p - body.position) :
@@ -987,6 +1002,97 @@ public class VirusRope : MonoBehaviour
         for (int i = 0; i < count; i++)
             if (!IsPlayerCollider(_hits[i].collider)) return true;
         return false;
+    }
+
+    // ------------------------------------------------------------------ saving
+
+    [System.Serializable]
+    public class SavedAnchor
+    {
+        public string on;   // SaveRef of what it's pinned to ("" = a point in space)
+        public bool body;   // to that object's Rigidbody
+        public bool held;   // it was pinned to something (gone on load = lost: the end comes loose)
+        public Vector3 point, normal;
+    }
+
+    [System.Serializable]
+    public class SavedRope
+    {
+        public Vector3[] x;
+        public float[] rest;
+        public bool pinA, pinB, held, straight, suspended, slurping, sealedUp;
+        public SavedAnchor a, b;
+        public float targetLength, pump;
+        public int pumpFrom = -1;
+    }
+
+    [System.Serializable]
+    public class Save
+    {
+        public List<SavedRope> ropes = new List<SavedRope>();
+    }
+
+    /// <summary>Every rope as it is: particles, rest lengths, what its ends are pinned to, the held one, settings,
+    /// cauterizing / sealed.</summary>
+    public Save Capture()
+    {
+        var save = new Save();
+        foreach (Rope r in _ropes)
+        {
+            if (r.n < 2) continue;
+            var s = new SavedRope
+            {
+                x = new Vector3[r.n], rest = new float[r.n - 1],
+                pinA = r.pinA, pinB = r.pinB, held = r == _active && r.bIsPlayer,
+                straight = r.straight, suspended = r.suspended, slurping = r.slurping, sealedUp = r.isSealed,
+                a = r.pinA ? r.a.Save() : null, b = r.pinB && !r.bIsPlayer ? r.b.Save() : null,
+                targetLength = r.targetLength, pump = r.pump, pumpFrom = r.pumpFrom,
+            };
+            System.Array.Copy(r.x, s.x, r.n);
+            System.Array.Copy(r.rest, s.rest, r.n - 1);
+            save.ropes.Add(s);
+        }
+        return save;
+    }
+
+    /// <summary>Replaces every rope with the saved ones (call once the player and the world are back: ends are
+    /// pinned to what they were by SaveRef). A sealed rope is welded again as it lies.</summary>
+    public void Restore(Save save)
+    {
+        ClearAllRopes();
+        if (save?.ropes == null) return;
+        foreach (SavedRope s in save.ropes)
+        {
+            if (s?.x == null || s.x.Length < 2) continue;
+            int n = Mathf.Min(s.x.Length, HARD_MAX_SEGMENTS + 1);
+            Rope r = CreateRope(Mathf.Max(SegmentCapacity, n - 1));
+            r.n = n;
+            for (int i = 0; i < n; i++) r.x[i] = r.prev[i] = r.start[i] = s.x[i];
+            for (int i = 0; i < n - 1; i++)
+                r.rest[i] = s.rest != null && i < s.rest.Length ? s.rest[i] : Vector3.Distance(s.x[i], s.x[i + 1]);
+            SyncLength(r);
+            r.pinA = s.pinA && s.a != null;
+            if (r.pinA) r.a.Load(s.a);
+            r.bIsPlayer = s.held && _active == null;
+            r.pinB = r.bIsPlayer || (s.pinB && s.b != null);
+            if (r.pinB && !r.bIsPlayer) r.b.Load(s.b);
+            r.straight = s.straight;
+            r.suspended = s.suspended;
+            r.slurping = s.slurping && r.bIsPlayer;
+            r.targetLength = s.targetLength;
+            r.lastA = r.x[0];
+            r.lastB = r.x[n - 1];
+            r.graceUntil = Time.time + BREAK_GRACE;
+            _ropes.Add(r);
+            if (r.bIsPlayer) _active = r;
+            if (s.pumpFrom < 0 || !r.BaseA || !r.BaseB) continue;
+            r.pumpFrom = s.pumpFrom;
+            r.pump = s.pump;
+            r.meshKey = -1; // rebuilt with the blood
+            if (!s.sealedUp) continue;
+            Seal(r);
+            r.sealedAt = Time.time - settleTime; // the heartbeat had died down
+        }
     }
 
     public void ClearAllRopes()

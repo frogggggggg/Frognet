@@ -83,8 +83,11 @@ Shader "Custom/ResourceChunk"
         float Displace(float3 p, float4 look, float t)
         {
             float seed = look.x, drained = look.y, agit = look.z;
-            float breathe = sin(dot(p, float3(3.1, 2.3, 2.7)) + t * (1.3 + agit * 3.0) + seed * 20.0) * _Wobble * (1.0 + agit * 1.5);
-            float3 q = p * 2.2 + seed * 13.0 + float3(0, t * (0.25 + agit * 0.6), 0);
+            // Speeds are fixed and blended by agitation: t * (speed that eases with agit) jumped the phase by t x change
+            // (t is large), so the surface churned wildly for the second or so agitation eased after a stop.
+            float phase = dot(p, float3(3.1, 2.3, 2.7)) + seed * 20.0;
+            float breathe = lerp(sin(phase + t * 1.3), sin(phase * 1.3 + t * 4.3), agit) * _Wobble * (1.0 + agit * 1.5);
+            float3 q = p * 2.2 + seed * 13.0 + float3(0, t * 0.4, 0);
             float lumps = (Noise3(q) - 0.5) * 2.0 + (Noise3(q * 2.3 + 7.1) - 0.5) * 0.8;
             return breathe + lumps * _Deform * drained * (0.6 + 0.4 * drained);
         }

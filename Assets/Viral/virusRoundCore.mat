@@ -1,0 +1,96 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &-3831638871867260371
+MonoBehaviour:
+  m_ObjectHideFlags: 11
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: d0353a89b1f911e48b9e16bdc9f2e058, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  version: 10
+--- !u!21 &2100000
+Material:
+  serializedVersion: 8
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: virusRoundCore
+  m_Shader: {fileID: 4800000, guid: 2a9dbbf71afaba7478ad0aad331c0450, type: 3}
+  m_Parent: {fileID: 0}
+  m_ModifiedSerializedProperties: 0
+  m_ValidKeywords:
+  - _SHADING_CEL
+  - _SPACE_OBJECT
+  m_InvalidKeywords:
+  - _FOLLOWRIPPLES_ON
+  m_LightmapFlags: 4
+  m_EnableInstancingVariants: 0
+  m_DoubleSidedGI: 1
+  m_CustomRenderQueue: -1
+  stringTagMap: {}
+  disabledShaderPasses:
+  - MOTIONVECTORS
+  m_LockedProperties: 
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs:
+    - _MainTex:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    m_Ints: []
+    m_Floats:
+    - _BandSoftness: 0.03
+    - _BlendSharpness: 6
+    - _BumpStrength: 2
+    - _ColorSteps: 1
+    - _Cull: 2
+    - _Detail: 0.521
+    - _DetailFadeEnd: 40
+    - _DetailFadeStart: 12
+    - _DetailStrength: 0
+    - _Displace: 0.068
+    - _DistantBumpMultiplier: 0.18
+    - _DistantDetail: 0
+    - _DistantDisplacementMultiplier: 0.3
+    - _DistantTextureDetailMultiplier: 0.15
+    - _FollowRipples: 1
+    - _Gain: 0.5
+    - _GlossVariation: 0.12
+    - _Glossiness: 0
+    - _Lacunarity: 4
+    - _LightBands: 2
+    - _NoiseScale: 3
+    - _OcclusionStrength: 1
+    - _PhongStrength: 0.6
+    - _PulseAmount: 1
+    - _PulseSpeed: 6
+    - _PulseVariation: 2
+    - _RimPower: 8
+    - _RimSteps: 2
+    - _RippleAmplitude: 0.12
+    - _RippleDecay: 1.5
+    - _RippleInitialRadius: 0.12
+    - _RippleSpeed: 2.5
+    - _RippleWavelength: 0.7
+    - _RippleWidth: 0.9
+    - _Shading: 1
+    - _Space: 0
+    - _SpecThreshold: 0.55
+    - _SubsurfaceStrength: 3
+    - _TessDensity: 24
+    - _TessMax: 1
+    - _ThinGlow: 0.606
+    m_Colors:
+    - _Color: {r: 0.78, g: 0.86, b: 0.2, a: 1}
+    - _DeepColor: {r: 0.16, g: 0.28, b: 0.05, a: 1}
+    - _SpecTint: {r: 1, g: 1, b: 1, a: 1}
+    - _SubsurfaceColor: {r: 0.85, g: 1, b: 0.3, a: 1}
+  m_BuildTextureStacks: []
+  m_AllowLocking: 1

@@ -10,7 +10,7 @@ sure ResourceField, WhiteBloodCells and ImmuneSystem exist.
 ## WorldStreamer
 - Sectors load within `loadDistance` of the player, unload past `unloadDistance`. A sector's contents are generated
   **once**, the first time it loads, from (seed, sector) by `layers` in order (cells as anchors, chunks hovering off them
-  via `nearAnchors`, white cells, AI viruses at 0 per sector for now). Region density = smooth value noise over sectors
+  via `nearAnchors`, white cells, AI viruses at 0 per sector for now, round viruses 0-0.6: `Assets/Viral/Pathogens`). Region density = smooth value noise over sectors
   (`regionSectors`, `voidBelow`: patches and voids; start sector at least `homeDensity`). Counts are per `sectorSize`³ of
   volume (`VolumeScale`) x region density; nothing within the wall margin.
 - Objects may straddle borders; placement checks the sector's own placements, the 26 neighbours' unspawned records
@@ -22,12 +22,21 @@ sure ResourceField, WhiteBloodCells and ImmuneSystem exist.
   unloaded sector into that sector's record (pose, scale, velocity, mass, `IWorldState` strings) and destroys it;
   loading spawns records back, seeding `UnityEngine.Random` with the entity seed first so Awake-randomized looks match.
   An object swept into a never-generated sector generates it on the spot. Destroyed by the game = gone for good.
-- `IWorldState` (`SaveState` / `LoadState` / `Pinned`): ResourceChunk keeps radius + remaining, pinned while extracted;
-  WhiteBloodCell pinned while gripping / engulfing / digesting; anything reparented off `WorldStreamer.Root`
-  (swallowed) is pinned.
+- `IWorldState` (`SaveState` / `LoadState` / `Pinned`), stored **keyed by type name** (`WorldStates.Capture` / `Apply`
+  in WorldEntity.cs; `EntityRecord.stateKeys`), empty states not stored; a missing component is added on apply (so
+  on-demand ones like CellSignal come back). Older records without keys: by position, over the version-1 kinds only.
+  A throwing `LoadState` is logged, not fatal. Implementers: ResourceChunk (radius + remaining, pinned while
+  extracted), CellInterior, CellSignal (signal, hotspot, converted; decays by vessel time away), Surface (tendrils:
+  vectors + age), Organism (the surface it stands on by SaveRef + local point / normal; re-lands, retried each tick
+  for 3 s since that surface may spawn later); WhiteBloodCell (nothing; pinned while gripping / engulfing /
+  digesting). Anything reparented off `WorldStreamer.Root` (swallowed) is pinned.
+- **Ids:** every spawned object gets `WorldEntity.uid` (kept in its record through streaming and saves; the counter is
+  saved as `WorldSave.nextUid`); `WorldStreamer.Find(uid)` (dictionary kept by Track / Untrack / Spawn).
 - Spawning is time-budgeted (`spawnBudgetMs`, nearest sector first; generating newly loaded sectors shares it: all at
   once was a 60-90 ms hitch). Markers `WorldStreamer.Scan/Sweep/Generate/Spawn`. `Prime()` loads everything in range at
   once (start, after a load). `PathManager.Rescan` at most every `rescanInterval` after changes.
+- `SpawnNew(key, pos, size)` (the command line's spawn): a fresh record stamped with the vessel clock / frame, spawned
+  at once; `Keys` = the catalog's prefab names.
 
 ## Stream fade (`StreamFade.hlsl`)
 Streamed things dissolve (screen-door dither, clipped in every pass so depth / outlines match) by their *centre's*
@@ -51,14 +60,20 @@ loaded are generated too (`FarScan` every `scanInterval` / sector crossed, `Gene
 `generateBudgetMs`) and drawn from their records, nothing spawned.
 - Stand-in meshes per prefab (its meshes shrink-wrapped onto an icosphere from its origin, 320 / 80 tris; chunks a lumpy
   ball), cel shaded in the prefab's colours (`_Color` / `_DeepColor`, substance, WBC lilac; `looks` overrides),
-  scene-fogged. Records drift on the GPU (kernel turns each by band rate x time since posed, as `Advance`), culled
+  scene-fogged. **Cell-family prefabs** (material has `_NoiseScale`: red cells; white cells via `WhiteBloodCells.Look`)
+  use `Custom/FarFieldCell` instead: a copy of that material, the cells' own `SurfaceHeight` / `FarTone` /
+  `CellShade` on the stand-in (map = mesh pos x record scale, bump turned by the instance rotation; lumps skipped once
+  footprint-flat), so the crossover matches; plain `Custom/FarField` was a flat two-tone blob at 50-100 px (the
+  "low quality far cells" complaint). Pose / clip shared in `FarFieldCore.hlsl`. Records drift on the GPU (kernel turns each by band rate x time since posed, as `Advance`), culled
   (frustum, `minPixels`, far edge), LOD by pixels, appended per (look, LOD), one `DrawMeshInstancedIndirect` each.
 - Records in 32-slot pages owned per sector; a sector change (generated, swept into, loaded, unloaded, dropped)
   rewrites only its pages (`Changed(key, fresh)`).
 - **Crossover:** a real object dissolves by StreamFade; its stand-in draws exactly the pixels it drops
   (`StreamFadeClipComplement`), so live objects in the fade band and loaded records not spawned yet get stand-ins too
-  (per-frame dynamic list). Newly generated sectors fade in (`bornFade`). Fade starts at ~215 m of a ~450 m live
-  bubble, so ~90% of live objects are in it every frame: one Burst `PoseJob` (`ScheduleReadOnly`) over
+  (per-frame dynamic list). Newly generated sectors fade in (`bornFade`). While the far field is on the band is
+  `WorldStreamer.crossFadeLength` (25 m, 310-335 m), not `fadeLength` (120 m, used without stand-ins): at 120 m ~90% of
+  live objects were dithered, real mesh and differently shaded stand-in interleaved, crawling through the screen-fixed
+  pattern when moving (the "dotted cells" quality complaint). Poses: one Burst `PoseJob` (`ScheduleReadOnly`) over
   `WorldStreamer.LiveTransforms` + `LiveLooks` (native mirrors of the live list, same swap-back order: keep every
   removal going through `RemoveLive`; made with the first live object, disposed with the last), one slot per live
   object, look -1 when not in the band. On the main thread it was ~0.7 ms of transform reads + string lookups.
@@ -73,12 +88,47 @@ loaded are generated too (`FarScan` every `scanInterval` / sector crossed, `Gene
   stand-ins' vertices; far scan ~10k cell tests per scan, spread over frames 2 radial bands at a time
   (`BeginFarScan` / `StepFarScan` / `NearBand`; all at once was 5-7 ms every second).
 
+## Platelets (`Platelets.cs` + `.compute` + `Custom/Platelets`; on the WorldStreamer prefab)
+Scenery: spiky peach stars (activated platelets, the user's reference: lumpy body, long tapering bent tendrils)
+zooming along the wall layers. Nothing per platelet on the CPU or stored: the compute places each from its index
+(seed) + vessel clock, culls (draw distance, frustum, pixels), appends to near / far lists; two
+`DrawMeshInstancedIndirect`. The vertex stage shapes each from its seed off one template mesh (icosphere body +
+`Spikes` (8) tendril tubes, ring offsets in position.xy, (k + 1, t) in uv): tendrils on a jittered golden spiral, a
+seeded share missing (len 0 collapses inside the body), bent, swaying (`_Sway`); body bulges where they leave.
+- Endless field: wraps in a window round the camera in loop angle phi x tube angle theta, each a whole fraction of a
+  turn (seamless copies), >= 2.5x the draw distance across on the loop's *inner* side (outer side ~2x sparser), so the
+  window's edge fade starts past the reach. Count = `density` (per 1000 m² of band) x window area (~170k at 1600 m).
+  Depth from the nominal wall fixed per platelet (`depth`, follows narrows via the radius texture).
+- Motion: blood's turn rate at its depth (Flow's profile at the nominal radius) + own `speed` downstream, quantized to
+  whole windows per 4096 s, positioned from (clock mod period): exact, no float creep; frame angle + camera phi folded
+  into one double-computed phase. Pause stops them (vessel clock). Not saved (needs nothing).
+- **Fade = the far field's rules** (`matchFarField`: its distance, edgeFade, minPixels, thinStart / thinKeep, same
+  formulas as FarField.compute, dithered): the user found platelets' own fade (gone by 450, then 900 m) unlike
+  everything else's. Pixel size goes by the body (`Solid` 1.4 body radii), not the tendril reach (mostly air: tiny
+  platelets lingered as wisps); LOD by the reach. Keep any change to the far field's fade mirrored here.
+- Cost: a compute thread per platelet per frame (~170k, ~0.05-0.1 ms GPU guessed; 8 MB pose buffer), vertices only
+  for visible (near ~390 verts, far ~120 under `lodPixels`), a few thousand after pixel cull + thinning. Skipped
+  entirely when the camera is farther than the draw distance from the band, in focus mode, for ortho cameras.
+- Open: unverified in play mode (look, density, speeds guessed). Theta window is sized for the nominal radius: in a
+  narrow it shrinks (wrap edges may come into view there). Not solid, no collisions, not seen by the immune system.
+
 ## Saves + pause
-- `SaveGame` (static): 3 JSON slots in `persistentDataPath/Saves` (player pose / velocity, `VirusInventory.Restore`
-  stores + ring, genes + selection, `WorldStreamer.Capture()`, `layout`, `Vessel.Save` (clock, alerts, wall offset,
-  frame angle / rate)); a save from another layout is re-sorted by position. Load frees the player
-  (`WhiteBloodCells.Free`, before the captor is destroyed), detaches, clears ropes, moves, `Restore`s the world,
-  teleports cameras. Refuses to save while being digested or to load another scene's save.
+- `SaveGame` (static, version 2): 3 JSON slots in `persistentDataPath/Saves`, the whole session: player (pose,
+  velocity, its IWorldStates = footing, `VirusInventory.Restore` stores + ring, genes + selection),
+  `WorldStreamer.Capture()` (`layout`, `nextUid`, `Vessel.Save`: clock, alerts, wall offset, frame angle / rate; a save
+  from another layout is re-sorted by position; objects `Dying` (bursting / being swallowed) left out), hand-placed
+  scene objects (Rigidbody / Surface / IWorldState owners outside streamed / player / antibodies: pose, velocity,
+  states, by scene path; on load a cell / creature the save lacks is destroyed), `ImmuneSystem.Capture` (antibodies),
+  `VirusRope.Capture` (ropes), `CommandBoard.Capture` (plan). Refuses to save while being digested or to load another
+  scene's save. Version-1 saves still load (no antibodies / ropes / plan in them).
+- **References** between saved things go by `SaveRef` (World/SaveRef.cs): "p" player, "e:uid" streamed, "a:i"
+  antibody (list order; ImmuneSystem.Capture prunes it first, so capture it before the board), "s:name#k/..." scene
+  path, "|path" down to a child. Resolve only once the target is back, hence the load order: free the player
+  (`WhiteBloodCells.Free`, before the captor is destroyed), detach, clear ropes, move; world (`Restore` + `Prime`
+  spawns everything in range at once); scene objects; player states (re-lands) + stores + genes; antibodies; ropes;
+  board (re-dispatches orders); cameras teleport.
+- A new system's state: `IWorldState` on the component if it lives on a world object, else a `Capture` / `Restore`
+  pair called from SaveGame in that order.
 - `PauseMenu` (creates itself, execution order -200): Escape opens it only when `VirusMovement.ClaimsEscape` (focus /
   rope menu / head view) and command mode don't want it; time scale 0, audio paused, cursor freed; SAVE / LOAD per slot
   + RESUME, terminal look, hit-tested in screen space. VirusMovement and CommandMode return early while `IsOpen`.
@@ -158,8 +208,10 @@ centreline along the prefab's forward, axis its up).
   regions O(regions) once a second; wall 1 draw, ~18k verts.
 
 ## Open items (all unverified in play mode; tuning guessed)
-- Not saved: ropes (cleared on load), antibodies, cell signals / converted cells, tendrils, command groups, hand-placed
-  scene objects. Sector records stay in memory for every visited sector (page to disk if worlds get huge).
+- Not saved: white cells' hunt / arm pose (they re-think), a gene effect waiting on its delay, extraction / injection
+  in progress, camera angle, UI. A hand-placed object destroyed since the scene loaded can't come back (needs a scene
+  reload). A rope end anchored to a streamed object that streams out comes loose (as before). Sector records stay in
+  memory for every visited sector (page to disk if worlds get huge).
 - Far field: colours / band thresholds guessed from the materials, not matched side by side in the crossover band;
   stand-in shrink-wraps run once at start (~10 ms per 1k-tri mesh; the virus prefab may be bigger). Growing the page
   buffer re-uploads it whole. If far space feels empty, raise `Crowded` / `Rich` densities rather than the base.

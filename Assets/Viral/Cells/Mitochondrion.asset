@@ -1,0 +1,28 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: aae5751b89d74657b325b48b29b4f389, type: 3}
+  m_Name: Mitochondrion
+  m_EditorClassIdentifier: 
+  displayName: MITOCHONDRION
+  code: MIT
+  color: {r: 0.4, g: 0.92, b: 0.62, a: 1}
+  shape: 0
+  size: 0.1
+  inputs:
+  - substance: GLUCOSE
+    amount: 1
+  - substance: OXYGEN
+    amount: 6
+  outputs:
+  - substance: ATP
+    amount: 10
+  cycleSeconds: 10

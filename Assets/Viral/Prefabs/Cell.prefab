@@ -14,6 +14,7 @@ GameObject:
   - component: {fileID: 1100354055761545899}
   - component: {fileID: 307347198651657751}
   - component: {fileID: 4908780107946915044}
+  - component: {fileID: 7318842093362281551}
   m_Layer: 0
   m_Name: Cell
   m_TagString: Surface
@@ -103,6 +104,8 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   splitConcaveCollider: 1
   colliderTolerance: 0.012
+  colliderPieces: 48
+  detailDistance: 50
   meshRenderer: {fileID: 2465077491696264421}
   creaseAngle: 60
   isCell: 1
@@ -158,3 +161,22 @@ MeshCollider:
   m_Convex: 1
   m_CookingOptions: 30
   m_Mesh: {fileID: 289301614986012343, guid: 6a3142f93505a4c428ce5174cc8d5a70, type: 3}
+--- !u!114 &7318842093362281551
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 572331309885060373}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: bab1c98d0b0c4161b3be84fd78e5eeb8, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  profile: {fileID: 11400000, guid: f9f0fa32b97c4d229de084db8d9a7761, type: 2}
+  rolled: 0
+  nucleus: 0
+  limit: 0
+  seed: 0
+  organelles: []
+  store: []

@@ -53,7 +53,7 @@ public class ControlsHint : MonoBehaviour
     {
         new[] { "DRAG [LMB]", "LOOK" }, new[] { "[LMB] BASE", "ROPE MENU" },
         new[] { "[LMB] VIRUS", "GENOME" }, new[] { "[LMB] CORE", "EXTRACT" }, new[] { "[E]", "INVENTORY" },
-        new[] { "DRAG [LMB] SLOT", "REARRANGE" }, new[] { "[F]", "LEAVE FOCUS" }, new[] { "[ESC]", "CLOSE / LEAVE FOCUS" },
+        new[] { "DRAG [LMB] SLOT", "REARRANGE" }, new[] { "[F]", "LEAVE FOCUS" }, new[] { "[SPACE]", "JUMP OFF" }, new[] { "[ESC]", "CLOSE / LEAVE FOCUS" },
         new[] { "[Q]", "COMMAND MODE" },
     };
     // A white blood cell's arm has hold of it (Intent.Seized): the one way out, so it can't be missed.
@@ -118,7 +118,7 @@ public class ControlsHint : MonoBehaviour
             Build();
         }
         if (!_canvas) return;
-        if (Keyboard.current != null && Keyboard.current[toggleKey].wasPressedThisFrame)
+        if (CommandLine.Keys != null && CommandLine.Keys[toggleKey].wasPressedThisFrame)
         {
             _folded = !_folded;
             _shownSet = null; // retype

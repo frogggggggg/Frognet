@@ -226,7 +226,7 @@ public class CommandMode : MonoBehaviour
 
         if (PauseMenu.IsOpen) return;
         Mouse m = Mouse.current;
-        Keyboard k = Keyboard.current;
+        Keyboard k = CommandLine.Keys;
         if (k != null && k[toggleKey].wasPressedThisFrame) SetActive(!Active);
         if (Active && k != null && k.escapeKey.wasPressedThisFrame)
         {

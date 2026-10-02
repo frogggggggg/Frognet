@@ -107,6 +107,14 @@ public partial class Surface
     }
 
     /// <summary>Pieces (true) or the one hull (false). Pieces are made the first time they're asked for.</summary>
+    /// <summary>Every collider off for good (the body is bursting, CellBurst): nothing lands on it or hits it, and the
+    /// collider LOD leaves it alone.</summary>
+    public void RemoveColliders()
+    {
+        _pieceMeshes = null; // UseDetailedCollider does nothing from now on
+        foreach (Collider c in Colliders) if (c) c.enabled = false;
+    }
+
     public void UseDetailedCollider(bool on)
     {
         if (_pieceMeshes == null || !_hull || on == _detailed) return;

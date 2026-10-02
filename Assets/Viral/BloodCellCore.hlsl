@@ -59,6 +59,7 @@ CBUFFER_START(UnityPerMaterial)
     float  _RippleWidth;
     float  _RippleDecay;
     float  _FollowRipples;
+    float  _FarTone;
 CBUFFER_END
 
 // Deliberately outside UnityPerMaterial: arrays cannot be declared in a
@@ -150,6 +151,17 @@ float4 SurfaceHeight(float3 p, float fade, float pixel)
 float4 SurfaceHeight(float3 p, float fade)
 {
     return SurfaceHeight(p, fade, 0.0);
+}
+
+// Far tone: the lumps fade to their mean (0.5) by pixel footprint, which on a red-ridge / blue-valley cell is a muddy
+// purple, not the red the near cell reads as. This leans the albedo height toward _FarTone as the first octave
+// fades (from ~60 m at Cell's scale, done by ~150 m). Albedo only. 0.5 = unchanged (materials that don't set it
+// get 0: treated as off).
+float FarTone(float pixel)
+{
+    if (_FarTone <= 0.0)
+        return 0.0;
+    return (_FarTone - 0.5) * smoothstep(0.15, 0.4, pixel * _NoiseScale);
 }
 
 // ---------------------------------------------------------------
@@ -319,6 +331,30 @@ void InvertSweepClip(float3 positionWS, bool front)
     #define INVERT_SWEEP_CLIP(positionWS)
 #endif
 
+// A cell bursting (CellBurst.cs, CellBurst.hlsl): shaders drawing one renderer per cell define CELL_BURST. Set once per
+// renderer (MaterialPropertyBlock); a whole cell has _Burst.w = 0 and skips it in a uniform branch.
+#if defined(CELL_BURST)
+#include "CellBurst.hlsl"
+float4 _Burst;     // xyz entry point in body radii (from _BurstInfo's centre), w start time (_Time.y's clock); 0 = none
+float4 _BurstInfo; // xyz body centre (renderer-local), w body radius (renderer-local units)
+
+float  BurstSeed()                   { return frac(_Burst.w * 0.618034) * 50.0; }
+float3 BurstQ(float3 positionOS)     { return (positionOS - _BurstInfo.xyz) / max(_BurstInfo.w, 1e-4); }
+float  BurstRadiusWS()               { return _BurstInfo.w * dot(ObjectScale(), 1.0 / 3.0); }
+void BurstClip()
+{
+    if (_Burst.w > 0.0) clip(BurstCover(_Time.y - _Burst.w));
+}
+    #define BURST_CLIP(positionWS) BurstClip()
+#else
+    #define BURST_CLIP(positionWS)
+#endif
+
+// The depth passes carry the world position when a clip needs it.
+#if defined(INVERT_BACKFACES)
+    #define DEPTH_POSITION_WS 1
+#endif
+
 // Streaming-edge dissolve for shaders drawing one renderer per object (cells define STREAM_FADE_OBJECTS; the legs,
 // drawn procedurally, don't).
 #if defined(STREAM_FADE_OBJECTS)
@@ -334,7 +370,7 @@ void InvertSweepClip(float3 positionWS, bool front)
 struct DepthVaryings
 {
     float4 positionHCS : SV_POSITION;
-#if defined(INVERT_BACKFACES)
+#if defined(DEPTH_POSITION_WS)
     float3 positionWS  : TEXCOORD7;
 #endif
 };
@@ -345,6 +381,7 @@ half4 DepthFrag(DepthVaryings input INVERT_FACE_ARG) : SV_Target
 {
     INVERT_SWEEP_CLIP(input.positionWS);
     STREAM_FADE_OBJECT(input.positionHCS);
+    BURST_CLIP(input.positionWS);
     return input.positionHCS.z;
 }
 
@@ -352,7 +389,7 @@ struct NormalVaryings
 {
     float4 positionHCS : SV_POSITION;
     float3 normalWS    : TEXCOORD0;
-#if defined(INVERT_BACKFACES)
+#if defined(DEPTH_POSITION_WS)
     float3 positionWS  : TEXCOORD7;
 #endif
 };
@@ -361,6 +398,7 @@ half4 DepthNormalsFrag(NormalVaryings input INVERT_FACE_ARG) : SV_Target
 {
     INVERT_SWEEP_CLIP(input.positionWS);
     STREAM_FADE_OBJECT(input.positionHCS);
+    BURST_CLIP(input.positionWS);
     float3 n = normalize(input.normalWS);
 #if defined(INVERT_BACKFACES)
     n *= IS_FRONT_VFACE(face, 1.0, -1.0); // a back face seen from inside faces the camera the other way

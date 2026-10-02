@@ -97,8 +97,8 @@ frame (`ArmFrame`: reach + carried side), turning with the arm, and can only tur
   buffer every pass reads (`_UseBaked`); before, each pass rebuilt it 3x per vertex in every pass incl. shadow
   cascades. Far cells shape in the vertex stage (no spikes / ruffles). Ripples go on in the draw vertex stage either way
   (compute doesn't see the global ripple field), normal bent by two taps. Baked record = 4 float4s (64 B: position +
-  lump, map + mouth, normal + tendril, mapTip). Instance = 9 float4s (144 B: incl. `side`, `merge`, `sway` = spot
-  velocity / tension, `extra` = LOD fade, gape, squeeze).
+  lump, map + mouth, normal + tendril, mapTip). Instance = 10 float4s (160 B: incl. `side`, `merge`, `sway` = spot
+  velocity / tension, `extra` = LOD fade, gape, squeeze, `burst` = bursting (CellBurst, `Docs/head-genome.md`)).
 - Gotcha: **`atan2(0, 0)` is NaN on D3D** (the mouth pole vanished); guard atan2 of directions on the axis.
 
 ## Cost

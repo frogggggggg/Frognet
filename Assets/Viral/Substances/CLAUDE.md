@@ -5,8 +5,23 @@ documented in `Docs/head-genome.md`. Audio: `Audio/ResourceAudio.cs` (start "plu
 with a faint E6/B6 shimmer).
 
 ## Substance / chunks
-- `Substance` = name / code / colour (slots match by name; a new substance is just a new chunk prefab). Glucose
-  yellowish white, protein saturated orange; no red substances (red blood cells are red).
+- `Substance` = name / code / colour / `look`, in `SubstanceStore.cs`; slots match by name. **`SubstanceCatalog` is the
+  truth for colour + look**; chunk prefabs take theirs from it by name in `Init` (their serialized colour is ignored for
+  known names). ATP gold, OXYGEN sky blue, GLUCOSE pale yellow, PROTEIN deep orange; an unknown name gets grey. No red
+  substances (red blood cells are red).
+- **Looks (`SubstanceLook`, drawn by `SubstanceLook.hlsl` `SubstanceMote`, premultiplied):** one shape per kind so they
+  read apart (user: ATP and protein looked alike): Honey = golden liquid (ATP; user: honey, joins like liquid, shiny): `HoneyShade` shades a metaball
+  field as **liquid amber glass** (user: was too glowy, not glassy / liquid enough): see-through body (alpha ~0.3
+  where thick, Fresnel-dense dark amber toward the edge), faint flow bands, soft caustic on the side away from the
+  light, crisp white key + second highlight + thin lit edge; normals ripple along the contours and slosh, so highlights
+  slide. No additive glow (don't add "light through it" back). Only F / G / t drive it (not the seed: seams where
+  drops join); a lone drop is its own field here, a cell's drops sum their neighbours
+  (Cells notes), Bubble =
+  two joined bubbles (O2), Crystal = turning hexagonal ring (glucose), Coil = folded chain of five beads (protein,
+  like its chunk's Coil mesh), Chunk = plain lump (unknown). Used by the cell's motes, the blob core's lumps and the
+  extraction stream / poof, so a substance looks the same everywhere. New look: add it there once.
+- `Stores` (same file): the slot rules every store follows (VirusInventory's tubes, CellInterior's stores): top up,
+  then empty slots; take from the last; `Room`, `SlotFor`, `Fit`. `StoreSlot` is the slot (was VirusInventory.Slot).
 - `ResourceChunk`: the prefab is the type (substance, `ChunkMesh.Shape` Lumpy (glucose) / Coil (protein: a globule of
   beads fused along a folded chain), size range skewed small (`sizeSkew`), yield ~ r³).
 - **Landable:** a walkable body like a small cell (`Surface` with `isCell` off + a non-convex MeshCollider, both on
@@ -35,19 +50,23 @@ with a faint E6/B6 shimmer).
 - Spawns the listed prefabs (a share floating 3-16 m off cells, the rest among them, grid-checked for overlaps incl. the
   bob) unless `WorldStreamer.Active`. Draws every chunk from its transform in one buffer, one `RenderMeshPrimitives` per
   (shape, LOD) (`Custom/ResourceChunk`: faint breathing wobble, and as it drains lumpy deformation + squash pulses, in
-  the vertex stage; **no GPU motion: the pose must match what's walked**).
+  the vertex stage; **no GPU motion: the pose must match what's walked**). Agitation blends fixed-speed waves; never
+  `t * f(agitation)` (the phase jumps by t x change while it eases: the surface churned for a second after a stop).
 - In editor play with no field in the scene, `Bootstrap` instantiates the prefab (logs it); builds need it in
   ViralBuildAssets. The prefab isn't in `Viral.unity` yet.
 - Focus mode: `VirusMovement.UpdateCores` calls `ShowCores`; only the chunk the virus stands on shows a core
   (`Custom/ResourceCore`, Overlay+10, ZTest Always, only inside the sweep); the user: no extracting from a chunk you're
-  not on (`extractRange` is gone). A click toggles extraction (stops when that body steps off: `ExtractorBody`) into
+  not on (`extractRange` is gone). A click toggles extraction (stops when that body steps off: `ExtractorBody`, or when the player closes the head view: `StopExtracting`) into
   `VirusInventory`: a dust stream flows in, it shrinks and deforms, past `poofAt` it bursts (`DustClouds.Burst`) and is
   destroyed. Labels beside hovered / extracting cores. `Extracting` drives the head view's flow.
 - `DustClouds`: generic analytic GPU puffs (burst / stream along a curve), CPU only writes new ones into a ring buffer;
-  Overlay+5 so they show over the focus sweep.
+  Overlay+5 so they show over the focus sweep. Premultiplied. A puff given a `SubstanceLook` is a lump of that
+  substance instead of dust: extraction streams dust + lumps into the virus, the poof bursts both.
+- Core contents: `Custom/ResourceCoreMotes` (Overlay+11, 24 quads per core from the same `_Cores` buffer, `look` =
+  SubstanceLook + fullness): lumps orbiting inside the core, fewer as it drains, faster while extracting.
 
 ## VirusInventory
-(Named so because the old project owns `Inventory`.) `slotCount` store slots, each one substance up to `capacity`, plus
+(Named so because the old project owns `Inventory`.) Slot maths through `Stores`. `slotCount` store slots, each one substance up to `capacity`, plus
 the head's `ring` (`Ring(genes)` reconciles it; `AddMount` / `RemoveMount` (empty only) / `MoveMount`), `SlotFor`,
 `TakeFrom`, `GeneRemoved`, `Restore` (saves). **E** toggles the head view anywhere.
 

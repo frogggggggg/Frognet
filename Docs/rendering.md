@@ -15,11 +15,15 @@ light's cascades sat a few metres from everything and tessellated every patch ro
 `BloodCellCore.hlsl` (properties, noise, ripple, bump, depth fragments) and `BloodCellForward.hlsl` (cel/PBR lighting,
 `CellShade`) were cut verbatim out of `BloodCellTriplanar.shader` so cells, legs, rope beads and white cells share one
 code path. `BloodCellTriplanar` keeps tessellation (for planets); legs use `_TessMax = 1`. Displaces along UV3
-(`Docs/surfaces.md`). `CELL_TENDRILS` (blight, `Docs/head-genome.md`) and `STREAM_FADE_OBJECTS` live here too.
+(`Docs/surfaces.md`). `CELL_TENDRILS` (blight), `CELL_BURST` (cell death; both `Docs/head-genome.md`) and `STREAM_FADE_OBJECTS` live here too.
 - **Noise LOD by pixel footprint:** `SurfaceHeight(p, fade, PixelMetres(posWS))` (`FBM3DLod`): each fBm octave fades to
   its mean (0.5, flat) between 0.15 and 0.4 cycles per pixel, in every stage (distance-based, no derivatives), so far
   cells go smooth instead of speckled / moire and displacement stops crawling. Used by cells (frag + domain), legs,
   white cells; rope beads use the unfiltered overload (their map isn't metres). `DetailFade` still applies on top.
+- **Far tone** (`FarTone`, in `CellShade`): as the lumps' first octave fades by footprint (~60-150 m on Cell), the
+  albedo height leans from their mean 0.5 to `_FarTone` (Cell.mat 0.7; 0 = off). Cell's ridges are red and valleys
+  dark blue, so the plain mean read as muddy purple far away. Don't add coarse blotches instead (tried "far mottle",
+  3 m two-octave noise: blue patches, cells read as jellybeans, not red cells).
 
 ## Focus sweep (`ScreenInvertTest.cs`)
 - Sweep starts from the impact under the virus (`fromImpact`, surface point captured on trigger, pinned in the
@@ -36,6 +40,8 @@ code path. `BloodCellTriplanar` keeps tessellation (for planets); legs use `_Tes
   ScreenInvertTransparentDepthFeature), not normals rebuilt from depth (faceted every triangle). Rule: smooth-shaded
   surfaces show no geometry, only silhouettes and real hard edges.
 - X-ray things only inside the circle (Overlay+10, ZTest Always): InjectionDrillXRay, ResourceCore, rope base cores.
+  Their circle test is `FocusSweep.hlsl` (`SweepCover`; include it, don't copy it). Cell interiors
+  (`Assets/Viral/Cells`) use it at Overlay+6..8 with ZTest LEqual (cells keep only back faces in depth there).
 
 ## Other
 - `AstrophageCrystalTop.shader`: virus shell. DNA frames built once per pixel, DNA faded and march shortened with

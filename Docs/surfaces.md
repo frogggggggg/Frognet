@@ -18,6 +18,7 @@ Makes a MeshRenderer walkable.
 - `isCell` (default on): off = walkable but not a cell (no `CellSignal.For`, not a command-mode "Cell", not a spawn
   anchor). Resource chunks and white cells use it.
 - `Surface.Of(transform)` finds the Surface for an ISurfaceContact's `Surface` (its Space). `Map` = its SurfaceMap.
+- `Surface.All`: every enabled Surface (swap-removed, O(1)); the command line's `all` reads it.
 - `referenceSpeed` scales ripple strength (100 in the scene).
 
 ## Concave collider (`Surface.Collider.cs`)
@@ -60,7 +61,11 @@ and white cells keep a hidden renderer carrying their material.
   script calls a frame; don't add one back.
 
 ## PathManager (`PathManager.cs`)
-Gridless potential-flow field (sink + doublets), trap-free. `GetField/GetDirection(pos, target, ignoreA, ignoreB)`.
+Gridless potential-flow field (sink + doublets), trap-free. `GetField/GetDirection(pos, target, ignoreA, ignoreB, ignoreC, frame)`.
+- **Velocities are relative to `frame`** (the agent's `Organism.Fluid`). Don't compare world velocities: the sheared
+  blood flow (world frame follows the player) made every cell far from the player a fast mover and swamped the pull.
+- **`sinkReach`** (20 m): past it the sink is scaled per query to its strength there (one scale for every term of the
+  query, so still harmonic / trap-free). A plain 1/d² pull lost to any moving body far off: agents stopped following.
 - Creatures are obstacles by default (`ignoreOrganisms = false`, the user wants this). `oneSpherePerCreature` merges a
   creature's colliders into one sphere; body poses read once per Rigidbody per step, offsets / radii baked at `Rescan()`.
   MeshCollider obstacles sized by bounds (a bit big for chunks).

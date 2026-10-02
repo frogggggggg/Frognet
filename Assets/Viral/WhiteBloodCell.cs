@@ -27,7 +27,7 @@ using UnityEngine;
 /// Cost per cell: O(nearby organisms) per think (WhiteBloodCells' grid), one overlap query per think.
 /// </summary>
 [RequireComponent(typeof(Rigidbody))]
-public class WhiteBloodCell : MonoBehaviour, IWorldState
+public class WhiteBloodCell : MonoBehaviour, IWorldState, IBurstable
 {
     public enum State { Patrol, Examine, Hunt, Grip, Engulf, Digest }
 
@@ -105,6 +105,9 @@ public class WhiteBloodCell : MonoBehaviour, IWorldState
     [Header("Bite feel")]
     [Min(0f), Tooltip("Metres from the mouth at which it starts gaping open for the catch.")]
     public float gapeRange = 4f;
+    [Min(0.05f), Tooltip("Seconds the mouth takes to creep its skin over a catch (in surges, not at a steady pace). " +
+                         "It only starts reeling in as the wrap closes, and swallows once it's done.")]
+    public float wrapTime = 1.8f;
     [Min(0.1f), Tooltip("How snappy the lips are (Hz). They close on a spring and bounce off the catch.")]
     public float lipSpring = 2.2f;
     [Range(0.05f, 1f), Tooltip("Damping of the lips: lower wobbles longer after they snap shut.")]
@@ -173,6 +176,33 @@ public class WhiteBloodCell : MonoBehaviour, IWorldState
     /// <summary>When WhiteBloodCells last ticked it (far ones tick every few frames).</summary>
     public float LastTick { get; set; }
 
+    /// <summary>Shader data while bursting (CellBurst), else 0: the entry point in body radii from the centre (world
+    /// axes), and the start time.</summary>
+    public Vector4 BurstState { get; private set; }
+    public bool Bursting => BurstState.w > 0f;
+
+    void IBurstable.BurstShape(out Mesh mesh, out Matrix4x4 pose, out Material look, out float seed)
+    {
+        mesh = null; // a sphere of its radius (the arm isn't among the pieces)
+        pose = Matrix4x4.TRS(transform.position, Quaternion.identity, Vector3.one * Radius);
+        look = WhiteBloodCells.Look;
+        seed = _seed; // Motion.w: its shader's BurstSwell seed
+    }
+
+    Vector3 IBurstable.BurstVelocity => _velocity + _drift;
+
+    // Lets go of whatever it holds (a catch half swallowed bursts out with it) and stops acting.
+    void IBurstable.Burst(Vector3 entry, float start)
+    {
+        if (Prey && WhiteBloodCells.Captured(Prey) && Current == State.Engulf) WhiteBloodCells.Free(Prey, Prey.transform.position);
+        else if (Prey && WhiteBloodCells.Gripped(Prey)) WhiteBloodCells.Release(Prey);
+        Prey = null;
+        Current = State.Patrol;
+        _mergeShape = Vector4.zero;
+        Vector3 q = (entry - transform.position) / Mathf.Max(Radius, 1e-3f);
+        BurstState = new Vector4(q.x, q.y, q.z, start);
+    }
+
     Vector3 _drift; // the blood's flow it was carried by last crawl (on top of _velocity)
     Vector3 _velocity, _reachDir = Vector3.forward, _avoid, _bodyGoal;
     float _reach, _seed, _hunger = 0.25f, _gulp, _nextThink, _stateUntil, _lastSensed;
@@ -180,6 +210,7 @@ public class WhiteBloodCell : MonoBehaviour, IWorldState
     Vector3 _side = Vector3.right, _sideDir = Vector3.forward; // the reach frame's x axis, and the reach it was carried to
     float _reachVel, _reel, _tension, _regrabAt;
     float _gulpVel, _gape, _clench, _clenchVel, _nextGulp; // bite: lip spring, gape, squeeze spring
+    float _wrapping; // gripping: how far the skin has crept over the catch (0..1), what the lips follow
     Transform _examined;
     float _examinedRadius;
     Transform _lastExamined;
@@ -230,10 +261,11 @@ public class WhiteBloodCell : MonoBehaviour, IWorldState
     // Streaming (WorldStreamer): the pose is all it keeps; it isn't streamed out while it holds something.
     string IWorldState.SaveState() => "";
     void IWorldState.LoadState(string state) { }
-    bool IWorldState.Pinned => Current == State.Grip || Current == State.Engulf || Current == State.Digest;
+    bool IWorldState.Pinned => Current == State.Grip || Current == State.Engulf || Current == State.Digest || Bursting;
 
     public void Tick(float dt, float now)
     {
+        if (Bursting) { _velocity = Vector3.MoveTowards(_velocity, Vector3.zero, acceleration * dt); return; } // just drifts
         Vector3 c = transform.position;
         float R = Radius;
         if (now >= _nextThink)
@@ -267,7 +299,9 @@ public class WhiteBloodCell : MonoBehaviour, IWorldState
                     _gulpVel += 0.8f;
                     WhiteBloodCells.RaiseGulped(this, Prey);
                 }
-                Bite(Current == State.Grip ? 0.8f : Current == State.Engulf ? 1f : 0f, 0f, dt); // just swallowed: shut, not open
+                // The lips follow the creeping wrap (eased, so it starts and ends softly), not a snap shut.
+                float wrapGoal = 0.8f * Mathf.SmoothStep(0f, 1f, _wrapping);
+                Bite(Current == State.Grip ? wrapGoal : Current == State.Engulf ? 1f : 0f, 0f, dt); // just swallowed: shut, not open
                 return;
 
             case State.Hunt:
@@ -671,9 +705,10 @@ public class WhiteBloodCell : MonoBehaviour, IWorldState
         _reel = Mathf.Max((o.transform.position - transform.position).magnitude - Radius, 0f);
         _aimSlack = Spot - o.transform.position;
         _gripHold = Quaternion.Inverse(ArmFrame) * o.RotTarget.rotation;
-        // The snap: the lips are flung shut (they overshoot, hit the catch and bounce) and the mouth squeezes.
-        _gulpVel += 6f;
-        _clenchVel += biteSqueeze * 9f;
+        // The latch: the lips catch hold (a small kick, a squeeze), then creep over it (Gripping's _wrapping).
+        _wrapping = 0f;
+        _gulpVel += 1.2f;
+        _clenchVel += biteSqueeze * 5f;
         _nextGulp = now + gulpInterval;
         return true;
     }
@@ -693,12 +728,18 @@ public class WhiteBloodCell : MonoBehaviour, IWorldState
             return;
         }
 
-        _reel = Mathf.MoveTowards(_reel, 0f, reelSpeed * dt * Mathf.Clamp01(1f - lag / 2.5f));
+        // The skin creeps over the catch in surges (the pace swells and ebbs, faster just after each gulp), holding it
+        // where it was caught; the reel only picks up as the wrap closes, and nothing is swallowed before it has.
+        float surge = 0.35f + 1.3f * Mathf.PerlinNoise(now * 1.6f, _seed)
+                    + 0.9f * Mathf.Exp(-3f * Mathf.Max(now - (_nextGulp - gulpInterval), 0f)); // just after a gulp (and the latch)
+        _wrapping = Mathf.Min(1f, _wrapping + dt / wrapTime * surge);
+        float reeling = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.4f, 1f, _wrapping));
+        _reel = Mathf.MoveTowards(_reel, 0f, reelSpeed * reeling * dt * Mathf.Clamp01(1f - lag / 2.5f));
         _tension = Mathf.MoveTowards(_tension, Mathf.Clamp01(0.45f + lag / 2.5f), dt * 3f);
         _hunger = Mathf.MoveTowards(_hunger, 1f, dt * 2f);
         AimAt(to, R, dt);
 
-        if (_reel <= 0.05f && stretch <= _preySize + 0.6f) StartSwallow();
+        if (_wrapping >= 1f && _reel <= 0.05f && stretch <= _preySize + 0.6f) StartSwallow();
     }
 
     /// <summary>Physics step (WhiteBloodCells.FixedUpdate): pulls the catch toward where the arm is reeling it,

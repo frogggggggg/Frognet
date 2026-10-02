@@ -152,6 +152,14 @@ public class ResourceChunk : MonoBehaviour, IWorldState
         _ready = true;
         if (radius <= 0f) radius = RandomRadius();
         Seed = Random.value;
+        if (SubstanceCatalog.Knows(substance.name))
+        {
+            // The catalog's colour and look, so a chunk matches the same substance inside cells and stores.
+            Substance known = SubstanceCatalog.Find(substance.name);
+            substance.color = known.color;
+            substance.code = known.code;
+            substance.look = known.look;
+        }
         Color.RGBToHSV(substance.color, out float h, out float s, out float v);
         Tint = Color.HSVToRGB(Mathf.Repeat(h + Random.Range(-0.25f, 0.25f) * tintVariation, 1f),
                               Mathf.Clamp01(s * Random.Range(1f - tintVariation, 1f + tintVariation)),
@@ -165,6 +173,14 @@ public class ResourceChunk : MonoBehaviour, IWorldState
         _spinAxis = Random.onUnitSphere;
         _spinRate = Random.Range(spin.x, spin.y);
         Resize(radius);
+    }
+
+    /// <summary>Moves it (the command line's teleport): it floats round its new place from the next step.</summary>
+    public void Place(Vector3 at)
+    {
+        transform.position = at;
+        Pos = at;
+        _placed = false;
     }
 
     /// <summary>Sets its radius (and so its yield, mass and ripple strength), before any of it is extracted.</summary>

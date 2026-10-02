@@ -1,8 +1,7 @@
-// The far field's stand-ins (FarField.cs): streamed things beyond the loaded bubble, drawn from records. One
-// indirect draw per (look, LOD); the instance's pose comes from _FarPosed[_FarVisible[_FarGroupBase + instance]],
-// written by FarField.compute. Cel shaded in two colours like the cells (bands from the main light, a rim), fogged
-// by the scene fog so it matches the real objects where they cross over. Every pass clips alike: the object's own
-// fade (far edge, fading in when generated) and the complement of the real object's stream fade.
+// The far field's plain stand-ins (FarField.cs): streamed things beyond the loaded bubble, drawn from records. One
+// indirect draw per (look, LOD); pose and clipping in FarFieldCore.hlsl. Cel shaded in two colours (bands from the
+// main light, a rim), fogged by the scene fog. For things whose prefab has no cell material (chunks, viruses);
+// cells use Custom/FarFieldCell, the real cell shading.
 Shader "Custom/FarField"
 {
     Properties
@@ -18,42 +17,12 @@ Shader "Custom/FarField"
 
         HLSLINCLUDE
         #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
-        #include "StreamFade.hlsl"
+        #include "FarFieldCore.hlsl"
 
         CBUFFER_START(UnityPerMaterial)
             half4 _Color, _DeepColor;
             float _Rim;
         CBUFFER_END
-
-        struct Posed { float4 position, rotation, scale; };
-        StructuredBuffer<Posed> _FarPosed;
-        StructuredBuffer<uint> _FarVisible;
-        uint _FarGroupBase;
-
-        struct Attributes
-        {
-            float4 positionOS : POSITION;
-            float3 normalOS   : NORMAL;
-            uint instanceID   : SV_InstanceID;
-        };
-
-        float3 Rotate(float4 q, float3 v) { return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
-
-        // World position and normal; fades.x = its own, .y = the real object's; seed = per instance.
-        float3 World(Attributes v, out float3 normalWS, out float2 fades, out float seed)
-        {
-            Posed p = _FarPosed[_FarVisible[_FarGroupBase + v.instanceID]];
-            fades = float2(p.position.w, p.scale.w);
-            seed = frac(dot(p.position.xyz, float3(0.1031, 0.1130, 0.0973)));
-            normalWS = normalize(Rotate(p.rotation, v.normalOS / p.scale.xyz));
-            return p.position.xyz + Rotate(p.rotation, v.positionOS.xyz * p.scale.xyz);
-        }
-
-        void FarClip(float2 fades, float2 pixel)
-        {
-            StreamFadeClip(fades.x, pixel);
-            StreamFadeClipComplement(fades.y, pixel);
-        }
         ENDHLSL
 
         Pass
@@ -77,12 +46,12 @@ Shader "Custom/FarField"
                 nointerpolation float3 extra : TEXCOORD3; // fades, seed
             };
 
-            Varyings vert(Attributes v)
+            Varyings vert(FarAttributes v)
             {
                 Varyings o;
                 float2 fades;
                 float seed;
-                o.positionWS = World(v, o.normalWS, fades, seed);
+                o.positionWS = FarWorld(v, o.normalWS, fades, seed);
                 o.positionCS = TransformWorldToHClip(o.positionWS);
                 o.fog = ComputeFogFactor(o.positionCS.z);
                 o.extra = float3(fades, seed);
@@ -118,12 +87,12 @@ Shader "Custom/FarField"
             #pragma target 4.5
             struct Varyings { float4 positionCS : SV_POSITION; nointerpolation float2 fades : TEXCOORD0; };
 
-            Varyings vert(Attributes v)
+            Varyings vert(FarAttributes v)
             {
                 Varyings o;
                 float3 n;
                 float seed;
-                o.positionCS = TransformWorldToHClip(World(v, n, o.fades, seed));
+                o.positionCS = TransformWorldToHClip(FarWorld(v, n, o.fades, seed));
                 return o;
             }
             half4 frag(Varyings i) : SV_Target { FarClip(i.fades, i.positionCS.xy); return 0; }
@@ -144,11 +113,11 @@ Shader "Custom/FarField"
 
             struct Varyings { float4 positionCS : SV_POSITION; float3 normalWS : TEXCOORD0; nointerpolation float2 fades : TEXCOORD1; };
 
-            Varyings vert(Attributes v)
+            Varyings vert(FarAttributes v)
             {
                 Varyings o;
                 float seed;
-                o.positionCS = TransformWorldToHClip(World(v, o.normalWS, o.fades, seed));
+                o.positionCS = TransformWorldToHClip(FarWorld(v, o.normalWS, o.fades, seed));
                 return o;
             }
 

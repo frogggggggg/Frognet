@@ -160,7 +160,7 @@ public class InventoryView : MonoBehaviour
                 continue;
             }
 
-            VirusInventory.Slot slot = m.index >= 0 && m.index < _inventory.slots.Count ? _inventory.slots[m.index] : null;
+            StoreSlot slot = m.index >= 0 && m.index < _inventory.slots.Count ? _inventory.slots[m.index] : null;
             bool empty = slot == null || slot.Empty;
             float amount = empty ? 0f : slot.amount;
             if (amount > l.last + 1e-3f) l.flashAt = now;

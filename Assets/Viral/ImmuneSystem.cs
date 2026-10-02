@@ -38,6 +38,8 @@ public class ImmuneSystem : MonoBehaviour
     public float wrongGeneBurst = 40f;
     [Min(0f), Tooltip("Signal from a virus landing on a cell (at 10 m/s; scaled by impact speed).")]
     public float landSignal = 2f;
+    [Min(0f), Tooltip("Signal from a cell burst by a gene (KILL): a spurt of motes and the vessel's alert.")]
+    public float lysisSignal = 30f;
 
     [Header("Antibodies")]
     [Min(0)] public int ambientCount = 24;
@@ -107,6 +109,8 @@ public class ImmuneSystem : MonoBehaviour
     public AlarmMotes motes = new AlarmMotes();
 
     readonly List<Antibody> _antibodies = new List<Antibody>();
+    /// <summary>Every live antibody (may hold destroyed ones until the next Update).</summary>
+    public static IReadOnlyList<Antibody> Antibodies => s_instance ? s_instance._antibodies : (IReadOnlyList<Antibody>)System.Array.Empty<Antibody>();
     Mesh _nearMesh, _farMesh;
     Material _ownMaterial;
 
@@ -122,6 +126,9 @@ public class ImmuneSystem : MonoBehaviour
 
     static ImmuneSystem s_instance;
 
+    /// <summary>Seconds for a quiet cell's signal to halve (CellSignal's decay while stored).</summary>
+    public static float SignalHalfLife => s_instance ? s_instance.halfLife : 15f;
+
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     static void Bootstrap()
     {
@@ -136,7 +143,10 @@ public class ImmuneSystem : MonoBehaviour
     public static bool Deliver(Transform body, Genome.Gene gene, Vector3 at, Vector3 normal)
     {
         if (!body || gene == null) return false;
-        if (GeneEffects.WorksOn(gene, body))
+        bool took = GeneEffects.WorksOn(gene, body);
+        CellInterior cell = CellInterior.For(body);
+        if (cell) cell.Receive(gene, took); // the nucleus view shows it inside
+        if (took)
         {
             GeneEffects.Apply(gene, body, at, normal);
             return true;
@@ -165,6 +175,12 @@ public class ImmuneSystem : MonoBehaviour
         if (s_instance) Alarm(cell, at, normal, s_instance.landSignal * Mathf.Clamp(speed / 10f, 0.3f, 2f));
     }
 
+    /// <summary>A gene burst 'cell' from 'at' (GeneEffects: KILL).</summary>
+    public static void Lysed(Transform cell, Vector3 at, Vector3 normal)
+    {
+        if (s_instance) Alarm(cell, at, normal, s_instance.lysisSignal);
+    }
+
     // 'amount' motes as whole spurts of 'size': rounded at random so the rate averages out.
     static int Spurt(float amount, float size)
     {
@@ -182,6 +198,43 @@ public class ImmuneSystem : MonoBehaviour
     }
 
     void OnEnable() => s_instance = this;
+
+    // ---------------- saving ----------------
+
+    [System.Serializable]
+    public class Save
+    {
+        public List<Antibody.Saved> antibodies = new List<Antibody.Saved>();
+    }
+
+    /// <summary>Every antibody as it is (in list order: SaveRef "a:i" counts in it). Null without an immune system.</summary>
+    public static Save Capture()
+    {
+        ImmuneSystem s = s_instance;
+        if (!s) return null;
+        s._antibodies.RemoveAll(a => !a);
+        var save = new Save();
+        foreach (Antibody a in s._antibodies) save.antibodies.Add(a.Capture());
+        return save;
+    }
+
+    /// <summary>Replaces every antibody with the saved ones, in the same order (call once the creatures are back).
+    /// Cell signals come back with their cells (CellSignal is an IWorldState).</summary>
+    public static void Restore(Save save)
+    {
+        ImmuneSystem s = s_instance;
+        if (!s || save == null) return;
+        foreach (Antibody a in s._antibodies)
+        {
+            if (!a) continue;
+            a.gameObject.SetActive(false); // lets go of its slot now, before the new ones claim theirs
+            Destroy(a.gameObject);
+        }
+        s._antibodies.Clear();
+        s._owed.Clear();
+        foreach (Antibody.Saved saved in save.antibodies)
+            if (saved != null) s.Spawn(saved.position).Restore(saved, s);
+    }
 
     void Start()
     {
@@ -313,7 +366,7 @@ public class ImmuneSystem : MonoBehaviour
         return p;
     }
 
-    void Spawn(Vector3 at)
+    Antibody Spawn(Vector3 at)
     {
         var go = new GameObject("Antibody");
         go.transform.SetPositionAndRotation(at, Random.rotation);
@@ -329,6 +382,7 @@ public class ImmuneSystem : MonoBehaviour
         var a = go.AddComponent<Antibody>();
         a.LastTick = Time.time;
         _antibodies.Add(a);
+        return a;
     }
 
     void Meshes()
